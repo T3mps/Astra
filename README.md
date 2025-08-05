@@ -8,15 +8,7 @@ A modern Entity Component System reimagined for contemporary CPU architectures a
 
 ## 🌟 Overview
 
-Astra is a high-performance Entity Component System that breaks from 15+ years of established ECS patterns. Instead of traditional sparse-set implementations with multiple indirections, Astra uses a SwissTable-inspired `FlatMap` for direct entity-to-component mapping.
-
-```cpp
-// Traditional ECS: Entity → Sparse Array → Dense Array → Component
-auto* component = sparse[entity] != INVALID ? &dense[sparse[entity]] : nullptr;
-
-// Astra: Entity → Component (direct mapping)
-auto* component = pool.TryGet(entity);
-```
+Astra is a high-performance Entity Component System.
 
 ## 📄 License
 
