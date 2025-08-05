@@ -11,7 +11,7 @@ A modern Entity Component System reimagined for contemporary CPU architectures a
 ## Benchmark
 
 ```
-=== ARCHETYPE ECS BENCHMARK ===
+=== ASTRA ECS BENCHMARK ===
 Testing multi-component iteration performance
 
 
