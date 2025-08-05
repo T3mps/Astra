@@ -16,118 +16,118 @@ Testing multi-component iteration performance
 
 
 --- 1000 Entities ---
-Setup time: 0.5069 ms
+Setup time: 0.4252 ms
 Entities with Pos: 1000
 Entities with Pos+Vel: 800
 Entities with Pos+Vel+Health: 600
 Entities with all 4 components: 400
 
-Position iteration                 :      0.001 ms (stddev=   0.009, min=   0.000, max=   0.266)
-  Per entity                       :      1.258 ns (stddev=   8.634, min=   0.400, max= 265.500)
-Position + Velocity iteration      :      0.001 ms (stddev=   0.001, min=   0.000, max=   0.025)
-  Per entity                       :      0.970 ns (stddev=   1.520, min=   0.500, max=  31.250)
-Pos + Vel + Health iteration       :      0.000 ms (stddev=   0.000, min=   0.000, max=   0.009)
-  Per entity                       :      0.528 ns (stddev=   0.494, min=   0.333, max=  15.833)
-All 4 components iteration         :      0.000 ms (stddev=   0.000, min=   0.000, max=   0.011)
-  Per entity                       :      0.796 ns (stddev=   0.942, min=   0.500, max=  28.750)
+Position iteration                 :      0.000 ms (stddev=   0.000, min=   0.000, max=   0.006)
+  Per entity                       :      0.459 ns (stddev=   0.180, min=   0.400, max=   5.900)
+Position + Velocity iteration      :      0.001 ms (stddev=   0.000, min=   0.000, max=   0.007)
+  Per entity                       :      0.662 ns (stddev=   0.257, min=   0.500, max=   8.375)
+Pos + Vel + Health iteration       :      0.000 ms (stddev=   0.000, min=   0.000, max=   0.006)
+  Per entity                       :      0.493 ns (stddev=   0.306, min=   0.333, max=  10.000)
+All 4 components iteration         :      0.000 ms (stddev=   0.000, min=   0.000, max=   0.000)
+  Per entity                       :      0.581 ns (stddev=   0.117, min=   0.500, max=   0.750)
 
 Random access (1000 entities):
-  Time                             :      0.039 ms (stddev=   0.009, min=   0.036, max=   0.180)
+  Time                             :      0.037 ms (stddev=   0.004, min=   0.035, max=   0.104)
 
 --- 10000 Entities ---
-Setup time: 1.728 ms
+Setup time: 1.563 ms
 Entities with Pos: 10000
 Entities with Pos+Vel: 8000
 Entities with Pos+Vel+Health: 6000
 Entities with all 4 components: 4000
 
-Position iteration                 :      0.004 ms (stddev=   0.001, min=   0.004, max=   0.030)
-  Per entity                       :      0.447 ns (stddev=   0.097, min=   0.430, max=   3.030)
-Position + Velocity iteration      :      0.006 ms (stddev=   0.000, min=   0.004, max=   0.014)
-  Per entity                       :      0.690 ns (stddev=   0.052, min=   0.537, max=   1.738)
-Pos + Vel + Health iteration       :      0.003 ms (stddev=   0.001, min=   0.003, max=   0.019)
-  Per entity                       :      0.465 ns (stddev=   0.101, min=   0.433, max=   3.183)
-All 4 components iteration         :      0.003 ms (stddev=   0.008, min=   0.002, max=   0.128)
-  Per entity                       :      0.724 ns (stddev=   2.001, min=   0.500, max=  32.000)
+Position iteration                 :      0.004 ms (stddev=   0.001, min=   0.004, max=   0.031)
+  Per entity                       :      0.447 ns (stddev=   0.147, min=   0.420, max=   3.090)
+Position + Velocity iteration      :      0.004 ms (stddev=   0.000, min=   0.004, max=   0.009)
+  Per entity                       :      0.537 ns (stddev=   0.025, min=   0.525, max=   1.188)
+Pos + Vel + Health iteration       :      0.003 ms (stddev=   0.000, min=   0.003, max=   0.009)
+  Per entity                       :      0.462 ns (stddev=   0.050, min=   0.450, max=   1.583)
+All 4 components iteration         :      0.002 ms (stddev=   0.000, min=   0.002, max=   0.009)
+  Per entity                       :      0.525 ns (stddev=   0.065, min=   0.500, max=   2.300)
 
 Random access (1000 entities):
-  Time                             :      0.038 ms (stddev=   0.005, min=   0.036, max=   0.157)
+  Time                             :      0.038 ms (stddev=   0.005, min=   0.036, max=   0.133)
 
 --- 50000 Entities ---
-Setup time: 6.983 ms
+Setup time: 6.997 ms
 Entities with Pos: 50000
 Entities with Pos+Vel: 40000
 Entities with Pos+Vel+Health: 30000
 Entities with all 4 components: 20000
 
-Position iteration                 :      0.025 ms (stddev=   0.007, min=   0.022, max=   0.107)
-  Per entity                       :      0.494 ns (stddev=   0.144, min=   0.436, max=   2.138)
-Position + Velocity iteration      :      0.029 ms (stddev=   0.006, min=   0.028, max=   0.185)
-  Per entity                       :      0.734 ns (stddev=   0.140, min=   0.690, max=   4.625)
-Pos + Vel + Health iteration       :      0.018 ms (stddev=   0.006, min=   0.016, max=   0.127)
-  Per entity                       :      0.587 ns (stddev=   0.203, min=   0.523, max=   4.217)
-All 4 components iteration         :      0.012 ms (stddev=   0.003, min=   0.011, max=   0.113)
-  Per entity                       :      0.589 ns (stddev=   0.170, min=   0.535, max=   5.665)
+Position iteration                 :      0.023 ms (stddev=   0.002, min=   0.022, max=   0.061)
+  Per entity                       :      0.453 ns (stddev=   0.041, min=   0.442, max=   1.224)
+Position + Velocity iteration      :      0.027 ms (stddev=   0.007, min=   0.023, max=   0.166)
+  Per entity                       :      0.681 ns (stddev=   0.164, min=   0.580, max=   4.147)
+Pos + Vel + Health iteration       :      0.017 ms (stddev=   0.007, min=   0.015, max=   0.157)
+  Per entity                       :      0.579 ns (stddev=   0.229, min=   0.513, max=   5.247)
+All 4 components iteration         :      0.013 ms (stddev=   0.006, min=   0.011, max=   0.114)
+  Per entity                       :      0.636 ns (stddev=   0.276, min=   0.530, max=   5.685)
 
 Random access (1000 entities):
-  Time                             :      0.039 ms (stddev=   0.014, min=   0.036, max=   0.391)
+  Time                             :      0.039 ms (stddev=   0.008, min=   0.037, max=   0.188)
 
 --- 100000 Entities ---
-Setup time: 13.452 ms
+Setup time: 13.690 ms
 Entities with Pos: 100000
 Entities with Pos+Vel: 80000
 Entities with Pos+Vel+Health: 60000
 Entities with all 4 components: 40000
 
-Position iteration                 :      0.047 ms (stddev=   0.008, min=   0.044, max=   0.163)
-  Per entity                       :      0.467 ns (stddev=   0.083, min=   0.437, max=   1.632)
-Position + Velocity iteration      :      0.058 ms (stddev=   0.010, min=   0.047, max=   0.167)
-  Per entity                       :      0.722 ns (stddev=   0.128, min=   0.583, max=   2.084)
-Pos + Vel + Health iteration       :      0.034 ms (stddev=   0.004, min=   0.032, max=   0.110)
-  Per entity                       :      0.568 ns (stddev=   0.065, min=   0.538, max=   1.827)
-All 4 components iteration         :      0.033 ms (stddev=   0.011, min=   0.027, max=   0.197)
-  Per entity                       :      0.817 ns (stddev=   0.280, min=   0.685, max=   4.933)
+Position iteration                 :      0.049 ms (stddev=   0.015, min=   0.044, max=   0.338)
+  Per entity                       :      0.487 ns (stddev=   0.145, min=   0.438, max=   3.384)
+Position + Velocity iteration      :      0.050 ms (stddev=   0.008, min=   0.046, max=   0.231)
+  Per entity                       :      0.627 ns (stddev=   0.104, min=   0.581, max=   2.882)
+Pos + Vel + Health iteration       :      0.039 ms (stddev=   0.018, min=   0.032, max=   0.291)
+  Per entity                       :      0.643 ns (stddev=   0.303, min=   0.538, max=   4.852)
+All 4 components iteration         :      0.030 ms (stddev=   0.002, min=   0.029, max=   0.089)
+  Per entity                       :      0.756 ns (stddev=   0.060, min=   0.725, max=   2.232)
 
 Random access (1000 entities):
-  Time                             :      0.044 ms (stddev=   0.018, min=   0.037, max=   0.305)
+  Time                             :      0.040 ms (stddev=   0.021, min=   0.037, max=   0.669)
 
 --- 500000 Entities ---
-Setup time: 96.015 ms
+Setup time: 94.866 ms
 Entities with Pos: 500000
 Entities with Pos+Vel: 400000
 Entities with Pos+Vel+Health: 300000
 Entities with all 4 components: 200000
 
-Position iteration                 :      0.387 ms (stddev=   0.078, min=   0.298, max=   0.880)
-  Per entity                       :      0.773 ns (stddev=   0.156, min=   0.595, max=   1.760)
-Position + Velocity iteration      :      0.444 ms (stddev=   0.160, min=   0.339, max=   3.426)
-  Per entity                       :      1.110 ns (stddev=   0.399, min=   0.847, max=   8.564)
-Pos + Vel + Health iteration       :      0.327 ms (stddev=   0.143, min=   0.232, max=   2.128)
-  Per entity                       :      1.091 ns (stddev=   0.478, min=   0.772, max=   7.093)
-All 4 components iteration         :      0.248 ms (stddev=   0.217, min=   0.157, max=   3.546)
-  Per entity                       :      1.239 ns (stddev=   1.083, min=   0.785, max=  17.730)
+Position iteration                 :      0.339 ms (stddev=   0.045, min=   0.293, max=   0.754)
+  Per entity                       :      0.679 ns (stddev=   0.091, min=   0.586, max=   1.507)
+Position + Velocity iteration      :      0.460 ms (stddev=   0.251, min=   0.335, max=   7.471)
+  Per entity                       :      1.151 ns (stddev=   0.628, min=   0.838, max=  18.678)
+Pos + Vel + Health iteration       :      0.334 ms (stddev=   0.096, min=   0.241, max=   1.341)
+  Per entity                       :      1.115 ns (stddev=   0.320, min=   0.804, max=   4.469)
+All 4 components iteration         :      0.245 ms (stddev=   0.083, min=   0.164, max=   0.707)
+  Per entity                       :      1.227 ns (stddev=   0.416, min=   0.818, max=   3.534)
 
 Random access (1000 entities):
-  Time                             :      0.045 ms (stddev=   0.013, min=   0.042, max=   0.330)
+  Time                             :      0.049 ms (stddev=   0.011, min=   0.043, max=   0.189)
 
 --- 1000000 Entities ---
-Setup time: 218.002 ms
+Setup time: 188.677 ms
 Entities with Pos: 1000000
 Entities with Pos+Vel: 800000
 Entities with Pos+Vel+Health: 600000
 Entities with all 4 components: 400000
 
-Position iteration                 :      1.094 ms (stddev=   0.332, min=   0.833, max=   7.809)
-  Per entity                       :      1.094 ns (stddev=   0.332, min=   0.833, max=   7.809)
-Position + Velocity iteration      :      1.571 ms (stddev=   0.442, min=   1.127, max=   6.213)
-  Per entity                       :      1.964 ns (stddev=   0.553, min=   1.409, max=   7.766)
-Pos + Vel + Health iteration       :      1.137 ms (stddev=   0.182, min=   0.840, max=   2.450)
-  Per entity                       :      1.894 ns (stddev=   0.303, min=   1.401, max=   4.083)
-All 4 components iteration         :      0.769 ms (stddev=   0.428, min=   0.503, max=  12.526)
-  Per entity                       :      1.923 ns (stddev=   1.070, min=   1.258, max=  31.316)
+Position iteration                 :      0.925 ms (stddev=   0.200, min=   0.736, max=   2.067)
+  Per entity                       :      0.925 ns (stddev=   0.200, min=   0.736, max=   2.067)
+Position + Velocity iteration      :      1.296 ms (stddev=   0.241, min=   0.961, max=   2.870)
+  Per entity                       :      1.620 ns (stddev=   0.301, min=   1.202, max=   3.587)
+Pos + Vel + Health iteration       :      0.975 ms (stddev=   0.167, min=   0.738, max=   1.998)
+  Per entity                       :      1.625 ns (stddev=   0.278, min=   1.230, max=   3.329)
+All 4 components iteration         :      0.711 ms (stddev=   0.179, min=   0.515, max=   2.508)
+  Per entity                       :      1.778 ns (stddev=   0.447, min=   1.286, max=   6.270)
 
 Random access (1000 entities):
-  Time                             :      0.052 ms (stddev=   0.010, min=   0.047, max=   0.204)
+  Time                             :      0.049 ms (stddev=   0.008, min=   0.046, max=   0.174)
 ```
 
 ## 📄 License
