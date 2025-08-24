@@ -275,63 +275,100 @@ void UpdateWorldTransforms(Astra::Registry& registry, Astra::Entity root) {
 ## Benchmarking
 
 Run the included benchmarks!
-
-```bash
+<details>
+<summary><b>📊 View Benchmark Results</b> (Click to expand)</summary>
+<pre>
 Run on (20 X 3610 MHz CPU s)
 CPU Caches:
   L1 Data 48 KiB (x10)
   L1 Instruction 32 KiB (x10)
   L2 Unified 1280 KiB (x10)
   L3 Unified 25600 KiB (x1)
------------------------------------------------------------------------------------------------
-Benchmark                                     Time             CPU   Iterations UserCounters...
------------------------------------------------------------------------------------------------
-BM_CreateEntities/10000                 2360936 ns      2351589 ns          299 items_per_second=4.25244M/s
-BM_CreateEntities/100000               21498662 ns     21484375 ns           32 items_per_second=4.65455M/s
-BM_CreateEntities/1000000             268167600 ns    270833333 ns            3 items_per_second=3.69231M/s
-BM_CreateEntitiesBatch/10000            1092974 ns      1098633 ns          640 items_per_second=9.10222M/s
-BM_CreateEntitiesBatch/100000          12828623 ns     12276786 ns           56 items_per_second=8.14545M/s
-BM_CreateEntitiesBatch/1000000        193051900 ns    191406250 ns            4 items_per_second=5.22449M/s
-BM_AddComponents/10000                  2596141 ns      2259036 ns          249 items_per_second=8.85333M/s
-BM_AddComponents/100000                28814623 ns     29829545 ns           22 items_per_second=6.70476M/s
-BM_AddComponents/1000000              424144600 ns    429687500 ns            2 items_per_second=4.65455M/s
-BM_RemoveComponents/10000               2002010 ns      1988002 ns          448 items_per_second=5.03018M/s
-BM_RemoveComponents/100000             22746728 ns     18554688 ns           32 items_per_second=5.38947M/s
-BM_RemoveComponents/1000000           339848600 ns    335937500 ns            2 items_per_second=2.97674M/s
-BM_IterateSingleComponent/10000           10210 ns        10254 ns        64000 items_per_second=975.238M/s
-BM_IterateSingleComponent/100000         109692 ns       109863 ns         6400 items_per_second=910.222M/s
-BM_IterateSingleComponent/1000000       1397911 ns      1380522 ns          498 items_per_second=724.364M/s
-BM_IterateTwoComponents/10000             21495 ns        21484 ns        32000 items_per_second=465.455M/s
-BM_IterateTwoComponents/100000           230868 ns       230164 ns         2987 items_per_second=434.473M/s
-BM_IterateTwoComponents/1000000         3482104 ns      3447770 ns          213 items_per_second=290.043M/s
-BM_IterateTwoComponentsHalf/10000         11996 ns        11998 ns        56000 items_per_second=416.744M/s
-BM_IterateTwoComponentsHalf/100000       127255 ns       125552 ns         4978 items_per_second=398.24M/s
-BM_IterateTwoComponentsHalf/1000000     1535674 ns      1534598 ns          448 items_per_second=325.818M/s
-BM_IterateTwoComponentsOne/10000           4.03 ns         4.01 ns    179200000 items_per_second=249.322M/s
-BM_IterateTwoComponentsOne/100000          3.98 ns         3.90 ns    172307692 items_per_second=256.458M/s
-BM_IterateTwoComponentsOne/1000000         3.98 ns         3.90 ns    172307692 items_per_second=256.458M/s
-BM_IterateThreeComponents/10000           28744 ns        28878 ns        24889 items_per_second=346.282M/s
-BM_IterateThreeComponents/100000         303046 ns       304813 ns         2358 items_per_second=328.07M/s
-BM_IterateThreeComponents/1000000       5032185 ns      4800452 ns          166 items_per_second=208.314M/s
-BM_IterateFiveComponents/10000            44993 ns        44922 ns        16000 items_per_second=222.609M/s
-BM_IterateFiveComponents/100000          473957 ns       450017 ns         1493 items_per_second=222.214M/s
-BM_IterateFiveComponents/1000000        5792779 ns      5859375 ns          112 items_per_second=170.667M/s
-BM_GetComponent/10000                    223689 ns       219727 ns         3200 items_per_second=45.5111M/s
-BM_GetComponent/100000                  3049325 ns      3012048 ns          249 items_per_second=33.2M/s
-BM_GetComponent/1000000                80999571 ns     82589286 ns            7 items_per_second=12.1081M/s
-BM_GetMultipleComponents/10000           361544 ns       360695 ns         2036 items_per_second=55.4485M/s
-BM_GetMultipleComponents/100000         4726483 ns      4718960 ns          149 items_per_second=42.3822M/s
-BM_GetMultipleComponents/1000000      156609500 ns    156250000 ns            5 items_per_second=12.8M/s
-BM_HierarchyTraversal/1000               167075 ns       167411 ns         4480 items_per_second=8.1536M/s
-BM_HierarchyTraversal/10000              164674 ns       163923 ns         4480 items_per_second=8.32708M/s
-BM_HierarchyTraversal/100000           14780162 ns     13935811 ns           37 items_per_second=4.01749M/s
-BM_HierarchyForEach/1000                 205527 ns       195312 ns         3200 items_per_second=6.9888M/s
-BM_HierarchyForEach/10000                211764 ns       209961 ns         3200 items_per_second=6.50121M/s
-BM_HierarchyForEach/100000             13131222 ns     13194444 ns           45 items_per_second=4.24323M/s
-BM_FilteredHierarchyTraversal/1000       194031 ns       188354 ns         3733 items_per_second=3.62084M/s
-BM_FilteredHierarchyTraversal/10000      187650 ns       188354 ns         3733 items_per_second=3.62084M/s
-BM_FilteredHierarchyTraversal/100000   13380480 ns     13392857 ns           56 items_per_second=2.09014M/s
-```
+------------------------------------------------------------------------------------------------------
+Benchmark                                            Time             CPU   Iterations UserCounters...
+------------------------------------------------------------------------------------------------------
+BM_CreateEntities/10000                        1699554 ns      1675603 ns          373 items_per_second=5.968M/s
+BM_CreateEntities/100000                      19845462 ns     19847973 ns           37 items_per_second=5.0383M/s
+BM_CreateEntities/1000000                    418826150 ns    421875000 ns            2 items_per_second=2.37037M/s
+BM_CreateEntitiesBatch/10000                   1201376 ns      1123047 ns          640 items_per_second=8.90435M/s
+BM_CreateEntitiesBatch/100000                 13220805 ns     12957317 ns           41 items_per_second=7.71765M/s
+BM_CreateEntitiesBatch/1000000               261201800 ns    260416667 ns            3 items_per_second=3.84M/s
+BM_AddComponents/10000                         2795297 ns      2567488 ns          213 items_per_second=7.78971M/s
+BM_AddComponents/100000                       31252659 ns     31250000 ns           22 items_per_second=6.4M/s
+BM_AddComponents/1000000                     329732600 ns    335937500 ns            2 items_per_second=5.95349M/s
+BM_RemoveComponents/10000                      1833717 ns      1708984 ns          320 items_per_second=5.85143M/s
+BM_RemoveComponents/100000                    22870235 ns     22518382 ns           34 items_per_second=4.44082M/s
+BM_RemoveComponents/1000000                  314693700 ns    312500000 ns            2 items_per_second=3.2M/s
+BM_AddComponentsBatch/10000                    3015544 ns      3373580 ns          264 items_per_second=5.92842M/s
+BM_AddComponentsBatch/100000                  35663590 ns     31250000 ns           21 items_per_second=6.4M/s
+BM_AddComponentsBatch/1000000                322411300 ns    328125000 ns            2 items_per_second=6.09524M/s
+BM_RemoveComponentsBatch/10000                 1492361 ns      1674107 ns          448 items_per_second=5.97333M/s
+BM_RemoveComponentsBatch/100000               19771757 ns     19425676 ns           37 items_per_second=5.14783M/s
+BM_RemoveComponentsBatch/1000000             232845400 ns    229166667 ns            3 items_per_second=4.36364M/s
+BM_IterateSingleComponent/10000                  10194 ns        10045 ns        74667 items_per_second=995.56M/s
+BM_IterateSingleComponent/100000                114100 ns       112305 ns         6400 items_per_second=890.435M/s
+BM_IterateSingleComponent/1000000              1180738 ns      1196289 ns          640 items_per_second=835.918M/s
+BM_IterateTwoComponents/10000                    22108 ns        22461 ns        32000 items_per_second=445.217M/s
+BM_IterateTwoComponents/100000                  232710 ns       235395 ns         2987 items_per_second=424.818M/s
+BM_IterateTwoComponents/1000000                2683937 ns      2698293 ns          249 items_per_second=370.605M/s
+BM_IterateTwoComponentsHalf/10000                11740 ns        11719 ns        56000 items_per_second=426.667M/s
+BM_IterateTwoComponentsHalf/100000              113819 ns       114746 ns         6400 items_per_second=435.745M/s
+BM_IterateTwoComponentsHalf/1000000            1247279 ns      1227679 ns          560 items_per_second=407.273M/s
+BM_IterateTwoComponentsOne/10000                  4.18 ns         4.08 ns    172307692 items_per_second=245.06M/s
+BM_IterateTwoComponentsOne/100000                 4.21 ns         4.24 ns    165925926 items_per_second=235.984M/s
+BM_IterateTwoComponentsOne/1000000                4.21 ns         4.20 ns    160000000 items_per_second=238.14M/s
+BM_IterateThreeComponents/10000                  30004 ns        29646 ns        26353 items_per_second=337.318M/s
+BM_IterateThreeComponents/100000                295686 ns       291561 ns         2358 items_per_second=342.982M/s
+BM_IterateThreeComponents/1000000              4757289 ns      4632994 ns          172 items_per_second=215.843M/s
+BM_IterateFiveComponents/10000                   45117 ns        44993 ns        14933 items_per_second=222.259M/s
+BM_IterateFiveComponents/100000                 464404 ns       464965 ns         1445 items_per_second=215.07M/s
+BM_IterateFiveComponents/1000000               5423535 ns      5301339 ns          112 items_per_second=188.632M/s
+BM_ThreadInfo                                      565 ns          572 ns      1120000 Hardware Threads: 20
+BM_ParallelIterateSingleComponent/10000          31182 ns        10358 ns        49778 items_per_second=965.392M/s
+BM_ParallelIterateSingleComponent/100000        226136 ns        19252 ns        37333 items_per_second=5.19416G/s
+BM_ParallelIterateSingleComponent/1000000      2196255 ns        43750 ns        10000 items_per_second=22.8571G/s
+BM_ParallelIterateTwoComponents/10000            50692 ns        17787 ns        29867 items_per_second=562.202M/s
+BM_ParallelIterateTwoComponents/100000          424822 ns        23717 ns        11200 items_per_second=4.21647G/s
+BM_ParallelIterateTwoComponents/1000000        4259113 ns        46875 ns         1000 items_per_second=21.3333G/s
+BM_ParallelIterateTwoComponentsHalf/10000        30784 ns        12905 ns        89600 items_per_second=387.459M/s
+BM_ParallelIterateTwoComponentsHalf/100000      217012 ns        19392 ns       112000 items_per_second=2.57842G/s
+BM_ParallelIterateTwoComponentsHalf/1000000    2119719 ns        36272 ns         5600 items_per_second=13.7846G/s
+BM_ParallelIterateTwoComponentsOne/10000          6.15 ns         6.14 ns    112000000 items_per_second=162.909M/s
+BM_ParallelIterateTwoComponentsOne/100000         6.17 ns         6.14 ns    112000000 items_per_second=162.909M/s
+BM_ParallelIterateTwoComponentsOne/1000000        6.10 ns         6.14 ns    112000000 items_per_second=162.909M/s
+BM_ParallelIterateThreeComponents/10000          68054 ns        14893 ns        64000 items_per_second=671.475M/s
+BM_ParallelIterateThreeComponents/100000        596930 ns        26562 ns        10000 items_per_second=3.76471G/s
+BM_ParallelIterateThreeComponents/1000000      5955497 ns       140625 ns         1000 items_per_second=7.11111G/s
+BM_ParallelIterateFiveComponents/10000          100959 ns        16044 ns        89600 items_per_second=623.304M/s
+BM_ParallelIterateFiveComponents/100000         966520 ns        34375 ns        10000 items_per_second=2.90909G/s
+BM_ParallelIterateFiveComponents/1000000       9728347 ns       140625 ns         1000 items_per_second=7.11111G/s
+BM_GetComponent/10000                           108224 ns       104980 ns         6400 items_per_second=95.2558M/s
+BM_GetComponent/100000                         1780665 ns      1801273 ns          373 items_per_second=55.5163M/s
+BM_GetComponent/1000000                       67075456 ns     65972222 ns            9 items_per_second=15.1579M/s
+BM_GetMultipleComponents/10000                  166540 ns       164958 ns         4073 items_per_second=121.243M/s
+BM_GetMultipleComponents/100000                2697545 ns      2698293 ns          249 items_per_second=74.1209M/s
+BM_GetMultipleComponents/1000000              93243686 ns     93750000 ns            7 items_per_second=21.3333M/s
+BM_HierarchyTraversal/1000                      262696 ns       245536 ns         2800 items_per_second=5.55927M/s
+BM_HierarchyTraversal/10000                     258252 ns       256696 ns         2800 items_per_second=5.31757M/s
+BM_HierarchyTraversal/100000                  11633988 ns     11718750 ns           56 items_per_second=4.77756M/s
+BM_HierarchyForEach/1000                        205375 ns       205078 ns         3200 items_per_second=6.656M/s
+BM_HierarchyForEach/10000                       208496 ns       205078 ns         3200 items_per_second=6.656M/s
+BM_HierarchyForEach/100000                    10072355 ns     10000000 ns           75 items_per_second=5.5987M/s
+BM_FilteredHierarchyTraversal/1000              267361 ns       266841 ns         2635 items_per_second=2.55583M/s
+BM_FilteredHierarchyTraversal/10000             268564 ns       266841 ns         2635 items_per_second=2.55583M/s
+BM_FilteredHierarchyTraversal/100000          13146475 ns     12834821 ns           56 items_per_second=2.18102M/s
+BM_SystemScheduler_Sequential/10000              12634 ns        11998 ns        56000 items_per_second=2.50047G/s
+BM_SystemScheduler_Sequential/100000            141028 ns       141246 ns         4978 items_per_second=2.12395G/s
+BM_SystemScheduler_Lambda/10000                   9824 ns         9835 ns        74667 items_per_second=2.03348G/s
+BM_SystemScheduler_Lambda/100000                126389 ns       119978 ns         5600 items_per_second=1.66698G/s
+BM_SystemScheduler_Parallel/10000                10895 ns        10742 ns        64000 items_per_second=3.72364G/s
+BM_SystemScheduler_Parallel/100000              137460 ns       136021 ns         4480 items_per_second=2.94072G/s
+BM_SystemScheduler_ManyIndependent                7456 ns         7254 ns       112000 items_per_second=689.231k/s
+BM_SystemScheduler_WithDependencies              32492 ns        32227 ns        21333 items_per_second=1.55149G/s
+BM_SystemScheduler_CustomExecutor/10000           9802 ns         9766 ns        64000 items_per_second=2.048G/s
+BM_SystemScheduler_CustomExecutor/100000        122388 ns       119978 ns         5600 items_per_second=1.66698G/s
+</pre>
+</details>
 
 ## Contributing
 
