@@ -387,5 +387,6 @@ Astra is available under the MIT License. See LICENSE file for details.
 
 Inspired by:
 - [EnTT](https://github.com/skypjack/entt) - Modern C++ ECS
-- [Flecs](https://github.com/SanderMertens/flecs) - Fast and lightweight ECS
+- [Flecs](https://github.com/SanderMertens/flecs) - Fast and lightweight C ECS
 - [DOTS](https://unity.com/dots) - Unity's Data-Oriented Technology Stack
+- [Mass](https://dev.epicgames.com/documentation/en-us/unreal-engine/mass-entity-in-unreal-engine) - Unreal Mass Entity
