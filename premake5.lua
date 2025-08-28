@@ -65,9 +65,16 @@ workspace "Astra"
                 systemversion "latest"
                 buildoptions { 
                     "/Zc:__cplusplus",      -- Enable proper __cplusplus macro
+                    "/arch:AVX",            -- Enable up to AVX (includes SSE4.2) - matching benchmark
                     "/diagnostics:column",  -- Show column info in errors
                     "/diagnostics:caret",   -- Show carets pointing to errors
-                    "/bigobj"               -- Allow larger object files (helps with templates)
+                    "/bigobj",              -- Allow larger object files (helps with templates)
+                    "/fp:fast",             -- Fast floating point - matching benchmark
+                    "/openmp:experimental"  -- Enable OpenMP SIMD support
+                }
+                defines { 
+                    "__SSE2__",             -- Define SSE2 support - matching benchmark
+                    "__SSE4_2__"            -- Define SSE4.2 support (for CRC32) - matching benchmark
                 }
                 
             filter "system:linux"
@@ -77,7 +84,8 @@ workspace "Astra"
                     "-Wextra", 
                     "-Wpedantic",
                     "-fdiagnostics-color=always",
-                    "-ftemplate-backtrace-limit=0"
+                    "-ftemplate-backtrace-limit=0",
+                    "-fopenmp"              -- Enable OpenMP SIMD support
                 }
                 
             filter "system:macosx"
@@ -86,7 +94,8 @@ workspace "Astra"
                     "-Wextra", 
                     "-Wpedantic",
                     "-fdiagnostics-color=always",
-                    "-ftemplate-backtrace-limit=0"
+                    "-ftemplate-backtrace-limit=0",
+                    "-fopenmp"              -- Enable OpenMP SIMD support (requires libomp)
                 }
             
             filter "configurations:Debug"
@@ -102,7 +111,7 @@ workspace "Astra"
                 optimize "speed"
                 symbols "on"
                 exceptionhandling "off"
-                rtti "on"
+                rtti "on"  -- GoogleTest requires RTTI
                 defines { "ASTRA_BUILD_RELEASE", "NDEBUG", "GTEST_HAS_EXCEPTIONS=0" }
                 
             filter "configurations:Dist"
@@ -143,19 +152,20 @@ workspace "Astra"
             
             defines
             {
-                "BENCHMARK_STATIC_DEFINE"  -- Required when linking static benchmark lib
+                "BENCHMARK_STATIC_DEFINE"   -- Required when linking static benchmark lib
             }
             
             filter "system:windows"
                 systemversion "latest"
-                links { "shlwapi" }  -- Required by Google Benchmark for SHGetValueA
+                links { "shlwapi" }         -- Required by Google Benchmark for SHGetValueA
                 buildoptions { 
                     "/Zc:__cplusplus",      -- Enable proper __cplusplus macro
                     "/arch:AVX",            -- Enable up to AVX (includes SSE4.2)
                     "/diagnostics:column",  -- Show column info in errors
                     "/diagnostics:caret",   -- Show carets pointing to errors
                     "/bigobj",              -- Allow larger object files
-                    "/fp:fast"              -- Fast floating point
+                    "/fp:fast",             -- Fast floating point
+                    "/openmp:experimental"  -- Enable OpenMP SIMD support
                 }
                 defines { 
                     "__SSE2__",             -- Define SSE2 support
@@ -176,7 +186,8 @@ workspace "Astra"
                     "-mpclmul",             -- Sometimes needed for CRC32
                     "-ffast-math",          -- Fast floating point
                     "-funroll-loops",       -- Unroll loops
-                    "-ftree-vectorize"      -- Auto-vectorization
+                    "-ftree-vectorize",     -- Auto-vectorization
+                    "-fopenmp"              -- Enable OpenMP SIMD support
                 }
                 
             filter "system:macosx"
@@ -191,7 +202,8 @@ workspace "Astra"
                     "-msse4.2",             -- Enable SSE4.2
                     "-ffast-math",          -- Fast floating point
                     "-funroll-loops",       -- Unroll loops
-                    "-ftree-vectorize"      -- Auto-vectorization
+                    "-ftree-vectorize",     -- Auto-vectorization
+                    "-fopenmp"              -- Enable OpenMP SIMD support
                 }
             
             filter "configurations:Debug"

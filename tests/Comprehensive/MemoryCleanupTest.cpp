@@ -63,7 +63,6 @@ TEST_F(MemoryCleanupTest, MemoryReleasedAfterDestruction)
     EXPECT_GT(afterDestroyMemory, 0u) << "Some memory still allocated in pools";
     
     Registry::DefragmentationOptions options;
-    options.minEmptyDuration = 0;
     options.minArchetypesToKeep = 1;
     
     auto result = registry->Defragment(options);
@@ -85,10 +84,10 @@ TEST_F(MemoryCleanupTest, RapidArchetypeTransitionCleanup)
     
     for (int iteration = 0; iteration < 50; ++iteration)
     {
-        registry->AddComponent<Position>(entity);
-        registry->AddComponent<Velocity>(entity);
-        registry->AddComponent<Health>(entity);
-        registry->AddComponent<Transform>(entity);
+        registry->EmplaceComponent<Position>(entity);
+        registry->EmplaceComponent<Velocity>(entity);
+        registry->EmplaceComponent<Health>(entity);
+        registry->EmplaceComponent<Transform>(entity);
         
         memorySamples.push_back(GetCurrentMemoryUsage());
         
@@ -107,7 +106,6 @@ TEST_F(MemoryCleanupTest, RapidArchetypeTransitionCleanup)
     registry->DestroyEntity(entity);
     
     Registry::DefragmentationOptions options;
-    options.minEmptyDuration = 0;
     auto result = registry->Defragment(options);
     size_t cleaned = result.archetypesRemoved;
     
@@ -189,7 +187,7 @@ TEST_F(MemoryCleanupTest, ComponentSizeMemoryUsage)
     for (int i = 0; i < 100; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent<LargeComponent>(e);
+        registry->EmplaceComponent<LargeComponent>(e);
         largeEntities.push_back(e);
     }
     
@@ -202,7 +200,7 @@ TEST_F(MemoryCleanupTest, ComponentSizeMemoryUsage)
     for (int i = 0; i < 100; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent<MediumComponent>(e);
+        registry->EmplaceComponent<MediumComponent>(e);
         mediumEntities.push_back(e);
     }
     
@@ -214,7 +212,6 @@ TEST_F(MemoryCleanupTest, ComponentSizeMemoryUsage)
     
     registry->Clear();
     Registry::DefragmentationOptions options;
-    options.minEmptyDuration = 0;
     registry->Defragment(options);
 }
 
@@ -229,10 +226,10 @@ TEST_F(MemoryCleanupTest, ArchetypeFragmentation)
         {
             Entity e = registry->CreateEntity();
             
-            if (archetype & 1) registry->AddComponent<Position>(e);
-            if (archetype & 2) registry->AddComponent<Velocity>(e);
-            if (archetype & 4) registry->AddComponent<Health>(e);
-            if (archetype & 8) registry->AddComponent<Transform>(e);
+            if (archetype & 1) registry->EmplaceComponent<Position>(e);
+            if (archetype & 2) registry->EmplaceComponent<Velocity>(e);
+            if (archetype & 4) registry->EmplaceComponent<Health>(e);
+            if (archetype & 8) registry->EmplaceComponent<Transform>(e);
             
             group.push_back(e);
         }
@@ -258,10 +255,10 @@ TEST_F(MemoryCleanupTest, ArchetypeFragmentation)
     {
         Entity e = registry->CreateEntity();
         int archetype = i % 10;
-        if (archetype & 1) registry->AddComponent<Position>(e);
-        if (archetype & 2) registry->AddComponent<Velocity>(e);
-        if (archetype & 4) registry->AddComponent<Health>(e);
-        if (archetype & 8) registry->AddComponent<Transform>(e);
+        if (archetype & 1) registry->EmplaceComponent<Position>(e);
+        if (archetype & 2) registry->EmplaceComponent<Velocity>(e);
+        if (archetype & 4) registry->EmplaceComponent<Health>(e);
+        if (archetype & 8) registry->EmplaceComponent<Transform>(e);
     }
     
     size_t refilledMemory = GetCurrentMemoryUsage();
@@ -284,7 +281,7 @@ TEST_F(MemoryCleanupTest, ClearMemoryCleanup)
         
         for (size_t i = 0; i < 100; ++i)
         {
-            registry->AddComponent<Health>(entities[i], 100, 100);
+            registry->EmplaceComponent<Health>(entities[i], 100, 100);
         }
     }
     
@@ -301,7 +298,6 @@ TEST_F(MemoryCleanupTest, ClearMemoryCleanup)
     size_t afterClear = GetCurrentMemoryUsage();
     
     Registry::DefragmentationOptions options;
-    options.minEmptyDuration = 0;
     registry->Defragment(options);
     
     size_t afterCleanup = GetCurrentMemoryUsage();
@@ -330,7 +326,6 @@ TEST_F(MemoryCleanupTest, CleanupOptionsRespected)
     size_t archetypesBefore = GetArchetypeCount();
     
     Registry::DefragmentationOptions options1;
-    options1.minEmptyDuration = 100;
     
     auto result1 = registry->Defragment(options1);
     size_t cleaned1 = result1.archetypesRemoved;
@@ -342,7 +337,6 @@ TEST_F(MemoryCleanupTest, CleanupOptionsRespected)
     }
     
     Registry::DefragmentationOptions options2;
-    options2.minEmptyDuration = 1;
     options2.maxArchetypesToRemove = 1;
     
     auto result2 = registry->Defragment(options2);
@@ -350,7 +344,6 @@ TEST_F(MemoryCleanupTest, CleanupOptionsRespected)
     EXPECT_LE(cleaned2, 1u) << "Should respect maxArchetypesToRemove";
     
     Registry::DefragmentationOptions options3;
-    options3.minEmptyDuration = 0;
     options3.minArchetypesToKeep = archetypesBefore;
     
     auto result3 = registry->Defragment(options3);

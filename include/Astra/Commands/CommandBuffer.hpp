@@ -1,9 +1,5 @@
 #pragma once
 
-#include "CommandTypes.hpp"
-#include "CommandStorage.hpp"
-#include "CommandExecutor.hpp"
-#include "../Registry/Registry.hpp"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -11,455 +7,580 @@
 #include <type_traits>
 #include <vector>
 
+#include "../Core/Delegate.hpp"
+#include "../Core/Result.hpp"
+#include "../Registry/Registry.hpp"
+#include "Command.hpp"
+
 namespace Astra
 {
-    /**
-     * Main interface for deferred command execution in Astra
-     * Provides a high-performance, cache-friendly way to batch operations
-     * 
-     * Example usage:
-     * @code
-     * CommandBuffer buffer(&registry);
-     * 
-     * // Record commands
-     * Entity e1 = buffer.CreateEntity();
-     * buffer.AddComponent(e1, Position{10, 20});
-     * buffer.AddComponent(e1, Velocity{1, 0});
-     * 
-     * // Execute all commands at once
-     * buffer.Execute();
-     * @endcode
-     */
+    
     class CommandBuffer
     {
-    private:
-        // Storage for non-templated commands
-        using BaseStorage = Commands::CommandStorage<
-            Commands::CreateEntity,
-            Commands::DestroyEntity,
-            Commands::CreateEntities,
-            Commands::DestroyEntities,
-            Commands::SetParent,
-            Commands::RemoveParent,
-            Commands::AddLink,
-            Commands::RemoveLink
-        >;
-        
-        // Executor for non-templated commands
-        using BaseExecutor = Commands::CommandExecutor<
-            Commands::CreateEntity,
-            Commands::DestroyEntity,
-            Commands::CreateEntities,
-            Commands::DestroyEntities,
-            Commands::SetParent,
-            Commands::RemoveParent,
-            Commands::AddLink,
-            Commands::RemoveLink
-        >;
-        
-        Registry* m_registry;
-        BaseStorage m_baseStorage;
-        BaseExecutor m_baseExecutor;
-        
-        // For component commands, we need type-erased storage
-        // This is a simplified approach - in production you might want a more sophisticated system
-        std::vector<std::function<void(Registry*)>> m_componentCommands;
-        
-        // Entity ID generator for temporary entities
-        mutable Entity::IDType m_nextTempId = std::numeric_limits<Entity::IDType>::max();
-        
     public:
-        /**
-         * Create a command buffer for a specific registry
-         * @param registry The registry to execute commands on
-         */
-        explicit CommandBuffer(Registry* registry)
-            : m_registry(registry)
-            , m_baseExecutor(registry)
+        enum class ExecutionError
+        {
+            None,
+            InvalidRegistry,
+            InvalidEntityManager,
+            CommandFailed
+        };
+        
+        explicit CommandBuffer(Registry* registry) :
+            m_registry(registry)
         {
             ASTRA_ASSERT(registry != nullptr, "Registry cannot be null");
         }
-        
-        // ============= Entity Commands =============
-        
-        /**
-         * Record a command to create an entity
-         * @return A temporary entity ID that will be mapped to the real entity on execution
-         */
+
         Entity CreateEntity()
         {
-            Entity tempEntity{m_nextTempId--};
-            m_baseStorage.Add(Commands::CreateEntity{tempEntity});
-            return tempEntity;
+            if (m_registry)
+            {
+                auto& manager = m_registry->GetEntityManager();
+                Entity entity = manager.Create();
+                    if (entity == Entity::Invalid())
+                    {
+                        return Entity::Invalid();
+                    }
+                    
+                    m_allocatedEntities.push_back(entity);
+                    
+                    m_commands.emplace_back(
+                        [entity](Registry* registry) -> bool
+                        {
+#ifdef ASTRA_BUILD_DEBUG
+                            printf("CommandBuffer: Executing CreateEntity for entity %u\n", entity.GetID());
+#endif
+                            // Entity already created, just add to archetype system
+                            registry->GetArchetypeManager()->AddEntity(entity);
+                            registry->GetSignalManager()->Emit<Events::EntityCreated>(entity);
+                            return true;
+                        },
+                        Command::Type::Entity,
+                        "CreateEntity"
+                    );
+                    
+                return entity;
+            }
+            return Entity::Invalid();
         }
-        
-        /**
-         * Record a command to destroy an entity
-         * @param entity The entity to destroy (can be temporary or real)
-         */
+
         void DestroyEntity(Entity entity)
         {
-            m_baseStorage.Add(Commands::DestroyEntity{entity});
+            m_commands.emplace_back(
+                [entity](Registry* registry) -> bool
+                {
+                    if (entity == Entity::Invalid())
+                    {
+                        return false;
+                    }
+                    registry->DestroyEntity(entity);
+                    return true;
+                },
+                Command::Type::Entity,
+                "DestroyEntity"
+            );
         }
-        
-        /**
-         * Record a command to create multiple entities
-         * @param count Number of entities to create
-         * @param outEntities Output buffer for entity IDs (must remain valid until Execute)
-         */
+
         void CreateEntities(size_t count, Entity* outEntities)
         {
-            m_baseStorage.Add(Commands::CreateEntities{count, outEntities});
+            if (m_registry)
+            {
+                auto& manager = m_registry->GetEntityManager();
+                // Allocate entities immediately
+                manager.CreateBatch(count, outEntities);
+                
+                    // Track for potential rollback
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        m_allocatedEntities.push_back(outEntities[i]);
+                    }
+                
+                    // Copy entities for command since outEntities might not be valid at execution
+                    std::vector<Entity> entities(outEntities, outEntities + count);
+                    m_commands.emplace_back(
+                        [entities](Registry* registry) -> bool
+                        {
+                            // Entities already created, just add them to archetype system
+                            auto* archetypeManager = registry->GetArchetypeManager();
+                            auto* signalManager = registry->GetSignalManager();
+                        
+                            for (Entity e : entities)
+                            {
+                                archetypeManager->AddEntity(e);
+                                signalManager->Emit<Events::EntityCreated>(e);
+                            }
+                            return true;
+                        },
+                        Command::Type::Entity,
+                        "CreateEntities"
+                    );
+            }
         }
-        
-        /**
-         * Record a command to destroy multiple entities
-         * @param entities The entities to destroy
-         */
+
         void DestroyEntities(std::span<const Entity> entities)
         {
-            m_baseStorage.Add(Commands::DestroyEntities{
-                std::vector<Entity>(entities.begin(), entities.end())
-            });
+            // Copy entities since the span might not be valid at execution time
+            std::vector<Entity> entityCopy(entities.begin(), entities.end());
+            m_commands.emplace_back(
+                [entityCopy = std::move(entityCopy)](Registry* registry) -> bool
+                {
+                    SmallVector<Entity, 256> validEntities;
+                    validEntities.reserve(entityCopy.size());
+                    
+                    for (Entity e : entityCopy)
+                    {
+                        if (e != Entity::Invalid())
+                        {
+                            validEntities.push_back(e);
+                        }
+                    }
+                    
+                    if (!validEntities.empty())
+                    {
+                        registry->DestroyEntities(validEntities);
+                    }
+                    return true;
+                },
+                Command::Type::Entity,
+                "DestroyEntities"
+            );
         }
-        
-        // ============= Component Commands =============
-        
-        /**
-         * Record a command to add a component to an entity
-         * @tparam T The component type
-         * @param entity The entity (can be temporary or real)
-         * @param component The component value
-         */
+
         template<Component T>
         void AddComponent(Entity entity, T&& component)
         {
-            m_componentCommands.emplace_back(
-                [entity, comp = std::forward<T>(component), this](Registry* registry) mutable
+            m_commands.emplace_back(
+                [entity, comp = std::forward<T>(component)](Registry* registry) -> bool
                 {
-                    // Resolve entity through executor's remapping
-                    Entity resolvedEntity = m_baseExecutor.ResolveEntity(entity);
-                    if (resolvedEntity != Entity::Invalid())
+                    if (entity == Entity::Invalid())
                     {
-                        registry->AddComponent<T>(resolvedEntity, std::move(comp));
+                        return false;
                     }
-                }
+                    registry->AddComponent(entity, std::move(comp));
+                    return true;
+                },
+                Command::Type::Component,
+                "AddComponent"
             );
         }
         
-        /**
-         * Record a command to remove a component from an entity
-         * @tparam T The component type
-         * @param entity The entity (can be temporary or real)
-         */
+        template<Component T, typename... Args>
+        void EmplaceComponent(Entity entity, Args&&... args)
+        {
+            m_commands.emplace_back(
+                [entity, comp = T(std::forward<Args>(args)...)](Registry* registry) -> bool
+                {
+                    if (entity == Entity::Invalid())
+                    {
+                        return false;
+                    }
+                    registry->AddComponent<T>(entity, comp);
+                    return true;
+                },
+                Command::Type::Component,
+                "EmplaceComponent"
+            );
+        }
+
         template<Component T>
         void RemoveComponent(Entity entity)
         {
-            m_componentCommands.emplace_back(
-                [entity, this](Registry* registry)
+            m_commands.emplace_back(
+                [entity](Registry* registry) -> bool
                 {
-                    Entity resolvedEntity = m_baseExecutor.ResolveEntity(entity);
-                    if (resolvedEntity != Entity::Invalid())
+                    if (entity == Entity::Invalid())
                     {
-                        registry->RemoveComponent<T>(resolvedEntity);
+                        return false;
                     }
-                }
+                    registry->RemoveComponent<T>(entity);
+                    return true;
+                },
+                Command::Type::Component,
+                "RemoveComponent"
             );
         }
-        
-        /**
-         * Record a command to set/update a component value
-         * @tparam T The component type
-         * @param entity The entity (can be temporary or real)
-         * @param component The new component value
-         */
-        template<Component T>
-        void SetComponent(Entity entity, T&& component)
-        {
-            m_componentCommands.emplace_back(
-                [entity, comp = std::forward<T>(component), this](Registry* registry) mutable
-                {
-                    Entity resolvedEntity = m_baseExecutor.ResolveEntity(entity);
-                    if (resolvedEntity != Entity::Invalid())
-                    {
-                        if (T* existing = registry->GetComponent<T>(resolvedEntity))
-                        {
-                            *existing = std::move(comp);
-                        }
-                        else
-                        {
-                            registry->AddComponent<T>(resolvedEntity, std::move(comp));
-                        }
-                    }
-                }
-            );
-        }
-        
-        /**
-         * Record a command to add components to multiple entities
-         * @tparam T The component type
-         * @param entities The entities to add components to
-         * @param component The component value (same for all entities)
-         */
+
         template<Component T>
         void AddComponents(std::span<const Entity> entities, const T& component)
         {
             std::vector<Entity> entityCopy(entities.begin(), entities.end());
-            m_componentCommands.emplace_back(
-                [entityCopy = std::move(entityCopy), component, this](Registry* registry)
+            m_commands.emplace_back(
+                [entityCopy = std::move(entityCopy), component](Registry* registry) -> bool
                 {
-                    // Resolve all entity IDs
-                    SmallVector<Entity, 256> resolvedEntities;
-                    resolvedEntities.reserve(entityCopy.size());
+#ifdef ASTRA_BUILD_DEBUG
+                    printf("CommandBuffer: Executing AddComponents for %zu entities\n", entityCopy.size());
+#endif
+                    SmallVector<Entity, 256> validEntities;
+                    validEntities.reserve(entityCopy.size());
                     for (Entity e : entityCopy)
                     {
-                        Entity resolved = m_baseExecutor.ResolveEntity(e);
-                        if (resolved != Entity::Invalid())
+                        if (e != Entity::Invalid())
                         {
-                            resolvedEntities.push_back(resolved);
+                            validEntities.push_back(e);
+#ifdef ASTRA_BUILD_DEBUG
+                            printf("  Entity %u is valid\n", e.GetID());
+#endif
                         }
                     }
-                    registry->AddComponents<T>(resolvedEntities, component);
-                }
+                    if (!validEntities.empty())
+                    {
+#ifdef ASTRA_BUILD_DEBUG
+                        printf("  Calling registry->AddComponents with %zu valid entities\n", validEntities.size());
+#endif
+                        registry->AddComponents<T>(validEntities, component);
+                    }
+                    return true;
+                },
+                Command::Type::Component,
+                "AddComponents"
             );
         }
         
-        /**
-         * Record a command to remove components from multiple entities
-         * @tparam T The component type
-         * @param entities The entities to remove components from
-         */
+        template<Component T, typename... Args>
+        void EmplaceComponents(std::span<const Entity> entities, Args&&... args)
+        {
+            std::vector<Entity> entityCopy(entities.begin(), entities.end());
+            m_commands.emplace_back(
+                [entityCopy = std::move(entityCopy), comp = T(std::forward<Args>(args)...)](Registry* registry) -> bool
+                {
+                    SmallVector<Entity, 256> validEntities;
+                    validEntities.reserve(entityCopy.size());
+                    for (Entity e : entityCopy)
+                    {
+                        if (e != Entity::Invalid())
+                        {
+                            validEntities.push_back(e);
+                        }
+                    }
+                    if (!validEntities.empty())
+                    {
+                        registry->AddComponents<T>(validEntities, comp);
+                    }
+                    return true;
+                },
+                Command::Type::Component,
+                "EmplaceComponents"
+            );
+        }
+
         template<Component T>
         void RemoveComponents(std::span<const Entity> entities)
         {
             std::vector<Entity> entityCopy(entities.begin(), entities.end());
-            m_componentCommands.emplace_back(
-                [entityCopy = std::move(entityCopy), this](Registry* registry)
+            m_commands.emplace_back(
+                [entityCopy = std::move(entityCopy)](Registry* registry) -> bool
                 {
-                    // Resolve all entity IDs
-                    SmallVector<Entity, 256> resolvedEntities;
-                    resolvedEntities.reserve(entityCopy.size());
+                    SmallVector<Entity, 256> validEntities;
+                    validEntities.reserve(entityCopy.size());
                     for (Entity e : entityCopy)
                     {
-                        Entity resolved = m_baseExecutor.ResolveEntity(e);
-                        if (resolved != Entity::Invalid())
+                        if (e != Entity::Invalid())
                         {
-                            resolvedEntities.push_back(resolved);
+                            validEntities.push_back(e);
                         }
                     }
-                    registry->RemoveComponents<T>(resolvedEntities);
-                }
+                    if (!validEntities.empty())
+                    {
+                        registry->RemoveComponents<T>(validEntities);
+                    }
+                    return true;
+                },
+                Command::Type::Component,
+                "RemoveComponents"
+            );
+        }
+
+        // ============= Relationship Commands =============
+
+        void SetParent(Entity child, Entity parent)
+        {
+            m_commands.emplace_back(
+                [child, parent](Registry* registry) -> bool
+                {
+                    if (child == Entity::Invalid() || parent == Entity::Invalid())
+                    {
+                        return false;
+                    }
+                    registry->SetParent(child, parent);
+                    return true;
+                },
+                Command::Type::Relationship,
+                "SetParent"
             );
         }
         
-        // ============= Relationship Commands =============
-        
-        /**
-         * Record a command to set a parent-child relationship
-         * @param child Child entity (can be temporary or real)
-         * @param parent Parent entity (can be temporary or real)
-         */
-        void SetParent(Entity child, Entity parent)
+        void AddChild(Entity parent, Entity child)
         {
-            m_baseStorage.Add(Commands::SetParent{child, parent});
+            // AddChild is just SetParent with reversed parameters
+            SetParent(child, parent);
         }
-        
-        /**
-         * Record a command to remove parent from a child
-         * @param child Child entity (can be temporary or real)
-         */
+
         void RemoveParent(Entity child)
         {
-            m_baseStorage.Add(Commands::RemoveParent{child});
+            m_commands.emplace_back(
+                [child](Registry* registry) -> bool
+                {
+                    if (child == Entity::Invalid())
+                    {
+                        return false;
+                    }
+                    registry->RemoveParent(child);
+                    return true;
+                },
+                Command::Type::Relationship,
+                "RemoveParent"
+            );
         }
         
-        /**
-         * Record a command to add a bidirectional link between entities
-         * @param a First entity (can be temporary or real)
-         * @param b Second entity (can be temporary or real)
-         */
+        void RemoveChild(Entity parent, Entity child)
+        {
+            m_commands.emplace_back(
+                [parent, child](Registry* registry) -> bool
+                {
+                    if (parent == Entity::Invalid() || child == Entity::Invalid())
+                    {
+                        return false;
+                    }
+                    registry->RemoveChild(parent, child);
+                    return true;
+                },
+                Command::Type::Relationship,
+                "RemoveChild"
+            );
+        }
+        
+        void RemoveAllChildren(Entity parent)
+        {
+            m_commands.emplace_back(
+                [parent](Registry* registry) -> bool
+                {
+                    if (parent == Entity::Invalid())
+                    {
+                        return false;
+                    }
+                    registry->RemoveAllChildren(parent);
+                    return true;
+                },
+                Command::Type::Relationship,
+                "RemoveAllChildren"
+            );
+        }
+
         void AddLink(Entity a, Entity b)
         {
-            m_baseStorage.Add(Commands::AddLink{a, b});
+            m_commands.emplace_back(
+                [a, b](Registry* registry) -> bool
+                {
+                    if (a == Entity::Invalid() || b == Entity::Invalid())
+                    {
+                        return false;
+                    }
+                    registry->AddLink(a, b);
+                    return true;
+                },
+                Command::Type::Relationship,
+                "AddLink"
+            );
         }
-        
-        /**
-         * Record a command to remove a bidirectional link between entities
-         * @param a First entity (can be temporary or real)
-         * @param b Second entity (can be temporary or real)
-         */
+
         void RemoveLink(Entity a, Entity b)
         {
-            m_baseStorage.Add(Commands::RemoveLink{a, b});
+            m_commands.emplace_back(
+                [a, b](Registry* registry) -> bool
+                {
+                    if (a == Entity::Invalid() || b == Entity::Invalid())
+                    {
+                        return false;
+                    }
+                    registry->RemoveLink(a, b);
+                    return true;
+                },
+                Command::Type::Relationship,
+                "RemoveLink"
+            );
         }
         
-        // ============= Execution =============
+        // ============= Resource Commands =============
         
-        /**
-         * Execute all recorded commands
-         * Commands are executed in the order they were recorded
-         * @param clearAfterExecution Whether to clear the buffer after execution (default: true)
-         */
-        void Execute(bool clearAfterExecution = true)
+        template<Component T>
+        void SetResource(T&& resource)
         {
-            // Execute base commands first (entities, relationships)
-            // Don't clear base storage yet since we need the remapping for component commands
-            m_baseExecutor.Execute(m_baseStorage, false);
-            
-            // Execute component commands
-            for (auto& cmd : m_componentCommands)
+            m_commands.emplace_back(
+                [res = std::forward<T>(resource)](Registry* registry) mutable -> bool
+                {
+                    registry->SetResource<T>(std::move(res));
+                    return true;
+                },
+                Command::Type::Resource,
+                "SetResource"
+            );
+        }
+        
+        template<Component T, typename... Args>
+        void EmplaceResource(Args&&... args)
+        {
+            m_commands.emplace_back(
+                [res = T(std::forward<Args>(args)...)](Registry* registry) mutable -> bool
+                {
+                    registry->SetResource<T>(std::move(res));
+                    return true;
+                },
+                Command::Type::Resource,
+                "EmplaceResource"
+            );
+        }
+        
+        template<Component T>
+        void RemoveResource()
+        {
+            m_commands.emplace_back(
+                [](Registry* registry) -> bool
+                {
+                    registry->RemoveResource<T>();
+                    return true;
+                },
+                Command::Type::Resource,
+                "RemoveResource"
+            );
+        }
+        
+        void ClearResources()
+        {
+            m_commands.emplace_back(
+                [](Registry* registry) -> bool
+                {
+                    registry->ClearResources();
+                    return true;
+                },
+                Command::Type::Resource,
+                "ClearResources"
+            );
+        }
+
+        // ============= Execution and Management =============
+
+        Result<void, ExecutionError> Execute(bool clearAfterExecution = true)
+        {
+            if (!m_registry)
             {
-                cmd(m_registry);
+                RollbackAllocatedEntities();
+                return Result<void, ExecutionError>::Err(ExecutionError::InvalidRegistry);
             }
             
-            // Clear everything for reuse by default
+            // EntityManager is always valid if Registry exists
+            
+            // Execute all commands
+            for (size_t i = 0; i < m_commands.size(); ++i)
+            {
+                if (!m_commands[i].execute(m_registry))
+                {
+                    // Command failed - rollback
+                    RollbackAllocatedEntities();
+                    
+#ifdef ASTRA_BUILD_DEBUG
+                    if (m_commands[i].debugName)
+                    {
+                        printf("Command failed: %s (index %zu)\n", m_commands[i].debugName, i);
+                    }
+#endif
+                    
+                    return Result<void, ExecutionError>::Err(ExecutionError::CommandFailed);
+                }
+            }
+            
+            // Success
+            m_allocatedEntities.clear(); 
+            
             if (clearAfterExecution)
             {
                 Clear();
             }
-            else
-            {
-                // Still need to clear the remapping for consistency
-                m_baseExecutor.ClearRemapping();
-            }
+            
+            return Result<void, ExecutionError>::Ok();
         }
-        
-        /**
-         * Clear all recorded commands without executing
-         */
+
         void Clear()
         {
-            m_baseStorage.Clear();
-            m_componentCommands.clear();
-            m_baseExecutor.ClearRemapping();
+            m_commands.clear();
+            m_allocatedEntities.clear();
         }
         
-        /**
-         * Reserve space for expected number of commands
-         * @param commandCount Expected total number of commands
-         */
         void Reserve(size_t commandCount)
         {
-            m_baseStorage.Reserve(commandCount / 2);  // Estimate half are base commands
-            m_componentCommands.reserve(commandCount / 2);  // Other half are component commands
+            m_commands.reserve(commandCount);
         }
         
-        // ============= Statistics =============
-        
         /**
-         * Get total number of recorded commands
+         * Merge commands from another buffer into this one
+         * The other buffer is moved from and left empty
          */
+        void MergeFrom(CommandBuffer&& other)
+        {
+            // Move all commands
+            m_commands.insert(
+                m_commands.end(),
+                std::make_move_iterator(other.m_commands.begin()),
+                std::make_move_iterator(other.m_commands.end())
+            );
+            
+            // Merge allocated entities
+            m_allocatedEntities.insert(
+                m_allocatedEntities.end(),
+                other.m_allocatedEntities.begin(),
+                other.m_allocatedEntities.end()
+            );
+            
+            // Clear the other buffer
+            other.Clear();
+        }
+        
         [[nodiscard]] size_t GetCommandCount() const noexcept
         {
-            return m_baseStorage.GetTotalCommands() + m_componentCommands.size();
+            return m_commands.size();
         }
-        
-        /**
-         * Check if buffer is empty
-         */
+
         [[nodiscard]] bool IsEmpty() const noexcept
         {
-            return m_baseStorage.IsEmpty() && m_componentCommands.empty();
+            return m_commands.empty();
         }
         
-        /**
-         * Get estimated memory usage in bytes
-         */
         [[nodiscard]] size_t GetMemoryUsage() const noexcept
         {
-            return m_baseStorage.GetMemoryUsage() + 
-                   (m_componentCommands.capacity() * sizeof(std::function<void(Registry*)>));
+            return m_commands.capacity() * sizeof(Command) + m_allocatedEntities.capacity() * sizeof(Entity);
         }
         
-        /**
-         * Get the registry this buffer is associated with
-         */
-        [[nodiscard]] Registry* GetRegistry() const noexcept
+        void RollbackAllocatedEntities()
         {
-            return m_registry;
+            if (m_registry)
+            {
+                auto& manager = m_registry->GetEntityManager();
+                for (Entity e : m_allocatedEntities)
+                {
+                    manager.Destroy(e);
+                }
+            }
+            m_allocatedEntities.clear();
         }
-        
-        /**
-         * Get access to internal storage (for merging)
-         */
-        [[nodiscard]] BaseStorage& GetStorage() noexcept
-        {
-            return m_baseStorage;
-        }
-        
-        [[nodiscard]] const BaseStorage& GetStorage() const noexcept
-        {
-            return m_baseStorage;
-        }
+
+    private:        
+        Registry* m_registry;
+        std::vector<Command> m_commands;
+        std::vector<Entity> m_allocatedEntities;
     };
     
-    /**
-     * Thread-safe command buffer for use in parallel execution contexts.
-     * 
-     * ParallelCommandBuffer provides a way to safely record structural changes
-     * during parallel iteration. Each thread gets its own CommandBuffer
-     * to avoid synchronization overhead during recording.
-     * 
-     * Usage:
-     * @code
-     * ParallelCommandBuffer commands(registry);
-     * 
-     * view.ParallelForEach([&commands](Entity e, Position& pos) {
-     *     if (pos.x > 100) {
-     *         commands.GetThreadBuffer().DestroyEntity(e);
-     *     }
-     * });
-     * 
-     * commands.Execute();  // Execute all commands from all threads
-     * @endcode
-     * 
-     * @note ParallelCommandBuffer is designed to be used with lambda capture,
-     *       not static access, to avoid issues with nested parallel regions.
-     */
     class ParallelCommandBuffer
     {
-    private:
-        Registry& m_registry;
-        mutable std::mutex m_mutex;
-        mutable std::vector<std::unique_ptr<CommandBuffer>> m_buffers;
-        mutable std::atomic<size_t> m_nextIndex{0};
-        
-        // Thread-local cache to avoid repeated lookups
-        struct ThreadCache
-        {
-            ParallelCommandBuffer* context = nullptr;
-            CommandBuffer* buffer = nullptr;
-            size_t index = std::numeric_limits<size_t>::max();
-        };
-        
-        static thread_local ThreadCache t_cache;
-        
     public:
-        /**
-         * Construct a ParallelCommandBuffer context for the given registry.
-         * 
-         * @param registry The registry to execute commands on
-         */
-        explicit ParallelCommandBuffer(Registry& registry) 
-            : m_registry(registry)
+        explicit ParallelCommandBuffer(Registry* registry) : 
+            m_registry(registry)
         {
+            ASTRA_ASSERT(registry != nullptr, "Registry cannot be null");
             // Pre-reserve space for typical thread counts
             const size_t expectedThreads = std::thread::hardware_concurrency();
             m_buffers.reserve(expectedThreads);
         }
         
-        /**
-         * Get the thread-local CommandBuffer for the current thread.
-         * 
-         * This method is thread-safe and lazy-initializes a CommandBuffer
-         * for each unique thread that calls it. The same buffer is returned
-         * for subsequent calls from the same thread.
-         * 
-         * @return Reference to the thread-local CommandBuffer
-         * 
-         * @note This method should be called from within a parallel execution
-         *       context where the ParallelCommandBuffer object is captured by reference.
-         */
         CommandBuffer& GetThreadBuffer() const
         {
             // Fast path: check thread-local cache
@@ -472,48 +593,42 @@ namespace Astra
             return InitializeThreadBuffer();
         }
         
-        /**
-         * Execute all commands from all thread buffers.
-         * 
-         * Commands are executed in the order threads were initialized,
-         * with all commands from a single thread executed together.
-         * 
-         * @note This should be called from a single thread after parallel execution.
-         */
-        void Execute()
+        Result<void, CommandBuffer::ExecutionError> Execute()
         {
-            for (const auto& buffer : m_buffers)
+            for (size_t i = 0; i < m_buffers.size(); ++i)
             {
-                if (buffer && !buffer->IsEmpty())
+                if (m_buffers[i] && !m_buffers[i]->IsEmpty())
                 {
-                    buffer->Execute();
+                    auto result = m_buffers[i]->Execute();
+                    if (result.IsErr())
+                    {
+                        // Rollback remaining buffers' allocated entities
+                        for (size_t j = i + 1; j < m_buffers.size(); ++j)
+                        {
+                            if (m_buffers[j])
+                            {
+                                m_buffers[j]->RollbackAllocatedEntities();
+                            }
+                        }
+                        return result;
+                    }
                 }
             }
+            return Result<void, CommandBuffer::ExecutionError>::Ok();
         }
-        
-        /**
-         * Merge all commands into a target CommandBuffer.
-         * 
-         * This allows deferred execution by merging all thread-local
-         * commands into a single buffer for later execution.
-         * 
-         * @param target The CommandBuffer to merge into
-         */
+
         void MergeInto(CommandBuffer& target)
         {
+            // Properly merge all thread buffers into the target
             for (auto& buffer : m_buffers)
             {
                 if (buffer && !buffer->IsEmpty())
                 {
-                    target.GetStorage().Merge(std::move(buffer->GetStorage()));
-                    buffer->Clear();
+                    target.MergeFrom(std::move(*buffer));
                 }
             }
         }
         
-        /**
-         * Clear all commands from all thread buffers.
-         */
         void Clear()
         {
             for (auto& buffer : m_buffers)
@@ -524,12 +639,7 @@ namespace Astra
                 }
             }
         }
-        
-        /**
-         * Get the total number of commands across all thread buffers.
-         * 
-         * @return Total command count
-         */
+
         ASTRA_NODISCARD size_t GetCommandCount() const
         {
             size_t total = 0;
@@ -542,12 +652,7 @@ namespace Astra
             }
             return total;
         }
-        
-        /**
-         * Check if all thread buffers are empty.
-         * 
-         * @return true if no commands have been recorded
-         */
+
         ASTRA_NODISCARD bool IsEmpty() const
         {
             for (const auto& buffer : m_buffers)
@@ -559,12 +664,7 @@ namespace Astra
             }
             return true;
         }
-        
-        /**
-         * Get the number of thread buffers that have been created.
-         * 
-         * @return Number of unique threads that have called GetThreadBuffer()
-         */
+
         ASTRA_NODISCARD size_t GetThreadCount() const
         {
             return m_buffers.size();
@@ -588,7 +688,7 @@ namespace Astra
             // Create the buffer if it doesn't exist
             if (!m_buffers[index])
             {
-                m_buffers[index] = std::make_unique<CommandBuffer>(&m_registry);
+                m_buffers[index] = std::make_unique<CommandBuffer>(m_registry);
             }
             
             CommandBuffer* buffer = m_buffers[index].get();
@@ -603,6 +703,21 @@ namespace Astra
             
             return *buffer;
         }
+
+        Registry* m_registry;
+        mutable std::mutex m_mutex;
+        mutable std::vector<std::unique_ptr<CommandBuffer>> m_buffers;
+        mutable std::atomic<size_t> m_nextIndex{0};
+
+        // Thread-local cache to avoid repeated lookups
+        struct ThreadCache
+        {
+            ParallelCommandBuffer* context = nullptr;
+            CommandBuffer* buffer = nullptr;
+            size_t index = std::numeric_limits<size_t>::max();
+        };
+
+        static thread_local ThreadCache t_cache;
     };
     
     // Thread-local storage definition

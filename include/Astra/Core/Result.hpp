@@ -20,11 +20,11 @@ namespace Astra
         {
             if (m_hasValue)
             {
-                new (m_storage.template As<T>()) T(*other.m_storage.template As<T>());
+                new (m_storage.As<T>()) T(*other.m_storage.As<T>());
             }
             else
             {
-                new (m_storage.template As<E>()) E(*other.m_storage.template As<E>());
+                new (m_storage.As<E>()) E(*other.m_storage.As<E>());
             }
         }
 
@@ -32,11 +32,11 @@ namespace Astra
         {
             if (m_hasValue)
             {
-                new (m_storage.template As<T>()) T(std::move(*other.m_storage.template As<T>()));
+                new (m_storage.As<T>()) T(std::move(*other.m_storage.As<T>()));
             }
             else
             {
-                new (m_storage.template As<E>()) E(std::move(*other.m_storage.template As<E>()));
+                new (m_storage.As<E>()) E(std::move(*other.m_storage.As<E>()));
             }
         }
 
@@ -44,11 +44,11 @@ namespace Astra
         {
             if (m_hasValue)
             {
-                m_storage.template As<T>()->~T();
+                m_storage.As<T>()->~T();
             }
             else
             {
-                m_storage.template As<E>()->~E();
+                m_storage.As<E>()->~E();
             }
         }
 
@@ -58,11 +58,11 @@ namespace Astra
             {
                 if (m_hasValue && other.m_hasValue)
                 {
-                    *m_storage.template As<T>() = *other.m_storage.template As<T>();
+                    *m_storage.As<T>() = *other.m_storage.As<T>();
                 }
                 else if (!m_hasValue && !other.m_hasValue)
                 {
-                    *m_storage.template As<E>() = *other.m_storage.template As<E>();
+                    *m_storage.As<E>() = *other.m_storage.As<E>();
                 }
                 else
                 {
@@ -80,11 +80,11 @@ namespace Astra
             {
                 if (m_hasValue && other.m_hasValue)
                 {
-                    *m_storage.template As<T>() = std::move(*other.m_storage.template As<T>());
+                    *m_storage.As<T>() = std::move(*other.m_storage.As<T>());
                 }
                 else if (!m_hasValue && !other.m_hasValue)
                 {
-                    *m_storage.template As<E>() = std::move(*other.m_storage.template As<E>());
+                    *m_storage.As<E>() = std::move(*other.m_storage.As<E>());
                 }
                 else
                 {
@@ -112,49 +112,49 @@ namespace Astra
 
         ASTRA_NODISCARD T* GetValue() noexcept
         {
-            return m_hasValue ? m_storage.template As<T>() : nullptr;
+            return m_hasValue ? m_storage.As<T>() : nullptr;
         }
 
         ASTRA_NODISCARD const T* GetValue() const noexcept
         {
-            return m_hasValue ? m_storage.template As<T>() : nullptr;
+            return m_hasValue ? m_storage.As<T>() : nullptr;
         }
 
         ASTRA_NODISCARD E* GetError() noexcept
         {
-            return !m_hasValue ? m_storage.template As<E>() : nullptr;
+            return !m_hasValue ? m_storage.As<E>() : nullptr;
         }
 
         ASTRA_NODISCARD const E* GetError() const noexcept
         {
-            return !m_hasValue ? m_storage.template As<E>() : nullptr;
+            return !m_hasValue ? m_storage.As<E>() : nullptr;
         }
 
         ASTRA_NODISCARD T* operator->()
         {
             ASTRA_ASSERT(m_hasValue, "Dereferencing Result with no value");
-            return m_storage.template As<T>();
+            return m_storage.As<T>();
         }
 
         ASTRA_NODISCARD const T* operator->() const
         {
             ASTRA_ASSERT(m_hasValue, "Dereferencing Result with no value");
-            return m_storage.template As<T>();
+            return m_storage.As<T>();
         }
 
         ASTRA_NODISCARD T& operator*() & noexcept
         {
-            return *m_storage.template As<T>();
+            return *m_storage.As<T>();
         }
 
         ASTRA_NODISCARD const T& operator*() const& noexcept
         {
-            return *m_storage.template As<T>();
+            return *m_storage.As<T>();
         }
 
         ASTRA_NODISCARD T&& operator*() && noexcept
         {
-            return std::move(*m_storage.template As<T>());
+            return std::move(*m_storage.As<T>());
         }
 
         template<typename F>
@@ -163,11 +163,11 @@ namespace Astra
             using NewT = decltype(func(std::declval<T>()));
             if (m_hasValue)
             {
-                return Result<NewT, E>::Ok(func(*m_storage.template As<T>()));
+                return Result<NewT, E>::Ok(func(*m_storage.As<T>()));
             }
             else
             {
-                return Result<NewT, E>::Err(*m_storage.template As<E>());
+                return Result<NewT, E>::Err(*m_storage.As<E>());
             }
         }
 
@@ -177,11 +177,11 @@ namespace Astra
             using NewE = decltype(func(std::declval<E>()));
             if (m_hasValue)
             {
-                return Result<T, NewE>::Ok(*m_storage.template As<T>());
+                return Result<T, NewE>::Ok(*m_storage.As<T>());
             }
             else
             {
-                return Result<T, NewE>::Err(func(*m_storage.template As<E>()));
+                return Result<T, NewE>::Err(func(*m_storage.As<E>()));
             }
         }
 
@@ -193,37 +193,37 @@ namespace Astra
             
             if (m_hasValue)
             {
-                return func(*m_storage.template As<T>());
+                return func(*m_storage.As<T>());
             }
             else
             {
-                return ReturnType::Err(*m_storage.template As<E>());
+                return ReturnType::Err(*m_storage.As<E>());
             }
         }
 
         template<typename U>
         ASTRA_NODISCARD T ValueOr(U&& defaultValue) const&
         {
-            return m_hasValue ? *m_storage.template As<T>() : static_cast<T>(std::forward<U>(defaultValue));
+            return m_hasValue ? *m_storage.As<T>() : static_cast<T>(std::forward<U>(defaultValue));
         }
 
         template<typename U>
         ASTRA_NODISCARD T ValueOr(U&& defaultValue) &&
         {
-            return m_hasValue ? std::move(*m_storage.template As<T>()) : static_cast<T>(std::forward<U>(defaultValue));
+            return m_hasValue ? std::move(*m_storage.As<T>()) : static_cast<T>(std::forward<U>(defaultValue));
         }
 
     private:
         template<typename U>
         explicit Result(std::in_place_index_t<0>, U&& value) : m_hasValue(true)
         {
-            new (m_storage.template As<T>()) T(std::forward<U>(value));
+            new (m_storage.As<T>()) T(std::forward<U>(value));
         }
 
         template<typename U>
         explicit Result(std::in_place_index_t<1>, U&& error) : m_hasValue(false)
         {
-            new (m_storage.template As<E>()) E(std::forward<U>(error));
+            new (m_storage.As<E>()) E(std::forward<U>(error));
         }
 
         AlignedStorage<T, E> m_storage;
@@ -241,7 +241,7 @@ namespace Astra
         {
             if (!m_hasValue)
             {
-                new (m_storage.template As<E>()) E(*other.m_storage.template As<E>());
+                new (m_storage.As<E>()) E(*other.m_storage.As<E>());
             }
         }
 
@@ -249,7 +249,7 @@ namespace Astra
         {
             if (!m_hasValue)
             {
-                new (m_storage.template As<E>()) E(std::move(*other.m_storage.template As<E>()));
+                new (m_storage.As<E>()) E(std::move(*other.m_storage.As<E>()));
             }
         }
 
@@ -257,7 +257,7 @@ namespace Astra
         {
             if (!m_hasValue)
             {
-                m_storage.template As<E>()->~E();
+                m_storage.As<E>()->~E();
             }
         }
 
@@ -267,7 +267,7 @@ namespace Astra
             {
                 if (!m_hasValue && !other.m_hasValue)
                 {
-                    *m_storage.template As<E>() = *other.m_storage.template As<E>();
+                    *m_storage.As<E>() = *other.m_storage.As<E>();
                 }
                 else if (m_hasValue != other.m_hasValue)
                 {
@@ -284,7 +284,7 @@ namespace Astra
             {
                 if (!m_hasValue && !other.m_hasValue)
                 {
-                    *m_storage.template As<E>() = std::move(*other.m_storage.template As<E>());
+                    *m_storage.As<E>() = std::move(*other.m_storage.As<E>());
                 }
                 else if (m_hasValue != other.m_hasValue)
                 {
@@ -311,12 +311,12 @@ namespace Astra
 
         ASTRA_NODISCARD E* GetError() noexcept
         {
-            return !m_hasValue ? m_storage.template As<E>() : nullptr;
+            return !m_hasValue ? m_storage.As<E>() : nullptr;
         }
 
         ASTRA_NODISCARD const E* GetError() const noexcept
         {
-            return !m_hasValue ? m_storage.template As<E>() : nullptr;
+            return !m_hasValue ? m_storage.As<E>() : nullptr;
         }
 
         template<typename F>
@@ -329,7 +329,7 @@ namespace Astra
             }
             else
             {
-                return Result<void, NewE>::Err(func(*m_storage.template As<E>()));
+                return Result<void, NewE>::Err(func(*m_storage.As<E>()));
             }
         }
 
@@ -345,7 +345,7 @@ namespace Astra
             }
             else
             {
-                return ReturnType::Err(*m_storage.template As<E>());
+                return ReturnType::Err(*m_storage.As<E>());
             }
         }
 
@@ -355,7 +355,7 @@ namespace Astra
         template<typename U>
         explicit Result(std::in_place_index_t<1>, U&& error) : m_hasValue(false)
         {
-            new (m_storage.template As<E>()) E(std::forward<U>(error));
+            new (m_storage.As<E>()) E(std::forward<U>(error));
         }
 
         AlignedStorage<void, E> m_storage;

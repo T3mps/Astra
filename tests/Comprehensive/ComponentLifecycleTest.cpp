@@ -267,7 +267,7 @@ TEST_F(ComponentLifecycleTest, BasicLifecycle)
     LifecycleComponent::stats.Reset();
     
     Entity entity = registry->CreateEntity();
-    registry->AddComponent<LifecycleComponent>(entity, 42);
+    registry->EmplaceComponent<LifecycleComponent>(entity, 42);
     
     EXPECT_GE(LifecycleComponent::stats.valueConstructed, 1);
     EXPECT_GE(LifecycleComponent::stats.moveConstructed, 0);
@@ -288,19 +288,19 @@ TEST_F(ComponentLifecycleTest, ArchetypeTransitionLifecycle)
     
     Entity entity = registry->CreateEntity();
     
-    registry->AddComponent<LifecycleComponent>(entity, 100);
+    registry->EmplaceComponent<LifecycleComponent>(entity, 100);
     int initialConstructed = LifecycleComponent::stats.TotalConstructed();
     
     // Causes archetype transition
-    registry->AddComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
+    registry->EmplaceComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
     
     EXPECT_GE(LifecycleComponent::stats.moveConstructed, 1) 
         << "Component should be move-constructed during transition";
     
     EXPECT_GE(LifecycleComponent::stats.destructed, 1);
     
-    registry->AddComponent<Velocity>(entity, 4.0f, 5.0f, 6.0f);
-    registry->AddComponent<Health>(entity, 100, 100);
+    registry->EmplaceComponent<Velocity>(entity, 4.0f, 5.0f, 6.0f);
+    registry->EmplaceComponent<Health>(entity, 100, 100);
     
     LifecycleComponent* comp = registry->GetComponent<LifecycleComponent>(entity);
     ASSERT_NE(comp, nullptr);
@@ -341,13 +341,13 @@ TEST_F(ComponentLifecycleTest, SideEffectsOrder)
     SideEffectComponent::ClearEvents();
     
     Entity e1 = registry->CreateEntity();
-    registry->AddComponent<SideEffectComponent>(e1, 1);
+    registry->EmplaceComponent<SideEffectComponent>(e1, 1);
     
     Entity e2 = registry->CreateEntity();
-    registry->AddComponent<SideEffectComponent>(e2, 2);
+    registry->EmplaceComponent<SideEffectComponent>(e2, 2);
     
-    registry->AddComponent<Position>(e1);
-    registry->AddComponent<Position>(e2);
+    registry->EmplaceComponent<Position>(e1);
+    registry->EmplaceComponent<Position>(e2);
     
     registry->DestroyEntity(e2);
     registry->DestroyEntity(e1);
@@ -373,16 +373,20 @@ TEST_F(ComponentLifecycleTest, EmptyComponents)
 {
     Entity entity = registry->CreateEntity();
     
-    registry->AddComponent<EmptyComponent>(entity);
+    registry->EmplaceComponent<EmptyComponent>(entity);
     
     EmptyComponent* empty = registry->GetComponent<EmptyComponent>(entity);
-    EXPECT_NE(empty, nullptr);
+    EXPECT_NE(empty, nullptr);  // Empty components return a static instance
     
-    registry->AddComponent<Position>(entity);
-    registry->AddComponent<Velocity>(entity);
+    // HasComponent should still work
+    EXPECT_TRUE(registry->HasComponent<EmptyComponent>(entity));
+    
+    registry->EmplaceComponent<Position>(entity);
+    registry->EmplaceComponent<Velocity>(entity);
     
     empty = registry->GetComponent<EmptyComponent>(entity);
-    EXPECT_NE(empty, nullptr);
+    EXPECT_NE(empty, nullptr);  // Still returns static instance after archetype transition
+    EXPECT_TRUE(registry->HasComponent<EmptyComponent>(entity));
     
     EXPECT_TRUE(registry->RemoveComponent<EmptyComponent>(entity));
     EXPECT_EQ(registry->GetComponent<EmptyComponent>(entity), nullptr);
@@ -392,7 +396,7 @@ TEST_F(ComponentLifecycleTest, MoveOnlyComponents)
 {
     Entity entity = registry->CreateEntity();
     
-    registry->AddComponent<MoveOnlyComponent>(entity, 42);
+    registry->EmplaceComponent<MoveOnlyComponent>(entity, 42);
     
     MoveOnlyComponent* comp = registry->GetComponent<MoveOnlyComponent>(entity);
     ASSERT_NE(comp, nullptr);
@@ -400,7 +404,7 @@ TEST_F(ComponentLifecycleTest, MoveOnlyComponents)
     EXPECT_EQ(*comp->data, 42);
     
     // Causes archetype transition
-    registry->AddComponent<Position>(entity);
+    registry->EmplaceComponent<Position>(entity);
     
     comp = registry->GetComponent<MoveOnlyComponent>(entity);
     ASSERT_NE(comp, nullptr);
@@ -408,7 +412,7 @@ TEST_F(ComponentLifecycleTest, MoveOnlyComponents)
     EXPECT_EQ(*comp->data, 42);
     
     registry->RemoveComponent<MoveOnlyComponent>(entity);
-    registry->AddComponent<MoveOnlyComponent>(entity, 100);
+    registry->EmplaceComponent<MoveOnlyComponent>(entity, 100);
     
     comp = registry->GetComponent<MoveOnlyComponent>(entity);
     ASSERT_NE(comp, nullptr);
@@ -429,7 +433,7 @@ TEST_F(ComponentLifecycleTest, RapidComponentSwapping)
     
     for (int i = 0; i < 100; ++i)
     {
-        registry->AddComponent<LifecycleComponent>(entity, i);
+        registry->EmplaceComponent<LifecycleComponent>(entity, i);
         
         LifecycleComponent* comp = registry->GetComponent<LifecycleComponent>(entity);
         ASSERT_NE(comp, nullptr);
@@ -461,13 +465,13 @@ TEST_F(ComponentLifecycleTest, ArchetypeCleanupLifecycle)
             
             if (batch % 2 == 0)
             {
-                registry->AddComponent<LifecycleComponent>(e, batch * 10 + i);
-                registry->AddComponent<Position>(e);
+                registry->EmplaceComponent<LifecycleComponent>(e, batch * 10 + i);
+                registry->EmplaceComponent<Position>(e);
             }
             else
             {
-                registry->AddComponent<LifecycleComponent>(e, batch * 10 + i);
-                registry->AddComponent<Velocity>(e);
+                registry->EmplaceComponent<LifecycleComponent>(e, batch * 10 + i);
+                registry->EmplaceComponent<Velocity>(e);
             }
             
             batchEntities.push_back(e);
@@ -477,7 +481,6 @@ TEST_F(ComponentLifecycleTest, ArchetypeCleanupLifecycle)
     }
     
     Registry::DefragmentationOptions options;
-    options.minEmptyDuration = 0;
     registry->Defragment(options);
     
     EXPECT_TRUE(LifecycleComponent::stats.IsBalanced())

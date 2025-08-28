@@ -26,8 +26,9 @@ namespace Astra
                 
             ComponentDescriptor desc;
             desc.id = id;
-            desc.size = sizeof(T);
-            desc.alignment = alignof(T);
+            // Empty components should report size 0 to avoid memory allocation
+            desc.size = std::is_empty_v<T> ? 0 : sizeof(T);
+            desc.alignment = std::is_empty_v<T> ? 1 : alignof(T);
             
             desc.hash = TypeID<T>::Hash();
             
@@ -68,11 +69,13 @@ namespace Astra
             {
                 desc.copyConstruct = &CopyConstruct<T>;
                 desc.copyAssign = &CopyAssign<T>;
+                desc.constructWith = &ConstructWith<T>;
             }
             else
             {
                 desc.copyConstruct = nullptr;
                 desc.copyAssign = nullptr;
+                desc.constructWith = nullptr;
             }
             
             desc.serialize = &Serialize<T>;
@@ -106,7 +109,6 @@ namespace Astra
             auto hashIt = m_hashToID.Find(hash);
             if (hashIt == m_hashToID.end())
                 return nullptr;
-                
             return GetComponentDescriptor(hashIt->second);
         }
         
@@ -114,9 +116,7 @@ namespace Astra
         {
             auto it = m_hashToID.Find(hash);
             if (it == m_hashToID.end())
-            {
                 return Result<ComponentID, std::string_view>::Err("Unknown component hash");
-            }
             return Result<ComponentID, std::string_view>::Ok(it->second);
         }
 
@@ -134,9 +134,8 @@ namespace Astra
         {
             descriptors.clear();
             if (m_components.Empty())
-            {
                 return;
-            }
+
             descriptors.reserve(m_components.Size());
             for (const auto& [id, desc] : m_components)
             {
@@ -179,6 +178,13 @@ namespace Astra
         static void CopyAssign(void* dst, const void* src)
         {
             *static_cast<T*>(dst) = *static_cast<const T*>(src);
+        }
+        
+        template<typename T>
+        static void ConstructWith(void* dst, const void* src)
+        {
+            // Use placement new with copy constructor for optimal construction
+            new (dst) T(*static_cast<const T*>(src));
         }
 
         template<typename T>

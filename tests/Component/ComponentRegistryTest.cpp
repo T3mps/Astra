@@ -102,7 +102,7 @@ TEST_F(ComponentRegistryTest, ComponentTypeTraits)
         ASSERT_NE(desc, nullptr);
         EXPECT_TRUE(desc->is_trivially_copyable);
         EXPECT_TRUE(desc->is_empty);
-        EXPECT_EQ(desc->size, sizeof(Player));
+        EXPECT_EQ(desc->size, 0u);  // Empty components should report size 0 for optimization
     }
     
     // RenderData - special alignment
@@ -266,8 +266,8 @@ TEST_F(ComponentRegistryTest, EmptyComponent)
     const auto* desc = registry.GetComponentDescriptor(Astra::TypeID<Player>::Value());
     ASSERT_NE(desc, nullptr);
     EXPECT_TRUE(desc->is_empty);
-    EXPECT_EQ(desc->size, sizeof(Player));
-    EXPECT_EQ(desc->alignment, alignof(Player));
+    EXPECT_EQ(desc->size, 0u);  // Empty components should report size 0 for optimization
+    EXPECT_EQ(desc->alignment, 1u);  // Empty components should have alignment of 1
     
     // Operations should still work
     alignas(Player) char buffer[sizeof(Player)];

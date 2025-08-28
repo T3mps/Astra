@@ -8,17 +8,18 @@
 #include <functional>
 
 #include "../Core/Base.hpp"
-#include "../Platform/Simd.hpp"
+#include "../Core/Memory.hpp"
+#include "../Core/Simd.hpp"
 
 namespace Astra
 {
     template<size_t Bits>
-    class ASTRA_SIMD_ALIGNED Bitmap
+    class alignas(CACHE_LINE_SIZE) Bitmap
     {
     public:
         static constexpr size_t BITS_PER_WORD = 64;
         static constexpr size_t WORD_COUNT = (Bits + BITS_PER_WORD - 1) / BITS_PER_WORD;
-        static constexpr size_t SIMD_WORDS = 2; // Process 128 bits at a time
+        static constexpr size_t SIMD_WORDS = 2;
         
         using Word = std::uint64_t;
         
@@ -27,7 +28,6 @@ namespace Astra
             std::memset(m_words.data(), 0, sizeof(m_words));
         }
         
-        // Set a bit
         void Set(size_t index) noexcept
         {
             if (index < Bits) ASTRA_LIKELY
@@ -38,7 +38,6 @@ namespace Astra
             }
         }
         
-        // Clear a bit
         void Reset(size_t index) noexcept
         {
             if (index < Bits) ASTRA_LIKELY
@@ -49,7 +48,6 @@ namespace Astra
             }
         }
         
-        // Test a bit
         ASTRA_NODISCARD bool Test(size_t index) const noexcept
         {
             if (index >= Bits) ASTRA_UNLIKELY
@@ -59,10 +57,8 @@ namespace Astra
             return (m_words[word] & (Word(1) << bit)) != 0;
         }
         
-        // Check if all bits in mask are set (for component queries)
         ASTRA_NODISCARD bool HasAll(const Bitmap& mask) const noexcept
         {
-            // SIMD path for first 128 bits (most common case)
             if constexpr (WORD_COUNT >= SIMD_WORDS)
             {
                 auto this128 = Simd::Ops::Load128(m_words.data());
@@ -74,7 +70,6 @@ namespace Astra
                     return false;
                 }
                     
-                // Check remaining words
                 for (size_t i = SIMD_WORDS; i < WORD_COUNT; ++i)
                 {
                     if ((m_words[i] & mask.m_words[i]) != mask.m_words[i]) ASTRA_UNLIKELY
@@ -85,7 +80,6 @@ namespace Astra
             }
             else
             {
-                // Fallback for small bitmaps
                 for (size_t i = 0; i < WORD_COUNT; ++i)
                 {
                     if ((m_words[i] & mask.m_words[i]) != mask.m_words[i]) ASTRA_UNLIKELY
@@ -97,7 +91,6 @@ namespace Astra
             return true;
         }
         
-        // Check if bitmaps are equal
         ASTRA_NODISCARD bool operator==(const Bitmap& other) const noexcept
         {
             if constexpr (WORD_COUNT >= SIMD_WORDS)

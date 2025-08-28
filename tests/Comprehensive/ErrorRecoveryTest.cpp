@@ -119,8 +119,8 @@ TEST_F(ErrorRecoveryTest, ComponentAdditionFailureRecovery)
     Entity entity = registry->CreateEntity();
     ASSERT_TRUE(registry->IsValid(entity));
     
-    registry->AddComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
-    registry->AddComponent<TrackedComponent>(entity, 42);
+    registry->EmplaceComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
+    registry->EmplaceComponent<TrackedComponent>(entity, 42);
     
     EXPECT_EQ(TrackedComponent::constructorCalls, 1);
     
@@ -188,19 +188,19 @@ TEST_F(ErrorRecoveryTest, InvalidEntityOperations)
     Entity invalid;
     EXPECT_FALSE(invalid.IsValid());
     
-    // AddComponent now returns void, so we test the behavior differently
-    registry->AddComponent<Position>(invalid, 1.0f, 2.0f, 3.0f);
+    // EmplaceComponent now returns void, so we test the behavior differently
+    registry->EmplaceComponent<Position>(invalid, 1.0f, 2.0f, 3.0f);
     EXPECT_EQ(registry->GetComponent<Position>(invalid), nullptr); // Component wasn't added
     EXPECT_FALSE(registry->RemoveComponent<Position>(invalid));
     EXPECT_FALSE(registry->IsValid(invalid));
     
     Entity entity = registry->CreateEntity();
-    Entity::IDType id = entity.GetID();
+    Entity::StorageType id = entity.GetID();
     Entity::VersionType version = entity.GetVersion();
     registry->DestroyEntity(entity);
     
-    // AddComponent on destroyed entity should do nothing
-    registry->AddComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
+    // EmplaceComponent on destroyed entity should do nothing
+    registry->EmplaceComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
     EXPECT_EQ(registry->GetComponent<Position>(entity), nullptr); // Component wasn't added
     EXPECT_FALSE(registry->RemoveComponent<Position>(entity));
     EXPECT_EQ(registry->GetComponent<Position>(entity), nullptr);
@@ -219,9 +219,9 @@ TEST_F(ErrorRecoveryTest, InvalidEntityOperations)
 TEST_F(ErrorRecoveryTest, ComponentRemovalDuringTransition)
 {
     Entity entity = registry->CreateEntity();
-    registry->AddComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
-    registry->AddComponent<Velocity>(entity, 4.0f, 5.0f, 6.0f);
-    registry->AddComponent<Health>(entity, 100, 100);
+    registry->EmplaceComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
+    registry->EmplaceComponent<Velocity>(entity, 4.0f, 5.0f, 6.0f);
+    registry->EmplaceComponent<Health>(entity, 100, 100);
     
     EXPECT_FALSE(registry->RemoveComponent<Transform>(entity));
     
@@ -283,16 +283,16 @@ TEST_F(ErrorRecoveryTest, RapidArchetypeTransitions)
     
     for (int i = 0; i < 100; ++i)
     {
-        registry->AddComponent<Position>(entity);
-        registry->AddComponent<Velocity>(entity);
-        registry->AddComponent<Health>(entity);
-        registry->AddComponent<TrackedComponent>(entity, i);
+        registry->EmplaceComponent<Position>(entity);
+        registry->EmplaceComponent<Velocity>(entity);
+        registry->EmplaceComponent<Health>(entity);
+        registry->EmplaceComponent<TrackedComponent>(entity, i);
         
         registry->RemoveComponent<Velocity>(entity);
         registry->RemoveComponent<TrackedComponent>(entity);
         
-        registry->AddComponent<Transform>(entity);
-        registry->AddComponent<Physics>(entity);
+        registry->EmplaceComponent<Transform>(entity);
+        registry->EmplaceComponent<Physics>(entity);
         
         registry->RemoveComponent<Position>(entity);
         registry->RemoveComponent<Health>(entity);
@@ -311,9 +311,9 @@ TEST_F(ErrorRecoveryTest, RapidArchetypeTransitions)
 TEST_F(ErrorRecoveryTest, ComponentDataIntegrityAfterTransitions)
 {
     Entity entity = registry->CreateEntity();
-    registry->AddComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
-    registry->AddComponent<Velocity>(entity, 4.0f, 5.0f, 6.0f);
-    registry->AddComponent<Health>(entity, 100, 150);
+    registry->EmplaceComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
+    registry->EmplaceComponent<Velocity>(entity, 4.0f, 5.0f, 6.0f);
+    registry->EmplaceComponent<Health>(entity, 100, 150);
     
     Position* pos = registry->GetComponent<Position>(entity);
     ASSERT_NE(pos, nullptr);
@@ -321,11 +321,11 @@ TEST_F(ErrorRecoveryTest, ComponentDataIntegrityAfterTransitions)
     EXPECT_FLOAT_EQ(pos->y, 2.0f);
     EXPECT_FLOAT_EQ(pos->z, 3.0f);
     
-    registry->AddComponent<Transform>(entity);
+    registry->EmplaceComponent<Transform>(entity);
     registry->RemoveComponent<Velocity>(entity);
-    registry->AddComponent<Player>(entity);
+    registry->EmplaceComponent<Player>(entity);
     registry->RemoveComponent<Health>(entity);
-    registry->AddComponent<Enemy>(entity);
+    registry->EmplaceComponent<Enemy>(entity);
     
     pos = registry->GetComponent<Position>(entity);
     ASSERT_NE(pos, nullptr);

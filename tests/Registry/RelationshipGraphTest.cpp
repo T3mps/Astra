@@ -26,7 +26,7 @@ protected:
         std::vector<Astra::Entity> entities;
         for (size_t i = 0; i < count; ++i)
         {
-            entities.emplace_back(static_cast<Astra::Entity::IDType>(i), 1);
+            entities.emplace_back(static_cast<Astra::Entity::StorageType>(i), 1);
         }
         return entities;
     }

@@ -12,7 +12,7 @@ namespace Astra
     class EntityIDStack
     {
     public:
-        using IDType = Entity::IDType;
+        using IDType = Entity::StorageType;
         using VersionType = Entity::VersionType;
         
         static constexpr IDType INVALID_ID = Entity::ID_MASK;
@@ -186,6 +186,6 @@ namespace std
     template<std::size_t I>
     struct tuple_element<I, Astra::EntityIDStack::VersionedID>
     {
-        using type = std::conditional_t<I == 0, Astra::Entity::IDType, Astra::Entity::VersionType>;
+        using type = std::conditional_t<I == 0, Astra::Entity::StorageType, Astra::Entity::VersionType>;
     };
 }

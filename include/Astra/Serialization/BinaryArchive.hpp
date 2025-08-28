@@ -9,7 +9,7 @@
 
 #include "../Core/Base.hpp"
 #include "../Core/Result.hpp"
-#include "../Platform/Simd.hpp"
+#include "../Core/Simd.hpp"
 #include "SerializationError.hpp"
 
 namespace Astra
@@ -156,7 +156,6 @@ namespace Astra
         BinaryArchive() = default;
         virtual ~BinaryArchive() = default;
         
-        // Non-copyable, movable
         BinaryArchive(const BinaryArchive&) = delete;
         BinaryArchive& operator=(const BinaryArchive&) = delete;
         BinaryArchive(BinaryArchive&&) = default;

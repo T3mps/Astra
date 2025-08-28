@@ -33,15 +33,12 @@ namespace Astra
 
     namespace Simd
     {
-        // Width tags for explicit control
-        struct Width128 {};  // 16 bytes
-        struct Width256 {};  // 32 bytes
+        struct Width128 {};
+        struct Width256 {};
 
-        // Concept for valid SIMD widths
         template<typename T>
         concept SimdWidth = std::is_same_v<T, Width128> || std::is_same_v<T, Width256>;
 
-        // Width traits
         template<typename Width>
         struct WidthTraits;
 
@@ -59,7 +56,6 @@ namespace Astra
             using MaskType = uint32_t;
         };
 
-        // Alignment utilities
         template<SimdWidth Width>
         inline constexpr size_t AlignmentV = WidthTraits<Width>::bytes;
 
@@ -69,10 +65,8 @@ namespace Astra
             return (reinterpret_cast<uintptr_t>(ptr) & (AlignmentV<Width> - 1)) == 0;
         }
 
-        // Capability detection
         namespace Capabilities
         {
-            // Check if a specific width is supported with hardware acceleration
             template<SimdWidth Width>
             ASTRA_NODISCARD inline constexpr bool HasWidth() noexcept
             {
@@ -95,7 +89,6 @@ namespace Astra
                 return false;
             }
 
-            // Check if a specific width has optimized fallback
             template<SimdWidth Width>
             ASTRA_NODISCARD inline constexpr bool HasFallback() noexcept
             {
@@ -496,7 +489,7 @@ namespace Astra
                     }
 #endif
                 }
-#elif ASTRA_HAS_BUILTIN(__builtin_clz) || HAS_BUILTIN(__builtin_clzll)
+#elif ASTRA_HAS_BUILTIN(__builtin_clz) || ASTRA_HAS_BUILTIN(__builtin_clzll)
                 if constexpr (sizeof(MaskType) <= 4)
                 {
                     return 32 - __builtin_clz(static_cast<unsigned>(mask));
@@ -546,7 +539,7 @@ namespace Astra
 #endif
                 }
                 return static_cast<int>(idx);
-#elif ASTRA_HAS_BUILTIN(__builtin_ctz) || HAS_BUILTIN(__builtin_ctzll)
+#elif ASTRA_HAS_BUILTIN(__builtin_ctz) || ASTRA_HAS_BUILTIN(__builtin_ctzll)
                 if constexpr (sizeof(MaskType) <= 4)
                 {
                     return __builtin_ctz(static_cast<unsigned>(mask));

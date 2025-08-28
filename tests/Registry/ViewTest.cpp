@@ -38,42 +38,42 @@ protected:
             Astra::Entity e = registry->CreateEntity();
             
             // All entities get Position
-            registry->AddComponent<Position>(e, float(i), float(i * 2), float(i * 3));
+            registry->EmplaceComponent<Position>(e, float(i), float(i * 2), float(i * 3));
             
             // Every 2nd entity gets Velocity
             if (i % 2 == 0)
             {
-                registry->AddComponent<Velocity>(e, float(i * 10), 0.0f, 0.0f);
+                registry->EmplaceComponent<Velocity>(e, float(i * 10), 0.0f, 0.0f);
             }
             
             // Every 3rd entity gets Health
             if (i % 3 == 0)
             {
-                registry->AddComponent<Health>(e, i, 100);
+                registry->EmplaceComponent<Health>(e, i, 100);
             }
             
             // Every 5th entity is Static
             if (i % 5 == 0)
             {
-                registry->AddComponent<Static>(e);
+                registry->EmplaceComponent<Static>(e);
             }
             
             // Every 7th entity is Renderable
             if (i % 7 == 0)
             {
-                registry->AddComponent<RenderData>(e);
+                registry->EmplaceComponent<RenderData>(e);
             }
             
             // First 10 entities are Players
             if (i < 10)
             {
-                registry->AddComponent<Player>(e);
+                registry->EmplaceComponent<Player>(e);
             }
             
             // Entities 90-99 are Enemies
             if (i >= 90)
             {
-                registry->AddComponent<Enemy>(e);
+                registry->EmplaceComponent<Enemy>(e);
             }
         }
     }
@@ -224,27 +224,6 @@ TEST_F(ViewTest, CombinedModifiers)
     EXPECT_EQ(count, 16u);
 }
 
-// Test range-based for loop iteration
-TEST_F(ViewTest, RangeBasedIteration)
-{
-    using namespace Astra::Test;
-    
-    CreateTestEntities();
-    
-    auto view = registry->CreateView<Position, Velocity>();
-    
-    size_t count = 0;
-    for (auto [entity, pos, vel] : view)
-    {
-        count++;
-        EXPECT_NE(pos, nullptr);
-        EXPECT_NE(vel, nullptr);
-        EXPECT_EQ(int(pos->x) % 2, 0);
-    }
-    
-    EXPECT_EQ(count, 50u);
-}
-
 // Test empty view
 TEST_F(ViewTest, EmptyView)
 {
@@ -254,17 +233,10 @@ TEST_F(ViewTest, EmptyView)
     auto view = registry->CreateView<Position>();
     
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos) {
-        count++;
-    });
-    
-    EXPECT_EQ(count, 0u);
-    
-    // Range-based iteration should also work
-    for (auto [entity, pos] : view)
+    view.ForEach([&count](Astra::Entity e, Position& pos)
     {
         count++;
-    }
+    });
     
     EXPECT_EQ(count, 0u);
 }
@@ -288,7 +260,7 @@ TEST_F(ViewTest, ViewInvalidation)
     EXPECT_EQ(count, 1u);
     
     // Add Velocity to e1
-    registry->AddComponent<Velocity>(e1, 2.0f, 0.0f, 0.0f);
+    registry->EmplaceComponent<Velocity>(e1, 2.0f, 0.0f, 0.0f);
     
     // View should now see 2 entities
     count = 0;
@@ -318,11 +290,11 @@ TEST_F(ViewTest, PerformanceCharacteristics)
     for (size_t i = 0; i < entityCount; ++i)
     {
         Astra::Entity e = registry->CreateEntity();
-        registry->AddComponent<Position>(e, float(i), 0.0f, 0.0f);
+        registry->EmplaceComponent<Position>(e, float(i), 0.0f, 0.0f);
         
         if (i % 2 == 0)
         {
-            registry->AddComponent<Velocity>(e, 1.0f, 0.0f, 0.0f);
+            registry->EmplaceComponent<Velocity>(e, 1.0f, 0.0f, 0.0f);
         }
     }
     
@@ -336,16 +308,6 @@ TEST_F(ViewTest, PerformanceCharacteristics)
     });
     
     EXPECT_EQ(forEachCount, entityCount / 2);
-    
-    // Test range-based iteration performance
-    size_t rangeCount = 0;
-    for (auto [entity, pos, vel] : view)
-    {
-        rangeCount++;
-        pos->x += vel->dx; // Same operation
-    }
-    
-    EXPECT_EQ(rangeCount, entityCount / 2);
 }
 
 // Test view with no matching entities

@@ -8,8 +8,8 @@
 #include <utility>
 #include <vector>
 
-#include "Base.hpp"
 #include "../Container/SmallVector.hpp"
+#include "Base.hpp"
 
 namespace Astra
 {
@@ -19,18 +19,13 @@ namespace Astra
     template<typename Signature>
     class MulticastDelegate;
     
-    /**
-     * Type-erased delegate for storing and invoking callable objects.
-     * Uses small buffer optimization for small functors and shared_ptr
-     * for large functors to ensure proper memory management.
-     */
     template<typename R, typename... Args>
     class Delegate<R(Args...)>
     {
     public:
         using ResultType = R;
         
-        static constexpr size_t SmallBufferSize = 32;
+        static constexpr size_t SMALL_BUFFER_SIZE = 32;
         
         Delegate() noexcept : m_invoker(nullptr) {}
         
@@ -42,7 +37,7 @@ namespace Astra
             if (func)
             {
                 using FuncType = Func*;
-                static_assert(sizeof(FuncType) <= SmallBufferSize, "Function pointer too large");
+                static_assert(sizeof(FuncType) <= SMALL_BUFFER_SIZE, "Function pointer too large");
                 
                 new (m_storage) FuncType(func);
                 m_invoker = &InvokeFunctionPointer<Func>;
@@ -54,8 +49,7 @@ namespace Astra
         {
             using DecayedFunc = std::decay_t<Func>;
             
-            if constexpr (sizeof(DecayedFunc) <= SmallBufferSize && 
-                         std::is_nothrow_move_constructible_v<DecayedFunc>)
+            if constexpr (sizeof(DecayedFunc) <= SMALL_BUFFER_SIZE && std::is_nothrow_move_constructible_v<DecayedFunc>)
             {
                 new (m_storage) DecayedFunc(std::forward<Func>(func));
                 m_invoker = &InvokeSmallFunctor<DecayedFunc>;
@@ -65,8 +59,7 @@ namespace Astra
             {
                 // Use shared_ptr for large functors to enable safe copying
                 auto* heapFunc = new DecayedFunc(std::forward<Func>(func));
-                *reinterpret_cast<std::shared_ptr<DecayedFunc>*>(m_storage) = 
-                    std::shared_ptr<DecayedFunc>(heapFunc);
+                *reinterpret_cast<std::shared_ptr<DecayedFunc>*>(m_storage) = std::shared_ptr<DecayedFunc>(heapFunc);
                 m_invoker = &InvokeLargeFunctor<DecayedFunc>;
                 m_manager = &ManageLargeFunctor<DecayedFunc>;
             }
@@ -83,7 +76,7 @@ namespace Astra
                 MemberFunc T::*memberFunc;
             };
             
-            static_assert(sizeof(MemberBinding) <= SmallBufferSize, "Member binding too large");
+            static_assert(sizeof(MemberBinding) <= SMALL_BUFFER_SIZE, "Member binding too large");
             
             new (delegate.m_storage) MemberBinding{instance, memberFunc};
             delegate.m_invoker = &InvokeMemberFunction<T, MemberFunc>;
@@ -138,6 +131,7 @@ namespace Astra
                 }
                 else if (m_invoker)
                 {
+                    // Function pointer - simple copy
                     std::memcpy(m_storage, other.m_storage, sizeof(void*));
                 }
             }
@@ -157,6 +151,7 @@ namespace Astra
                 }
                 else if (m_invoker)
                 {
+                    // Function pointer - simple copy
                     std::memcpy(m_storage, other.m_storage, sizeof(void*));
                 }
                 other.m_invoker = nullptr;
@@ -225,11 +220,6 @@ namespace Astra
         
         using ManagerType = void(*)(ManagerOp, void*, const void*);
         
-        // Simple storage - no union needed, shared_ptr is stored in-place
-        alignas(std::max_align_t) mutable std::byte m_storage[SmallBufferSize];
-        InvokerType m_invoker;
-        ManagerType m_manager = nullptr;
-        
         template<typename Func>
         static R InvokeFunctionPointer(const void* storage, Args... args)
         {
@@ -240,14 +230,14 @@ namespace Astra
         template<typename Func>
         static R InvokeSmallFunctor(const void* storage, Args... args)
         {
-            const auto& func = *reinterpret_cast<const Func*>(storage);
+            auto& func = *const_cast<Func*>(reinterpret_cast<const Func*>(storage));
             return func(std::forward<Args>(args)...);
         }
         
         template<typename Func>
         static R InvokeLargeFunctor(const void* storage, Args... args)
         {
-            const auto& sharedPtr = *reinterpret_cast<const std::shared_ptr<Func>*>(storage);
+            auto& sharedPtr = *const_cast<std::shared_ptr<Func>*>(reinterpret_cast<const std::shared_ptr<Func>*>(storage));
             return (*sharedPtr)(std::forward<Args>(args)...);
         }
         
@@ -308,18 +298,18 @@ namespace Astra
                     break;
             }
         }
+
+        alignas(std::max_align_t) mutable std::byte m_storage[SMALL_BUFFER_SIZE];
+        InvokerType m_invoker;
+        ManagerType m_manager = nullptr;
     };
     
-    /**
-     * Multicast delegate that can store multiple callable objects
-     * and invoke them all when called.
-     */
     template<typename R, typename... Args>
     class MulticastDelegate<R(Args...)>
     {
     public:
         using DelegateType = Delegate<R(Args...)>;
-        using result_type = R;
+        using ResultType = R;
         using HandlerID = std::size_t;
         
         MulticastDelegate() = default;

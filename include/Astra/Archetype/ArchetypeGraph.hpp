@@ -8,12 +8,6 @@ namespace Astra
 {
     class Archetype;
     
-    /**
-     * Manages the graph of archetypes and their transitions via component addition/removal.
-     * This graph allows O(1) archetype lookups when adding or removing components from entities.
-     * 
-     * Uses FlatMap for high-performance lookups with SIMD acceleration.
-     */
     class ArchetypeGraph
     {
     public:
@@ -26,81 +20,60 @@ namespace Astra
         ArchetypeGraph(ArchetypeGraph&&) = default;
         ArchetypeGraph& operator=(ArchetypeGraph&&) = default;
         
-        /**
-         * Set or update an edge for adding a component.
-         * @param from Source archetype
-         * @param componentId Component being added
-         * @param to Target archetype (with the component)
-         */
         void SetAddEdge(Archetype* from, ComponentID componentId, Archetype* to)
         {
+            if (!from || !to) ASTRA_UNLIKELY
+                return;
+            
             auto& edges = m_addEdges[from];
-            edges.Insert({componentId, to});
+            edges.Insert(std::make_pair(componentId, to));
         }
         
-        /**
-         * Set or update an edge for removing a component.
-         * @param from Source archetype
-         * @param componentId Component being removed
-         * @param to Target archetype (without the component)
-         */
         void SetRemoveEdge(Archetype* from, ComponentID componentId, Archetype* to)
         {
+            if (!from || !to) ASTRA_UNLIKELY
+                return;
+            
             auto& edges = m_removeEdges[from];
-            edges.Insert({componentId, to});
+            edges.Insert(std::make_pair(componentId, to));
         }
         
-        /**
-         * Get the target archetype when adding a component.
-         * @param from Source archetype
-         * @param componentId Component to add
-         * @return Target archetype or nullptr if edge doesn't exist
-         */
+        template<typename EdgeMap>
+        ASTRA_NODISCARD Archetype* GetEdgeInternal(const EdgeMap& edges, Archetype* from, ComponentID componentId) const noexcept
+        {
+            if (!from) ASTRA_UNLIKELY
+                return nullptr;
+            
+            auto it = edges.Find(from);
+            if (it == edges.end())
+                return nullptr;
+                
+            auto edgeIt = it->second.Find(componentId);
+            return edgeIt != it->second.end() ? edgeIt->second : nullptr;
+        }
+        
         ASTRA_NODISCARD Archetype* GetAddEdge(Archetype* from, ComponentID componentId) const noexcept
         {
-            auto it = m_addEdges.Find(from);
-            if (it == m_addEdges.end())
-                return nullptr;
-                
-            auto edgeIt = it->second.Find(componentId);
-            return edgeIt != it->second.end() ? edgeIt->second : nullptr;
+            return GetEdgeInternal(m_addEdges, from, componentId);
         }
-        
-        /**
-         * Get the target archetype when removing a component.
-         * @param from Source archetype
-         * @param componentId Component to remove
-         * @return Target archetype or nullptr if edge doesn't exist
-         */
+
         ASTRA_NODISCARD Archetype* GetRemoveEdge(Archetype* from, ComponentID componentId) const noexcept
         {
-            auto it = m_removeEdges.Find(from);
-            if (it == m_removeEdges.end())
-                return nullptr;
-                
-            auto edgeIt = it->second.Find(componentId);
-            return edgeIt != it->second.end() ? edgeIt->second : nullptr;
+            return GetEdgeInternal(m_removeEdges, from, componentId);
         }
         
-        /**
-         * Remove all edges pointing to a specific archetype.
-         * Used when an archetype is being destroyed.
-         * @param target Archetype to remove edges to
-         * @return Number of edges removed
-         */
-        size_t RemoveEdgesTo(Archetype* target)
+        template<typename EdgeMap>
+        size_t RemoveEdgesToInternal(EdgeMap& edges, Archetype* target)
         {
             size_t removed = 0;
-            
-            // Remove from add edges
-            for (auto& [from, edges] : m_addEdges)
+            for (auto& [from, edgeMap] : edges)
             {
-                auto it = edges.begin();
-                while (it != edges.end())
+                auto it = edgeMap.begin();
+                while (it != edgeMap.end())
                 {
                     if (it->second == target)
                     {
-                        it = edges.Erase(it);
+                        it = edgeMap.Erase(it);
                         ++removed;
                     }
                     else
@@ -109,51 +82,33 @@ namespace Astra
                     }
                 }
             }
-            
-            // Remove from remove edges
-            for (auto& [from, edges] : m_removeEdges)
-            {
-                auto it = edges.begin();
-                while (it != edges.end())
-                {
-                    if (it->second == target)
-                    {
-                        it = edges.Erase(it);
-                        ++removed;
-                    }
-                    else
-                    {
-                        ++it;
-                    }
-                }
-            }
-            
             return removed;
         }
         
-        /**
-         * Remove all edges from a specific archetype.
-         * Used when an archetype is being destroyed.
-         * @param from Archetype to remove edges from
-         */
+        size_t RemoveEdgesTo(Archetype* target)
+        {
+            if (!target) ASTRA_UNLIKELY
+                return 0;
+            
+            return RemoveEdgesToInternal(m_addEdges, target) + 
+                   RemoveEdgesToInternal(m_removeEdges, target);
+        }
+        
         void RemoveEdgesFrom(Archetype* from)
         {
+            if (!from) ASTRA_UNLIKELY
+                return;
+            
             m_addEdges.Erase(from);
             m_removeEdges.Erase(from);
         }
-        
-        /**
-         * Clear all edges in the graph.
-         */
+
         void Clear()
         {
             m_addEdges.Clear();
             m_removeEdges.Clear();
         }
-        
-        /**
-         * Get the total number of edges in the graph.
-         */
+
         ASTRA_NODISCARD size_t GetEdgeCount() const noexcept
         {
             size_t count = 0;
@@ -169,9 +124,6 @@ namespace Astra
         }
         
     private:
-        // Use FlatMap for high-performance lookups
-        // Outer map: Archetype* -> edge map
-        // Inner map: ComponentID -> target Archetype*
         FlatMap<Archetype*, FlatMap<ComponentID, Archetype*>> m_addEdges;
         FlatMap<Archetype*, FlatMap<ComponentID, Archetype*>> m_removeEdges;
     };

@@ -7,7 +7,7 @@
 #include <array>
 
 #include "../Component/Component.hpp"
-#include "../Platform/Platform.hpp"
+#include "../Core/Platform.hpp"
 #include "Base.hpp"
 
 namespace Astra

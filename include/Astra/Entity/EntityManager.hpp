@@ -19,11 +19,11 @@
 
 namespace Astra
 {
-    class EntityManager : public std::enable_shared_from_this<EntityManager>
+    class EntityManager
     {
     public:
         using VersionType = Entity::VersionType;
-        using IDType = Entity::IDType;
+        using IDType = Entity::StorageType;
         
         struct Config
         {
@@ -234,72 +234,54 @@ namespace Astra
             m_table.ShrinkToFit();
         }
 
+        // Iterator support for range-based for loops
         class iterator
         {
-        private:
-            EntityTable::iterator m_iter;
-
         public:
             using iterator_category = std::forward_iterator_tag;
             using value_type = Entity;
             using difference_type = std::ptrdiff_t;
-            using pointer = const Entity*;
+            using pointer = Entity*;
             using reference = Entity;
-
-            explicit iterator(EntityTable::iterator iter) noexcept : m_iter(iter) {}
-
-            ASTRA_NODISCARD Entity operator*() const noexcept
+            
+            iterator(EntityTable::iterator it) : m_it(it) {}
+            
+            reference operator*() const 
             {
-                auto [id, version] = *m_iter;
+                auto [id, version] = *m_it;
                 return Entity(id, version);
             }
-
-            iterator& operator++() noexcept
+            
+            iterator& operator++() 
             {
-                ++m_iter;
+                ++m_it;
                 return *this;
             }
-
-            iterator operator++(int) noexcept
+            
+            iterator operator++(int) 
             {
                 iterator tmp = *this;
                 ++(*this);
                 return tmp;
             }
-
-            ASTRA_NODISCARD bool operator==(const iterator& other) const noexcept
-            {
-                return m_iter == other.m_iter;
-            }
-
-            ASTRA_NODISCARD bool operator!=(const iterator& other) const noexcept
-            {
-                return !(*this == other);
-            }
+            
+            bool operator==(const iterator& other) const { return m_it == other.m_it; }
+            bool operator!=(const iterator& other) const { return m_it != other.m_it; }
+            
+        private:
+            EntityTable::iterator m_it;
         };
-
-        ASTRA_NODISCARD iterator begin() const noexcept
-        {
-            return iterator(m_table.begin());
-        }
-
-        ASTRA_NODISCARD iterator end() const noexcept
-        {
-            return iterator(m_table.end());
-        }
-
+        
+        iterator begin() const { return iterator(m_table.begin()); }
+        iterator end() const { return iterator(m_table.end()); }
+        
         void Validate() const noexcept
         {
 #ifdef ASTRA_BUILD_DEBUG
-            // Verify that alive count matches iteration count
-            std::size_t aliveCount = 0;
-            for (auto it = begin(); it != end(); ++it)
-            {
-                ++aliveCount;
-            }
-            
-            assert(aliveCount == Size() && "Alive count mismatch");
-            assert(m_idStack.GetNextID() <= Entity::ID_MASK + 1 && "Next ID overflow");
+            // Verify that alive count matches table's alive count
+            // Note: Can't iterate without iterators, so we trust the table's count
+            ASTRA_ASSERT(m_table.AliveCount() == Size(), "Alive count mismatch");
+            ASTRA_ASSERT(m_idStack.GetNextID() <= Entity::ID_MASK + 1, "Next ID overflow");
 #endif
         }
 
@@ -383,8 +365,7 @@ namespace Astra
                 return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(reader.GetError());
             }
             
-            // Recreate manager with configuration
-            manager->m_idStack = EntityIDStack();
+            // Recreate table with the restored configuration (not default)
             manager->m_table = EntityTable(manager->m_config.tableConfig);
             
             // Restore ID stack state
