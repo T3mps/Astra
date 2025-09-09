@@ -56,7 +56,8 @@ namespace Astra
 
             template<typename T>
             ASTRA_NODISCARD constexpr explicit operator T() const noexcept
-                requires std::convertible_to<IDType, T> && !std::same_as<T, bool>
+            //GCC requires parentheses around the requires expression
+                requires (std::convertible_to<IDType, T> && !std::same_as<T, bool>)
             { 
                 return static_cast<T>(m_entity);
             }

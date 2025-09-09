@@ -29,6 +29,7 @@ namespace Astra
         {
             EntityTable::Config tableConfig;
             
+            // GCC fix: Remove conflicting default constructor, parameterized constructor handles defaults  
             Config(IDType segmentSize = 65536) :
                 tableConfig(segmentSize)
             {}

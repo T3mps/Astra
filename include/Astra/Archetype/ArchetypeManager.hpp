@@ -82,7 +82,8 @@ namespace Astra
         };
         
         // Default constructor creates new component registry
-        explicit ArchetypeManager(const ArchetypeChunkPool::Config& poolConfig = {}) 
+    // Original: explicit ArchetypeManager(const ArchetypeChunkPool::Config& poolConfig = {})
+    explicit ArchetypeManager(ArchetypeChunkPool::Config poolConfig = {}) 
             : m_chunkPool(poolConfig)
             , m_componentRegistry(std::make_shared<ComponentRegistry>())
         {
@@ -90,7 +91,8 @@ namespace Astra
         }
         
         // Constructor for sharing component registry
-        ArchetypeManager(std::shared_ptr<ComponentRegistry> registry, const ArchetypeChunkPool::Config& poolConfig = {})
+    // Original: ArchetypeManager(std::shared_ptr<ComponentRegistry> registry, const ArchetypeChunkPool::Config& poolConfig = {})
+    ArchetypeManager(std::shared_ptr<ComponentRegistry> registry, ArchetypeChunkPool::Config poolConfig = {})
             : m_chunkPool(poolConfig)
             , m_componentRegistry(std::move(registry))
         {
@@ -490,6 +492,9 @@ namespace Astra
             size_t minArchetypesToKeep = 8;           // Keep at least this many archetypes
             size_t maxArchetypesToRemove = SIZE_MAX;  // Max to remove in one call
             size_t maxPeakEntityCount = SIZE_MAX;     // Only remove if peak count below this
+            
+            // GCC fix: explicit default constructor for brace initialization
+            CleanupOptions() = default;
         };
         
         // Information about an archetype
@@ -560,8 +565,10 @@ namespace Astra
             return total;
         }
         
-        // Remove empty archetypes based on options
-        size_t CleanupEmptyArchetypes(const CleanupOptions& options = {})
+        // GCC fix: Provide overloaded methods to avoid default member initializer issues
+        size_t CleanupEmptyArchetypes() { return CleanupEmptyArchetypes(CleanupOptions()); }
+        
+        size_t CleanupEmptyArchetypes(CleanupOptions options)
         {
             // Never remove root archetype
             if (m_archetypes.size() <= options.minArchetypesToKeep)

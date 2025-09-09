@@ -32,12 +32,14 @@ namespace Astra
             bool autoRelease = true;                // Auto-release empty segments
             size_t maxEmptySegments = 2;            // Keep some empty segments ready
             
+            // GCC fix: Remove conflicting default constructor, parameterized constructor handles defaults
             Config(IDType segmentSize = 65536)
             {
                 entitiesPerSegment = segmentSize > 0 ? std::bit_floor(segmentSize) : 1;
                 entitiesPerSegment = std::max(IDType(1024), entitiesPerSegment);
                 entitiesPerSegmentShift = static_cast<IDType>(std::countr_zero(entitiesPerSegment));
                 entitiesPerSegmentMask = entitiesPerSegment - 1;
+                // Note: Other members use their default member initializers
             }
         };
 

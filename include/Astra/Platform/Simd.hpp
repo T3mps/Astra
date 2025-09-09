@@ -436,7 +436,8 @@ namespace Astra
                         __popcnt(static_cast<unsigned>(mask >> 32));
 #endif
                 }
-#elif ASTRA_HAS_BUILTIN(__builtin_popcount) || ASTRA_HAS_BUILTIN(__builtin_popcountll)
+// Original: #elif ASTRA_HAS_BUILTIN(__builtin_popcount) || ASTRA_HAS_BUILTIN(__builtin_popcountll)
+#elif (defined(ASTRA_HAS_BUILTIN) && ASTRA_HAS_BUILTIN(__builtin_popcount)) || (defined(ASTRA_HAS_BUILTIN) && ASTRA_HAS_BUILTIN(__builtin_popcountll))
                 if constexpr (sizeof(MaskType) <= 4)
                 {
                     return __builtin_popcount(static_cast<unsigned>(mask));
@@ -496,7 +497,8 @@ namespace Astra
                     }
 #endif
                 }
-#elif ASTRA_HAS_BUILTIN(__builtin_clz) || HAS_BUILTIN(__builtin_clzll)
+// Original: #elif ASTRA_HAS_BUILTIN(__builtin_clz) || HAS_BUILTIN(__builtin_clzll)
+#elif (defined(ASTRA_HAS_BUILTIN) && ASTRA_HAS_BUILTIN(__builtin_clz)) || (defined(ASTRA_HAS_BUILTIN) && ASTRA_HAS_BUILTIN(__builtin_clzll))
                 if constexpr (sizeof(MaskType) <= 4)
                 {
                     return 32 - __builtin_clz(static_cast<unsigned>(mask));
@@ -546,7 +548,8 @@ namespace Astra
 #endif
                 }
                 return static_cast<int>(idx);
-#elif ASTRA_HAS_BUILTIN(__builtin_ctz) || HAS_BUILTIN(__builtin_ctzll)
+// Original: #elif ASTRA_HAS_BUILTIN(__builtin_ctz) || HAS_BUILTIN(__builtin_ctzll)
+#elif (defined(ASTRA_HAS_BUILTIN) && ASTRA_HAS_BUILTIN(__builtin_ctz)) || (defined(ASTRA_HAS_BUILTIN) && ASTRA_HAS_BUILTIN(__builtin_ctzll))
                 if constexpr (sizeof(MaskType) <= 4)
                 {
                     return __builtin_ctz(static_cast<unsigned>(mask));
@@ -818,9 +821,16 @@ namespace Astra
                 case PrefetchHint::NTA: __builtin_prefetch(ptr, 0, 0); break;
                 }
 #endif
-#elif ASTRA_HAS_BUILTIN(__builtin_prefetch)
-                int locality = 3 - static_cast<int>(hint);
-                __builtin_prefetch(ptr, 0, locality);
+// Original: #elif ASTRA_HAS_BUILTIN(__builtin_prefetch)
+#elif (defined(ASTRA_HAS_BUILTIN) && ASTRA_HAS_BUILTIN(__builtin_prefetch))
+                // GCC fix: __builtin_prefetch requires constant third argument
+                switch (hint)
+                {
+                case PrefetchHint::T0:  __builtin_prefetch(ptr, 0, 3); break;
+                case PrefetchHint::T1:  __builtin_prefetch(ptr, 0, 2); break;
+                case PrefetchHint::T2:  __builtin_prefetch(ptr, 0, 1); break;
+                case PrefetchHint::NTA: __builtin_prefetch(ptr, 0, 0); break;
+                }
 #elif defined(HAS_NEON) && defined(__ARM_FEATURE_UNALIGNED)
                 __pld(ptr);
 #else

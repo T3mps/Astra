@@ -40,6 +40,9 @@ namespace Astra
             size_t maxChunks = 4096;    // Maximum chunks
             size_t initialBlocks = 0;   // Pre-allocate this many blocks
             bool useHugePages = true;   // Try to use huge pages for allocations
+            
+            // GCC fix: explicit default constructor for brace initialization
+            Config() = default;
         };
         
         struct Stats
@@ -567,7 +570,10 @@ namespace Astra
             friend class ArchetypeChunkPool;
         };
         
-        explicit ArchetypeChunkPool(const Config& config = {}) :
+    // GCC fix: Provide both explicit config constructor and default constructor
+    explicit ArchetypeChunkPool() : ArchetypeChunkPool(Config()) {}
+    
+    explicit ArchetypeChunkPool(Config config) :
             m_config(config),
             m_freeList(nullptr)
         {

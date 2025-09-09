@@ -144,6 +144,29 @@ namespace Astra
         template<typename... QueryArgs>
         using AllComponents = typename UniqueTypes<typename ExtractComponents<QueryArgs...>::type>::type;
         
+        // GCC fix: Move GetRequiredImpl to namespace scope to allow template specializations
+        // Helper template to extract required components
+        template<typename... Args>
+        struct GetRequiredImpl;
+        
+        // Base case: no arguments
+        template<>
+        struct GetRequiredImpl<>
+        {
+            using type = std::tuple<>;
+        };
+        
+        // Recursive case: process one argument at a time
+        template<typename T, typename... Rest>
+        struct GetRequiredImpl<T, Rest...>
+        {
+            using type = std::conditional_t<
+                IsModifier_v<T>,
+                typename GetRequiredImpl<Rest...>::type,
+                decltype(std::tuple_cat(std::tuple<T>{}, std::declval<typename GetRequiredImpl<Rest...>::type>()))
+            >;
+        };
+        
         // Separate query arguments into categories
         template<typename... QueryArgs>
         struct QueryClassifier
@@ -177,24 +200,11 @@ namespace Astra
                 using type = decltype(std::tuple_cat(std::tuple<std::tuple<Ts...>>{}, std::declval<typename FilterByModifier<Modifier, Rest...>::type>()));
             };
             
-            // Get required components (non-modified)
+            // GCC fix: Use GetRequiredImpl moved to namespace scope
             template<typename... Args>
-            struct GetRequired;
-            
-            template<>
-            struct GetRequired<>
+            struct GetRequired
             {
-                using type = std::tuple<>;
-            };
-            
-            template<typename T, typename... Rest>
-            struct GetRequired<T, Rest...>
-            {
-                using type = std::conditional_t<
-                    IsModifier_v<T>,
-                    typename GetRequired<Rest...>::type,
-                    decltype(std::tuple_cat(std::tuple<T>{}, std::declval<typename GetRequired<Rest...>::type>()))
-                >;
+                using type = typename GetRequiredImpl<Args...>::type;
             };
             
             using RequiredComponents = typename GetRequired<QueryArgs...>::type;

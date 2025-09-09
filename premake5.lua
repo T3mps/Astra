@@ -1,5 +1,9 @@
+--Premake5 build configuration for Astra project Cross-platform Linux And MAC GCC hotfixes
+require "premake-LinkTimeModule"
+
 workspace "Astra"
-    architecture "x64"
+
+--------- END OF HOTFIX ---------
     configurations { "Debug", "Release", "Dist" }
     startproject "AstraBenchmark"
     location "."  -- Solution file stays in root

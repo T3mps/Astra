@@ -34,11 +34,18 @@ namespace Astra
     public:
         struct Config
         {
-            EntityManager::Config entityManagerConfig;
-            ArchetypeChunkPool::Config chunkPoolConfig;
+            EntityManager::Config entityManagerConfig{};  // GCC fix: explicit default initialization
+            ArchetypeChunkPool::Config chunkPoolConfig{}; // GCC fix: explicit default initialization
+            
+            // GCC fix: explicit default constructor for brace initialization
+            Config() = default;
         };
         
-        explicit Registry(const Config& config = {}) :
+    // Original: explicit Registry(const Config& config = {})
+    // GCC fix: Provide both explicit config constructor and default constructor
+    explicit Registry() : Registry(Config()) {}
+    
+    explicit Registry(Config config) :
             m_entityManager(std::make_shared<EntityManager>(config.entityManagerConfig)),
             m_archetypeManager(std::make_shared<ArchetypeManager>(config.chunkPoolConfig))
         {}
@@ -48,12 +55,18 @@ namespace Astra
             m_archetypeManager(std::make_shared<ArchetypeManager>(chunkConfig))
         {}
         
-        Registry(std::shared_ptr<ComponentRegistry> componentRegistry, const Config& config = {}) :
+    // GCC fix: Provide overloaded constructors to avoid default member initializer issues
+    Registry(std::shared_ptr<ComponentRegistry> componentRegistry) : Registry(componentRegistry, Config()) {}
+    
+    Registry(std::shared_ptr<ComponentRegistry> componentRegistry, Config config) :
             m_entityManager(std::make_shared<EntityManager>(config.entityManagerConfig)),
             m_archetypeManager(std::make_shared<ArchetypeManager>(componentRegistry, config.chunkPoolConfig))
         {}
         
-        explicit Registry(const Registry& other, const Config& config = {}) :
+    // GCC fix: Provide overloaded constructors to avoid default member initializer issues
+    explicit Registry(const Registry& other) : Registry(other, Config()) {}
+    
+    explicit Registry(const Registry& other, Config config) :
             m_entityManager(std::make_shared<EntityManager>(config.entityManagerConfig)),
             m_archetypeManager(std::make_shared<ArchetypeManager>(other.GetComponentRegistry(), config.chunkPoolConfig))
         {}
@@ -393,7 +406,7 @@ namespace Astra
             }
             
             auto componentRegistry = m_archetypeManager->GetComponentRegistry();
-            m_archetypeManager = std::make_shared<ArchetypeManager>(std::move(componentRegistry));
+            m_archetypeManager = std::make_shared<ArchetypeManager>(std::move(componentRegistry), ArchetypeChunkPool::Config{});
 
             m_relationshipGraph.Clear();
             
@@ -426,21 +439,31 @@ namespace Astra
         /**
          * Options for controlling defragmentation behavior
          */
+        // HOTFIX: Move DefragmentationOptions above its first use as a default parameter (GCC/Clang requirement)
         struct DefragmentationOptions
         {
             // Archetype-level cleanup
+            // Original: size_t minEmptyDuration = 1;              // Remove archetypes empty for N updates
             size_t minEmptyDuration = 1;              // Remove archetypes empty for N updates
+            // Original: size_t minArchetypesToKeep = 8;           // Never go below this many archetypes
             size_t minArchetypesToKeep = 8;           // Never go below this many archetypes
+            // Original: size_t maxArchetypesToRemove = 10;        // Limit per call (for incremental)
             size_t maxArchetypesToRemove = 10;        // Limit per call (for incremental)
-            
             // Chunk-level defragmentation
+            // Original: bool defragmentChunks = true;             // Enable chunk coalescing
             bool defragmentChunks = true;             // Enable chunk coalescing
+            // Original: float chunkUtilizationThreshold = 0.5f;   // Pack chunks below this utilization
             float chunkUtilizationThreshold = 0.5f;   // Pack chunks below this utilization
+            // Original: size_t maxChunksToProcess = 100;          // Limit chunks processed per call
             size_t maxChunksToProcess = 100;          // Limit chunks processed per call
-            
             // Global limits
+            // Original: size_t maxEntitiesToMove = 10000;         // Total entity move budget
             size_t maxEntitiesToMove = 10000;         // Total entity move budget
+            // Original: bool incremental = false;                 // If true, strictly respect all limits
             bool incremental = false;                 // If true, strictly respect all limits
+            
+            // GCC fix: explicit default constructor for brace initialization
+            DefragmentationOptions() = default;
         };
         
         /**
@@ -489,7 +512,14 @@ namespace Astra
          *   aggressive.chunkUtilizationThreshold = 0.9f;
          *   auto result = registry.Defragment(aggressive);
          */
-        DefragmentationResult Defragment(const DefragmentationOptions& options = {})
+    // Original: DefragmentationResult Defragment(const DefragmentationOptions& options = {})
+    // HOTFIX: DefragmentationOptions definition moved above this function for GCC/Clang compatibility
+    // Original:
+    // DefragmentationResult Defragment(DefragmentationOptions options = DefragmentationOptions{})
+    // GCC fix: Provide overloaded methods to avoid default member initializer issues
+    DefragmentationResult Defragment() { return Defragment(DefragmentationOptions()); }
+    
+    DefragmentationResult Defragment(DefragmentationOptions options)
         {
             DefragmentationResult result;
             
@@ -800,11 +830,18 @@ namespace Astra
         /**
          * Configuration for saving registry
          */
+        // HOTFIX: Move SaveConfig above its first use as a default parameter (GCC/Clang requirement)
         struct SaveConfig
         {
+            // Original: CompressionMode compressionMode = CompressionMode::LZ4;
             CompressionMode compressionMode = CompressionMode::LZ4;
+            // Original: Compression::CompressionLevel compressionLevel = Compression::CompressionLevel::Fast;
             Compression::CompressionLevel compressionLevel = Compression::CompressionLevel::Fast;
+            // Original: size_t compressionThreshold = 1024; // Only compress blocks larger than this
             size_t compressionThreshold = 1024; // Only compress blocks larger than this
+            
+            // GCC fix: explicit default constructor for brace initialization
+            SaveConfig() = default;
         };
         
         /**
@@ -813,7 +850,15 @@ namespace Astra
          * @param config Save configuration (compression settings)
          * @return Success or error code
          */
-        Result<void, SerializationError> Save(const std::filesystem::path& path, const SaveConfig& config = SaveConfig{}) const
+    // Original: Result<void, SerializationError> Save(const std::filesystem::path& path, const SaveConfig& config = SaveConfig{}) const
+    // HOTFIX: SaveConfig definition moved above this function for GCC/Clang compatibility
+    // Original:
+    // Result<void, SerializationError> Save(const std::filesystem::path& path, SaveConfig config = SaveConfig{}) const
+    // Original: Result<void, SerializationError> Save(const std::filesystem::path& path, SaveConfig config = SaveConfig{}) const
+    // GCC fix: Provide overloaded methods to avoid default member initializer issues  
+    Result<void, SerializationError> Save(const std::filesystem::path& path) const { return Save(path, SaveConfig()); }
+    
+    Result<void, SerializationError> Save(const std::filesystem::path& path, SaveConfig config) const
         {
             BinaryWriter::Config writerConfig;
             writerConfig.compressionMode = config.compressionMode;
@@ -851,7 +896,10 @@ namespace Astra
          * @param config Save configuration (compression settings)
          * @return Buffer containing serialized data or error
          */
-        Result<std::vector<std::byte>, SerializationError> Save(const SaveConfig& config = SaveConfig{}) const
+    // GCC fix: Provide overloaded methods to avoid default member initializer issues
+    Result<std::vector<std::byte>, SerializationError> Save() const { return Save(SaveConfig()); }
+    
+    Result<std::vector<std::byte>, SerializationError> Save(SaveConfig config) const
         {
             std::vector<std::byte> buffer;
             
@@ -974,7 +1022,7 @@ namespace Astra
             registry->m_entityManager = std::move(*managerResult.GetValue());
             
             // Create new ArchetypeManager with the component registry and deserialize into it
-            registry->m_archetypeManager = std::make_shared<ArchetypeManager>(componentRegistry);
+            registry->m_archetypeManager = std::make_shared<ArchetypeManager>(componentRegistry, ArchetypeChunkPool::Config{});
             if (!registry->m_archetypeManager->Deserialize(reader))
             {
                 return Result<std::unique_ptr<Registry>, SerializationError>::Err(SerializationError::CorruptedData);
