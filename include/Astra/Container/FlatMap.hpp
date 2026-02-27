@@ -16,17 +16,12 @@
 
 #include "../Core/Base.hpp"
 #include "../Entity/Entity.hpp"
-#include "../Platform/Simd.hpp"
+#include "../Core/Simd.hpp"
+#include "../Core/Memory.hpp"
 #include "Swiss.hpp"
 
 namespace Astra
 {    
-    // FlatMap: A high-performance hash map with SwissTable-inspired design
-    // - SIMD-accelerated metadata scanning
-    // - Cache-friendly memory layout with prefetching
-    //
-    // Thread Safety: This container is NOT thread-safe. Concurrent access
-    // to non-const methods requires external synchronization.
     template<typename Key,
              typename Value,
              typename Hash = typename SelectHash<Key>::Type,
@@ -926,7 +921,7 @@ namespace Astra
             return {hash, h2};
         }
 
-        struct ASTRA_SIMD_ALIGNED Group
+        struct alignas(SIMD_ALIGNMENT) Group
         {
             // Aligned for SIMD operations (SSE/NEON use 128-bit registers)
             std::uint8_t metadata[GROUP_SIZE];

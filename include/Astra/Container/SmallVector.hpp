@@ -138,17 +138,17 @@ namespace Astra
         {
             if (this != &other)
             {
+                // Clean up current contents
                 clear();
-                
                 if (!IsSmall())
                 {
                     ::operator delete(m_data);
                 }
-                
+
                 if (other.IsSmall())
                 {
-                    // Reset to small buffer and move from other's small buffer
-                    m_data = GetBuffer();
+                    // Move elements from small buffer
+                    m_data = reinterpret_cast<T*>(m_buffer);
                     m_capacity = N;
                     std::uninitialized_move(other.begin(), other.end(), begin());
                     m_size = other.m_size;
@@ -160,7 +160,7 @@ namespace Astra
                     m_data = other.m_data;
                     m_capacity = other.m_capacity;
                     m_size = other.m_size;
-                    
+
                     // Reset other to small buffer
                     other.m_data = other.GetBuffer();
                     other.m_capacity = N;

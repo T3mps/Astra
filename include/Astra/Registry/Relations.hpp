@@ -1,308 +1,60 @@
 #pragma once
 
+#include <atomic>
+#include <future>
 #include <memory>
 #include <queue>
+#include <thread>
 #include <type_traits>
 
 #include "../Archetype/ArchetypeManager.hpp"
 #include "../Container/FlatSet.hpp"
+#include "../Container/SmallVector.hpp"
 #include "../Core/Base.hpp"
+#include "../Core/Simd.hpp"
 #include "../Entity/Entity.hpp"
-#include "../Entity/EntityManager.hpp"
 #include "Query.hpp"
 #include "RelationshipGraph.hpp"
 
 namespace Astra
 {
-    // Forward declaration
     class Registry;
-    
-    /**
-     * @brief Traversal order for hierarchy iteration
-     */
-    enum class TraversalOrder
-    {
-        BreadthFirst,  // Default - better for siblings with same components
-        DepthFirst     // Alternative - may be better for deep hierarchies
-    };
-    
-    /**
-     * @brief Query object for filtered access to entity relationships
-     * 
-     * Supports component filtering with query modifiers:
-     * - Basic components: Entity must have all specified components
-     * - Not<T>: Entity must NOT have component T
-     * - Any<T...>: Entity must have at least one of T...
-     * - OneOf<T...>: Entity must have exactly one of T...
-     * 
-     * @tparam QueryArgs Query arguments (components and modifiers)
-     */
+
     template<typename... QueryArgs>
     class Relations
     {
         static_assert(ValidQuery<QueryArgs...>, "Relations template arguments must be valid components or query modifiers");
         
-    private:
-        // Check if we have any filtering
-        static constexpr bool HasFiltering = sizeof...(QueryArgs) > 0;
+        static constexpr bool HAS_FILTERING = sizeof...(QueryArgs) > 0;
+        
+        // Parallel execution thresholds (same as View)
+        static constexpr size_t MIN_ENTITIES_FOR_PARALLEL = 1024;
+        static constexpr size_t MIN_ENTITIES_PER_THREAD = 256;
         
         // Extract query information only if filtering
-        using Classifier = std::conditional_t<HasFiltering,
+        using Classifier = std::conditional_t<HAS_FILTERING,
             Detail::QueryClassifier<QueryArgs...>,
-            Detail::QueryClassifier<>>;
+                Detail::QueryClassifier<>>;
         using RequiredTuple = typename Classifier::RequiredComponents;
         using ExcludedTuple = typename Classifier::ExcludedComponents;
         using AnyGroups = typename Classifier::AnyGroups;
         using OneOfGroups = typename Classifier::OneOfGroups;
         
     public:
-        using ChildrenView = const RelationshipGraph::ChildrenContainer&;
-        using LinksView = const RelationshipGraph::LinksContainer&;
-        
-        /**
-         * @brief Unified hierarchy iterator for both filtered and unfiltered access
-         */
-        class HierarchyIterator
-        {
-        public:
-            struct Entry
-            {
-                Entity entity;
-                size_t depth;
-            };
-            
-            using iterator_category = std::forward_iterator_tag;
-            using value_type = Entry;
-            using difference_type = ptrdiff_t;
-            using pointer = const Entry*;
-            using reference = const Entry&;
-            
-            HierarchyIterator() = default;
-            
-            HierarchyIterator(const Relations* parent, Entity root, bool descendants)
-                : m_parent(parent)
-                , m_graph(parent->m_graph)
-                , m_descendants(descendants)
-            {
-                if (root.IsValid())
-                {
-                    // Mark root as visited to prevent cycles
-                    m_visited.Insert(root);
-                    
-                    // Start traversal from root's children/parent
-                    if (descendants)
-                    {
-                        const auto& children = m_graph->GetChildren(root);
-                        for (Entity child : children)
-                        {
-                            if (m_visited.Find(child) == m_visited.end())
-                            {
-                                m_queue.push({child, 1});
-                                m_visited.Insert(child);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        Entity parent = m_graph->GetParent(root);
-                        if (parent.IsValid() && m_visited.Find(parent) == m_visited.end())
-                        {
-                            m_queue.push({parent, 1});
-                            m_visited.Insert(parent);
-                        }
-                    }
-                    
-                    // Find first valid element
-                    Advance();
-                }
-            }
-            
-            reference operator*() const { return m_current; }
-            pointer operator->() const { return &m_current; }
-            
-            HierarchyIterator& operator++()
-            {
-                Advance();
-                return *this;
-            }
-            
-            HierarchyIterator operator++(int)
-            {
-                HierarchyIterator tmp = *this;
-                ++(*this);
-                return tmp;
-            }
-            
-            friend bool operator==(const HierarchyIterator& a, const HierarchyIterator& b)
-            {
-                // Two iterators are equal if they're both at end or point to same entity
-                if (!a.m_current.entity.IsValid() && !b.m_current.entity.IsValid())
-                    return true;
-                if (a.m_current.entity.IsValid() && b.m_current.entity.IsValid())
-                    return a.m_current.entity == b.m_current.entity && a.m_current.depth == b.m_current.depth;
-                return false;
-            }
-            
-            friend bool operator!=(const HierarchyIterator& a, const HierarchyIterator& b)
-            {
-                return !(a == b);
-            }
-            
-        private:
-            void Advance()
-            {
-                // Process queue until we find a valid entity or exhaust the queue
-                while (!m_queue.empty())
-                {
-                    Entry candidate = m_queue.front();
-                    m_queue.pop();
-                    
-                    // Add children/parent of this candidate for future traversal
-                    if (m_descendants)
-                    {
-                        const auto& children = m_graph->GetChildren(candidate.entity);
-                        for (Entity child : children)
-                        {
-                            if (m_visited.Find(child) == m_visited.end())
-                            {
-                                m_queue.push({child, candidate.depth + 1});
-                                m_visited.Insert(child);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        Entity parent = m_graph->GetParent(candidate.entity);
-                        if (parent.IsValid() && m_visited.Find(parent) == m_visited.end())
-                        {
-                            m_queue.push({parent, candidate.depth + 1});
-                            m_visited.Insert(parent);
-                        }
-                    }
-                    
-                    // Check if entity passes filter (always true if no filtering)
-                    if (m_parent->PassesFilter(candidate.entity))
-                    {
-                        m_current = candidate;
-                        return;
-                    }
-                }
-                
-                m_current = Entry{};  // End iterator state
-            }
-            
-            const Relations* m_parent = nullptr;
-            const RelationshipGraph* m_graph = nullptr;
-            bool m_descendants = true;
-            std::queue<Entry> m_queue;
-            FlatSet<Entity> m_visited;
-            Entry m_current{};
-        };
-        
-        /**
-         * @brief Range wrapper for hierarchy traversal
-         */
-        class HierarchyRange
-        {
-        public:
-            HierarchyRange(const Relations* parent, Entity root, bool descendants)
-                : m_parent(parent), m_root(root), m_descendants(descendants) {}
-            
-            HierarchyIterator begin() const { return HierarchyIterator(m_parent, m_root, m_descendants); }
-            HierarchyIterator end() const { return HierarchyIterator(); }
-            
-        private:
-            const Relations* m_parent;
-            Entity m_root;
-            bool m_descendants;
-        };
-        
-        /**
-         * @brief Simplified filtered view for children/links
-         */
-        template<typename Container>
-        class FilteredView
-        {
-        public:
-            class iterator
-            {
-            public:
-                using iterator_category = std::forward_iterator_tag;
-                using value_type = Entity;
-                using difference_type = ptrdiff_t;
-                using pointer = const Entity*;
-                using reference = const Entity&;
-                
-                iterator() = default;
-                
-                iterator(const Relations* parent, typename Container::const_iterator it, typename Container::const_iterator end) :
-                    m_parent(parent),
-                    m_it(it),
-                    m_end(end)
-                {
-                    // Skip to first passing entity
-                    while (m_it != m_end && !m_parent->PassesFilter(*m_it))
-                    {
-                        ++m_it;
-                    }
-                }
-                
-                reference operator*() const { return *m_it; }
-                pointer operator->() const { return &(*m_it); }
-                
-                iterator& operator++()
-                {
-                    ++m_it;
-                    while (m_it != m_end && !m_parent->PassesFilter(*m_it))
-                    {
-                        ++m_it;
-                    }
-                    return *this;
-                }
-                
-                iterator operator++(int)
-                {
-                    iterator tmp = *this;
-                    ++(*this);
-                    return tmp;
-                }
-                
-                friend bool operator==(const iterator& a, const iterator& b)
-                {
-                    return a.m_it == b.m_it;
-                }
-                
-                friend bool operator!=(const iterator& a, const iterator& b)
-                {
-                    return !(a == b);
-                }
-                
-            private:
-                const Relations* m_parent = nullptr;
-                typename Container::const_iterator m_it;
-                typename Container::const_iterator m_end;
-            };
-            
-            FilteredView(const Relations* parent, const Container& container) :
-                m_parent(parent),
-                m_container(container) {}
-            
-            iterator begin() const { return iterator(m_parent, m_container.begin(), m_container.end()); }
-            iterator end() const { return iterator(m_parent, m_container.end(), m_container.end()); }
-            bool empty() const { return begin() == end(); }
-            
-        private:
-            const Relations* m_parent;
-            const Container& m_container;
-        };
-        
-        // Constructor
-        Relations(std::shared_ptr<ArchetypeManager> manager, std::shared_ptr<EntityManager> entityManager, Entity entity, const RelationshipGraph* graph)
-            : m_manager(std::move(manager))
-            , m_entityManager(std::move(entityManager))
-            , m_entity(entity)
-            , m_graph(graph)
+        Relations(std::shared_ptr<ArchetypeManager> manager, Entity entity, std::shared_ptr<const RelationshipGraph> graph) :
+            m_archetypeManager(manager),
+            m_rootEntity(entity),
+            m_relationsGraph(graph)
         {}
+        
+        /**
+         * Check if the Relations object is still valid (Registry not destroyed)
+         * @return true if both ArchetypeManager and RelationshipGraph are still alive
+         */
+        ASTRA_NODISCARD bool IsValid() const noexcept
+        {
+            return m_archetypeManager != nullptr && m_relationsGraph != nullptr;
+        }
         
         /**
          * @brief Get the parent of the entity (filtered by components if applicable)
@@ -310,8 +62,11 @@ namespace Astra
          */
         ASTRA_FORCEINLINE Entity GetParent() const
         {
-            Entity parent = m_graph->GetParent(m_entity);
-            if constexpr (!HasFiltering)
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return Entity::Invalid();  // Registry destroyed
+            
+            Entity parent = m_relationsGraph->GetParent(m_rootEntity);
+            if constexpr (!HAS_FILTERING)
             {
                 return parent;
             }
@@ -321,212 +76,299 @@ namespace Astra
             }
         }
         
-        /**
-         * @brief Get children (filtered if applicable, direct view if not)
-         */
         ASTRA_FORCEINLINE auto GetChildren() const
         {
-            if constexpr (!HasFiltering)
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return RelationshipGraph::ChildrenContainer{};
+            
+            if constexpr (!HAS_FILTERING)
             {
-                return m_graph->GetChildren(m_entity);
+                // No filtering - return direct reference
+                return m_relationsGraph->GetChildren(m_rootEntity);
             }
             else
             {
-                return FilteredView<RelationshipGraph::ChildrenContainer>(this, m_graph->GetChildren(m_entity));
+                // With filtering - build filtered list
+                RelationshipGraph::ChildrenContainer filtered;
+                const auto& children = m_relationsGraph->GetChildren(m_rootEntity);
+                for (Entity child : children)
+                {
+                    if (PassesFilter(child))
+                    {
+                        filtered.push_back(child);
+                    }
+                }
+                return filtered;
             }
         }
         
-        /**
-         * @brief Get linked entities (filtered if applicable, direct view if not)
-         */
         ASTRA_FORCEINLINE auto GetLinks() const
         {
-            if constexpr (!HasFiltering)
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return RelationshipGraph::LinksContainer{};
+            
+            if constexpr (!HAS_FILTERING)
             {
-                return m_graph->GetLinks(m_entity);
+                // No filtering - return direct reference
+                return m_relationsGraph->GetLinks(m_rootEntity);
             }
             else
             {
-                return FilteredView<RelationshipGraph::LinksContainer>(this, m_graph->GetLinks(m_entity));
-            }
-        }
-        
-        /**
-         * @brief Get all descendants with depth info
-         */
-        HierarchyRange GetDescendants() const
-        {
-            return HierarchyRange(this, m_entity, true);
-        }
-        
-        /**
-         * @brief Get all ancestors with depth info
-         */
-        HierarchyRange GetAncestors() const
-        {
-            return HierarchyRange(this, m_entity, false);
-        }
-        
-        /**
-         * @brief Execute function for each child entity
-         */
-        template<typename Func>
-        void ForEachChild(Func&& func)
-        {
-            const auto& children = m_graph->GetChildren(m_entity);
-            for (Entity child : children)
-            {
-                if (PassesFilter(child))
+                // With filtering - build filtered list
+                RelationshipGraph::LinksContainer filtered;
+                const auto& links = m_relationsGraph->GetLinks(m_rootEntity);
+                for (Entity linked : links)
                 {
-                    InvokeWithComponents(child, std::forward<Func>(func));
-                }
-            }
-        }
-        
-        /**
-         * @brief Execute function for each descendant entity
-         */
-        template<typename Func>
-        void ForEachDescendant(Func&& func, TraversalOrder order = TraversalOrder::BreadthFirst)
-        {
-            std::queue<std::pair<Entity, size_t>> queue;
-            FlatSet<Entity> visited;
-            visited.Insert(m_entity);
-            
-            // Initialize with children
-            const auto& children = m_graph->GetChildren(m_entity);
-            for (Entity child : children)
-            {
-                if (visited.Insert(child).second && PassesFilter(child))
-                {
-                    if (order == TraversalOrder::BreadthFirst)
+                    if (PassesFilter(linked))
                     {
-                        queue.push({child, 1});
-                    }
-                    else
-                    {
-                        // For DFS, process immediately
-                        InvokeWithDepth(child, 1, std::forward<Func>(func));
-                        ForEachDescendantDFS(child, 1, visited, std::forward<Func>(func));
+                        filtered.push_back(linked);
                     }
                 }
+                return filtered;
+            }
+        }
+        
+        template<typename Func>
+        ASTRA_FORCEINLINE void ForEachChild(Func&& func)
+        {
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
+            const auto& children = m_relationsGraph->GetChildren(m_rootEntity);
+            
+            // Early exit for empty
+            if (children.empty()) ASTRA_UNLIKELY
+                return;
+            
+            // Process children with proper component expansion
+            ForEachChildImpl(children, std::forward<Func>(func), RequiredTuple{});
+        }
+
+        template<typename Func>
+        ASTRA_FORCEINLINE void ForEachDescendant(Func&& func)
+        {
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
+            // Use cached BFS traversal for optimal performance
+            const auto& cache = m_relationsGraph->GetDescendantsCached(m_rootEntity);
+            
+            const size_t count = cache.entries.size();
+            if (count == 0) ASTRA_UNLIKELY
+                return;
+            
+            // Process with proper component expansion
+            ForEachDescendantImpl(cache, count, std::forward<Func>(func), RequiredTuple{});
+        }
+        
+        template<typename Func>
+        ASTRA_FORCEINLINE void ForEachAncestor(Func&& func)
+        {
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
+            // Use cached ancestor traversal
+            const auto& cache = m_relationsGraph->GetAncestorsCached(m_rootEntity);
+            
+            const size_t count = cache.entries.size();
+            if (count == 0) ASTRA_UNLIKELY
+                return;
+            
+            // Process with proper component expansion
+            ForEachAncestorImpl(cache, count, std::forward<Func>(func), RequiredTuple{});
+        }
+        
+        template<typename Func>
+        ASTRA_FORCEINLINE void ForEachLink(Func&& func)
+        {
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
+            const auto& links = m_relationsGraph->GetLinks(m_rootEntity);
+            
+            if (links.empty()) ASTRA_UNLIKELY
+                return;
+            
+            // Process with proper component expansion
+            ForEachLinkImpl(links, std::forward<Func>(func), RequiredTuple{});
+        }
+
+        template<typename Func>
+        ASTRA_FORCEINLINE void ParallelForEachDescendant(Func&& func)
+        {
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
+            const auto& cache = m_relationsGraph->GetDescendantsCached(m_rootEntity);
+            const size_t count = cache.entries.size();
+            
+            // Fall back to sequential for small counts
+            if (count < MIN_ENTITIES_FOR_PARALLEL) ASTRA_LIKELY
+            {
+                return ForEachDescendant(std::forward<Func>(func));
             }
             
-            // BFS processing
-            if (order == TraversalOrder::BreadthFirst)
+            // Determine optimal thread count
+            const size_t hardwareConcurrency = std::thread::hardware_concurrency();
+            const size_t maxThreadsByWork = count / MIN_ENTITIES_PER_THREAD;
+            const size_t numWorkers = std::min(hardwareConcurrency, std::max(size_t(1), maxThreadsByWork));
+            
+            // Work stealing queue
+            std::atomic<size_t> nextIndex{0};
+            std::vector<std::future<void>> futures;
+            futures.reserve(numWorkers);
+            
+            // Launch worker threads
+            for (size_t t = 0; t < numWorkers; ++t)
             {
-                while (!queue.empty())
-                {
-                    auto [entity, depth] = queue.front();
-                    queue.pop();
-                    
-                    InvokeWithDepth(entity, depth, std::forward<Func>(func));
-                    
-                    const auto& entityChildren = m_graph->GetChildren(entity);
-                    for (Entity child : entityChildren)
+                futures.push_back(std::async(std::launch::async,
+                    [this, &func, &cache, &nextIndex, count]()
                     {
-                        if (visited.Insert(child).second && PassesFilter(child))
+                        constexpr size_t BATCH_SIZE = 64; // Larger batches for parallel
+                        size_t idx;
+                        
+                        while ((idx = nextIndex.fetch_add(BATCH_SIZE, std::memory_order_relaxed)) < count)
                         {
-                            queue.push({child, depth + 1});
+                            const size_t end = std::min(idx + BATCH_SIZE, count);
+                            
+                            // Process batch
+                            for (size_t i = idx; i < end; ++i)
+                            {
+                                const auto& entry = cache.entries[i];
+                                Entity entity = entry.entity;
+                                size_t depth = entry.depth;
+                                
+                                if (PassesFilter(entity))
+                                {
+                                    // Inline the invocation for parallel execution
+                                    if constexpr (!HAS_FILTERING)
+                                    {
+                                        func(entity, depth);
+                                    }
+                                    else if constexpr (std::tuple_size_v<RequiredTuple> == 0)
+                                    {
+                                        func(entity, depth);
+                                    }
+                                    else
+                                    {
+                                        // Need to expand components inline for parallel
+                                        InvokeParallelWithDepth(entity, depth, func, RequiredTuple{});
+                                    }
+                                }
+                            }
                         }
-                    }
-                }
+                    }));
             }
-        }
-        
-        /**
-         * @brief Execute function for each linked entity
-         */
-        template<typename Func>
-        void ForEachLink(Func&& func)
-        {
-            const auto& links = m_graph->GetLinks(m_entity);
-            for (Entity linked : links)
+            
+            // Wait for all threads
+            for (auto& future : futures)
             {
-                if (PassesFilter(linked))
-                {
-                    InvokeWithComponents(linked, std::forward<Func>(func));
-                }
+                future.wait();
             }
         }
         
     private:
-        // DFS helper
-        template<typename Func>
-        void ForEachDescendantDFS(Entity current, size_t depth, 
-                                 FlatSet<Entity>& visited, Func&& func)
+        template<typename Container, typename Func, typename... Components>
+        ASTRA_FORCEINLINE void ForEachChildImpl(const Container& children, Func&& func, std::tuple<Components...>)
         {
-            const auto& children = m_graph->GetChildren(current);
-            for (Entity child : children)
+            ForEachEntityList(children, std::forward<Func>(func), std::index_sequence_for<Components...>{});
+        }
+        
+        template<typename Func, typename... Components>
+        ASTRA_FORCEINLINE void ForEachDescendantImpl(const RelationshipGraph::TraversalCache& cache, size_t count, Func&& func, std::tuple<Components...>)
+        {
+            ForEachCachedWithDepth(cache, count, std::forward<Func>(func), std::index_sequence_for<Components...>{});
+        }
+        
+        template<typename Func, typename... Components>
+        ASTRA_FORCEINLINE void ForEachAncestorImpl(const RelationshipGraph::TraversalCache& cache, size_t count, Func&& func, std::tuple<Components...>)
+        {
+            ForEachCachedWithDepth(cache, count, std::forward<Func>(func), std::index_sequence_for<Components...>{});
+        }
+        
+        template<typename Container, typename Func, typename... Components>
+        ASTRA_FORCEINLINE void ForEachLinkImpl(const Container& links, Func&& func, std::tuple<Components...>)
+        {
+            ForEachEntityList(links, std::forward<Func>(func), std::index_sequence_for<Components...>{});
+        }
+        
+        template<typename Container, typename Func, size_t... Is>
+        ASTRA_FORCEINLINE void ForEachEntityList(const Container& entities, Func&& func, std::index_sequence<Is...>)
+        {
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
+            for (Entity entity : entities)
             {
-                if (visited.Insert(child).second && PassesFilter(child))
+                if (PassesFilter(entity))
                 {
-                    InvokeWithDepth(child, depth + 1, std::forward<Func>(func));
-                    ForEachDescendantDFS(child, depth + 1, visited, std::forward<Func>(func));
+                    if constexpr (!HAS_FILTERING)
+                    {
+                        func(entity);
+                    }
+                    else if constexpr (sizeof...(Is) == 0)
+                    {
+                        func(entity);
+                    }
+                    else
+                    {
+                        // Expand components using index_sequence
+                        func(entity, *m_archetypeManager->GetComponent<std::tuple_element_t<Is, RequiredTuple>>(entity)...);
+                    }
                 }
             }
         }
         
-        // Invoke function with components (only if filtering)
-        template<typename Func>
-        void InvokeWithComponents(Entity entity, Func&& func)
+        template<typename Func, size_t... Is>
+        ASTRA_FORCEINLINE void ForEachCachedWithDepth(const RelationshipGraph::TraversalCache& cache, size_t count, Func&& func, std::index_sequence<Is...>)
         {
-            if constexpr (!HasFiltering)
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
+            for (size_t i = 0; i < count; ++i)
             {
-                func(entity);
-            }
-            else
-            {
-                InvokeWithComponentsImpl(entity, std::forward<Func>(func), RequiredTuple{});
+                const auto& entry = cache.entries[i];
+                Entity entity = entry.entity;
+                size_t depth = entry.depth;
+                
+                if (PassesFilter(entity))
+                {
+                    if constexpr (!HAS_FILTERING)
+                    {
+                        func(entity, depth);
+                    }
+                    else if constexpr (sizeof...(Is) == 0)
+                    {
+                        func(entity, depth);
+                    }
+                    else
+                    {
+                        // Expand components using index_sequence
+                        func(entity, depth, *m_archetypeManager->GetComponent<std::tuple_element_t<Is, RequiredTuple>>(entity)...);
+                    }
+                }
             }
         }
         
         template<typename Func, typename... Components>
-        void InvokeWithComponentsImpl(Entity entity, Func&& func, std::tuple<Components...>)
+        ASTRA_FORCEINLINE void InvokeParallelWithDepth(Entity entity, size_t depth, Func&& func, std::tuple<Components...>)
         {
-            if constexpr (sizeof...(Components) == 0)
-            {
-                func(entity);
-            }
-            else
-            {
-                func(entity, *m_manager->GetComponent<Components>(entity)...);
-            }
-        }
-        
-        // Invoke function with depth and components
-        template<typename Func>
-        void InvokeWithDepth(Entity entity, size_t depth, Func&& func)
-        {
-            if constexpr (!HasFiltering)
-            {
-                func(entity, depth);
-            }
-            else
-            {
-                InvokeWithDepthImpl(entity, depth, std::forward<Func>(func), RequiredTuple{});
-            }
-        }
-        
-        template<typename Func, typename... Components>
-        void InvokeWithDepthImpl(Entity entity, size_t depth, Func&& func, std::tuple<Components...>)
-        {
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
             if constexpr (sizeof...(Components) == 0)
             {
                 func(entity, depth);
             }
             else
             {
-                func(entity, depth, *m_manager->GetComponent<Components>(entity)...);
+                func(entity, depth, *m_archetypeManager->GetComponent<Components>(entity)...);
             }
         }
         
-        /**
-         * @brief Simplified filter check using if constexpr
-         */
         ASTRA_FORCEINLINE bool PassesFilter(Entity entity) const
         {
-            if constexpr (!HasFiltering)
+            if constexpr (!HAS_FILTERING)
             {
                 return true;  // No filtering, always pass
             }
@@ -536,51 +378,71 @@ namespace Astra
                 if constexpr (std::tuple_size_v<RequiredTuple> > 0)
                 {
                     if (!HasAllRequired(entity, RequiredTuple{}))
+                    {
                         return false;
+                    }
                 }
                 
                 // Check excluded components
                 if constexpr (std::tuple_size_v<ExcludedTuple> > 0)
                 {
                     if (HasAnyExcluded(entity, ExcludedTuple{}))
+                    {
                         return false;
+                    }
                 }
                 
                 // Check Any groups
                 if constexpr (std::tuple_size_v<AnyGroups> > 0)
                 {
                     if (!CheckAnyGroups(entity))
+                    {
                         return false;
+                    }
                 }
                 
                 // Check OneOf groups
                 if constexpr (std::tuple_size_v<OneOfGroups> > 0)
                 {
                     if (!CheckOneOfGroups(entity))
+                    {
                         return false;
+                    }
                 }
                 
                 return true;
             }
         }
         
-        // Simplified component checking helpers (only compiled if HasFiltering)
+        // Simplified component checking helpers (only compiled if HAS_FILTERING)
         template<typename... Ts>
         bool HasAllRequired(Entity entity, std::tuple<Ts...>) const
         {
             if constexpr (sizeof...(Ts) == 0)
+            {
                 return true;
+            }
             else
-                return ((m_manager->GetComponent<Ts>(entity) != nullptr) && ...);
+            {
+                if (!m_archetypeManager) ASTRA_UNLIKELY
+                    return false;  // Registry destroyed
+                return (m_archetypeManager->HasComponent<Ts>(entity) && ...);
+            }
         }
         
         template<typename... Ts>
         bool HasAnyExcluded(Entity entity, std::tuple<Ts...>) const
         {
             if constexpr (sizeof...(Ts) == 0)
+            {
                 return false;
+            }
             else
-                return ((m_manager->GetComponent<Ts>(entity) != nullptr) || ...);
+            {
+                if (!m_archetypeManager) ASTRA_UNLIKELY
+                    return false;  // Registry destroyed
+                return (m_archetypeManager->HasComponent<Ts>(entity) || ...);
+            }
         }
         
         bool CheckAnyGroups(Entity entity) const
@@ -604,7 +466,9 @@ namespace Astra
         template<typename... Ts>
         bool HasAnyInGroup(Entity entity, std::tuple<Ts...>) const
         {
-            return ((m_manager->GetComponent<Ts>(entity) != nullptr) || ...);
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return false;  // Registry destroyed
+            return (m_archetypeManager->HasComponent<Ts>(entity) || ...);
         }
         
         bool CheckOneOfGroups(Entity entity) const
@@ -628,12 +492,13 @@ namespace Astra
         template<typename... Ts>
         size_t CountInGroup(Entity entity, std::tuple<Ts...>) const
         {
-            return ((m_manager->GetComponent<Ts>(entity) != nullptr ? 1 : 0) + ...);
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return 0;  // Registry destroyed
+            return ((m_archetypeManager->HasComponent<Ts>(entity) ? 1 : 0) + ...);
         }
         
-        std::shared_ptr<ArchetypeManager> m_manager;
-        std::shared_ptr<EntityManager> m_entityManager;
-        Entity m_entity;
-        const RelationshipGraph* m_graph;
+        std::shared_ptr<ArchetypeManager> m_archetypeManager;
+        Entity m_rootEntity;
+        std::shared_ptr<const RelationshipGraph> m_relationsGraph;
     };
 }

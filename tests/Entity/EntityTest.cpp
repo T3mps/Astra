@@ -40,7 +40,7 @@ TEST_F(EntityTest, ConstructionWithRawValue)
     // Version 5 << 24 = 0x05000000
     // ID 100 = 0x64
     // Combined = 0x05000064
-    Astra::Entity::IDType rawValue = (static_cast<Astra::Entity::IDType>(5) << Astra::Entity::VERSION_SHIFT) | 100;
+    Astra::Entity::StorageType rawValue = (static_cast<Astra::Entity::StorageType>(5) << Astra::Entity::VERSION_SHIFT) | 100;
     Astra::Entity entity(rawValue);
     
     EXPECT_TRUE(entity.IsValid());
@@ -56,7 +56,7 @@ TEST_F(EntityTest, InvalidEntityConstant)
     
     EXPECT_FALSE(invalid.IsValid());
     EXPECT_TRUE(invalid.IsInvalid());
-    EXPECT_EQ(invalid.GetValue(), std::numeric_limits<Astra::Entity::IDType>::max());
+    EXPECT_EQ(invalid.GetValue(), std::numeric_limits<Astra::Entity::StorageType>::max());
 }
 
 // Test ID and version extraction
@@ -65,7 +65,7 @@ TEST_F(EntityTest, IDAndVersionExtraction)
     // Test various combinations
     struct TestCase
     {
-        Astra::Entity::IDType id;
+        Astra::Entity::StorageType id;
         Astra::Entity::VersionType version;
     };
     
@@ -91,7 +91,7 @@ TEST_F(EntityTest, IDAndVersionExtraction)
 TEST_F(EntityTest, IDMasking)
 {
     // Try to create entity with ID that would overflow into version bits
-    Astra::Entity::IDType overflowID = Astra::Entity::ID_MASK + 1;
+    Astra::Entity::StorageType overflowID = Astra::Entity::ID_MASK + 1;
     Astra::Entity entity(overflowID, 0);
     
     // ID should be masked to fit
@@ -142,7 +142,7 @@ TEST_F(EntityTest, EqualityOperators)
     EXPECT_FALSE(e1 == e4);
     
     // Comparison with raw value
-    Astra::Entity::IDType rawValue = e1.GetValue();
+    Astra::Entity::StorageType rawValue = e1.GetValue();
     EXPECT_TRUE(e1 == rawValue);
     EXPECT_TRUE(rawValue == e1);
 }
@@ -178,7 +178,7 @@ TEST_F(EntityTest, TypeConversions)
     Astra::Entity entity(100, 5);
     
     // Implicit conversion to underlying type
-    Astra::Entity::IDType value = entity;
+    Astra::Entity::StorageType value = entity;
     EXPECT_EQ(value, entity.GetValue());
     
     // Explicit conversion to other numeric types
@@ -292,24 +292,24 @@ TEST_F(EntityTest, StdHashSpecialization)
 // Test Entity traits concept
 TEST_F(EntityTest, EntityTraitsConcept)
 {
-    // Verify EntityTraits32 satisfies the concept
-    using Traits32 = Astra::EntityTraits32;
-    static_assert(Astra::EntityTraitsConcept<Traits32>);
+    // Verify common EntityTraits configurations satisfy the concept
+    using Traits32 = Astra::EntityTraits<32, 8>;
+    static_assert(Astra::Detail::EntityTraitsConcept<Traits32>);
     
-    // Verify EntityTraits64 satisfies the concept
-    using Traits64 = Astra::EntityTraits64;
-    static_assert(Astra::EntityTraitsConcept<Traits64>);
+    // Verify 64-bit configuration
+    using Traits64 = Astra::EntityTraits<64, 32>;
+    static_assert(Astra::Detail::EntityTraitsConcept<Traits64>);
     
     // Check trait values for 32-bit
     static_assert(Traits32::ID_BITS == 24);
     static_assert(Traits32::VERSION_SHIFT == 24);
-    static_assert(std::is_same_v<Traits32::IDType, uint32_t>);
+    static_assert(std::is_same_v<Traits32::StorageType, uint32_t>);
     static_assert(std::is_same_v<Traits32::VersionType, uint8_t>);
     
     // Check trait values for 64-bit
     static_assert(Traits64::ID_BITS == 32);
     static_assert(Traits64::VERSION_SHIFT == 32);
-    static_assert(std::is_same_v<Traits64::IDType, uint64_t>);
+    static_assert(std::is_same_v<Traits64::StorageType, uint64_t>);
     static_assert(std::is_same_v<Traits64::VersionType, uint32_t>);
 }
 
@@ -428,7 +428,7 @@ TEST_F(EntityTest, BatchOperations)
     // Create batch of entities
     for (size_t i = 0; i < batchSize; ++i)
     {
-        entities.emplace_back(static_cast<Astra::Entity::IDType>(i), 
+        entities.emplace_back(static_cast<Astra::Entity::StorageType>(i), 
                             static_cast<Astra::Entity::VersionType>(i % 256));
     }
     

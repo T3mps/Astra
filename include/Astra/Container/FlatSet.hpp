@@ -14,20 +14,13 @@
 #include <vector>
 
 #include "../Core/Base.hpp"
+#include "../Core/Memory.hpp"
+#include "../Core/Simd.hpp"
 #include "../Entity/Entity.hpp"
-#include "../Platform/Simd.hpp"
 #include "Swiss.hpp"
 
 namespace Astra
 {
-    // FlatSet: A high-performance hash set with SwissTable-inspired design
-    // Based on FlatMap but optimized for set operations (no value storage)
-    // - SIMD-accelerated metadata scanning  
-    // - Cache-friendly memory layout with prefetching
-    // - Optimized for Entity and other integer types
-    //
-    // Thread Safety: This container is NOT thread-safe. Concurrent access
-    // to non-const methods requires external synchronization.
     template<typename T,
              typename Hash = typename SelectHash<T>::Type,
              typename Equals = std::equal_to<T>,
@@ -830,7 +823,7 @@ namespace Astra
             return {hash, h2};
         }
         
-        struct ASTRA_SIMD_ALIGNED Group
+        struct alignas(SIMD_ALIGNMENT) Group
         {
             // Aligned for SIMD operations (SSE/NEON use 128-bit registers)
             std::uint8_t metadata[GROUP_SIZE];

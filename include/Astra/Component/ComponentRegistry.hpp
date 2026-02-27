@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <string_view>
 #include <type_traits>
@@ -7,6 +8,7 @@
 #include "../Container/FlatMap.hpp"
 #include "../Core/Result.hpp"
 #include "../Core/TypeID.hpp"
+#include "../Reflection/MetaRegistry.hpp"
 #include "../Serialization/BinaryArchive.hpp"
 #include "../Serialization/BinaryReader.hpp"
 #include "../Serialization/BinaryWriter.hpp"
@@ -26,8 +28,9 @@ namespace Astra
                 
             ComponentDescriptor desc;
             desc.id = id;
-            desc.size = sizeof(T);
-            desc.alignment = alignof(T);
+            // Empty components should report size 0 to avoid memory allocation
+            desc.size = std::is_empty_v<T> ? 0 : sizeof(T);
+            desc.alignment = std::is_empty_v<T> ? 1 : alignof(T);
             
             desc.hash = TypeID<T>::Hash();
             
@@ -68,18 +71,29 @@ namespace Astra
             {
                 desc.copyConstruct = &CopyConstruct<T>;
                 desc.copyAssign = &CopyAssign<T>;
+                desc.constructWith = &ConstructWith<T>;
             }
             else
             {
                 desc.copyConstruct = nullptr;
                 desc.copyAssign = nullptr;
+                desc.constructWith = nullptr;
             }
             
             desc.serialize = &Serialize<T>;
             desc.deserialize = &Deserialize<T>;
             desc.serializeVersioned = &SerializeVersioned<T>;
             desc.deserializeVersioned = &DeserializeVersioned<T>;
-            
+
+            // Link to reflection metadata if type is registered with MetaRegistry
+            desc.meta = MetaRegistry::Instance().Get<T>();
+
+            // Also link MetaRegistry to ComponentID for reverse lookup
+            if (desc.meta)
+            {
+                MetaRegistry::Instance().LinkToComponent(desc.hash, id);
+            }
+
             m_components[id] = desc;
             m_hashToID[desc.hash] = id;
         }
@@ -106,7 +120,6 @@ namespace Astra
             auto hashIt = m_hashToID.Find(hash);
             if (hashIt == m_hashToID.end())
                 return nullptr;
-                
             return GetComponentDescriptor(hashIt->second);
         }
         
@@ -114,9 +127,7 @@ namespace Astra
         {
             auto it = m_hashToID.Find(hash);
             if (it == m_hashToID.end())
-            {
                 return Result<ComponentID, std::string_view>::Err("Unknown component hash");
-            }
             return Result<ComponentID, std::string_view>::Ok(it->second);
         }
 
@@ -134,9 +145,8 @@ namespace Astra
         {
             descriptors.clear();
             if (m_components.Empty())
-            {
                 return;
-            }
+
             descriptors.reserve(m_components.Size());
             for (const auto& [id, desc] : m_components)
             {
@@ -180,6 +190,13 @@ namespace Astra
         {
             *static_cast<T*>(dst) = *static_cast<const T*>(src);
         }
+        
+        template<typename T>
+        static void ConstructWith(void* dst, const void* src)
+        {
+            // Use placement new with copy constructor for optimal construction
+            new (dst) T(*static_cast<const T*>(src));
+        }
 
         template<typename T>
         static void Serialize(BinaryWriter& writer, void* ptr)
@@ -212,6 +229,8 @@ namespace Astra
 
         FlatMap<ComponentID, ComponentDescriptor> m_components;
         FlatMap<uint64_t, ComponentID> m_hashToID;
-        std::vector<std::string> m_componentNames;
+        // Use deque instead of vector to prevent pointer invalidation when adding new names.
+        // Vector reallocation would invalidate all c_str() pointers stored in ComponentDescriptor::name
+        std::deque<std::string> m_componentNames;
     };
 }

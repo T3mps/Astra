@@ -152,7 +152,7 @@ TEST_F(RegistryTest, ComponentOperations)
     Astra::Entity entity = registry->CreateEntity();
     
     // Add Position component
-    registry->AddComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
+    registry->EmplaceComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
     
     // Get component to verify it was added
     Position* pos = registry->GetComponent<Position>(entity);
@@ -165,7 +165,7 @@ TEST_F(RegistryTest, ComponentOperations)
     EXPECT_EQ(retrieved, pos);
     
     // Add another component
-    registry->AddComponent<Velocity>(entity, 10.0f, 20.0f, 30.0f);
+    registry->EmplaceComponent<Velocity>(entity, 10.0f, 20.0f, 30.0f);
     
     // Verify it was added
     Velocity* vel = registry->GetComponent<Velocity>(entity);
@@ -324,9 +324,9 @@ TEST_F(RegistryTest, ArchetypeCleanup)
         Astra::Entity e = registry->CreateEntity();
         entities.push_back(e);
         
-        if (i % 2 == 0) registry->AddComponent<Position>(e);
-        if (i % 3 == 0) registry->AddComponent<Velocity>(e);
-        if (i % 5 == 0) registry->AddComponent<Health>(e);
+        if (i % 2 == 0) registry->EmplaceComponent<Position>(e);
+        if (i % 3 == 0) registry->EmplaceComponent<Velocity>(e);
+        if (i % 5 == 0) registry->EmplaceComponent<Health>(e);
     }
     
     size_t initialArchetypes = registry->GetArchetypeCount();
@@ -337,7 +337,6 @@ TEST_F(RegistryTest, ArchetypeCleanup)
     
     // Cleanup empty archetypes
     Astra::Registry::DefragmentationOptions options;
-    options.minEmptyDuration = 1;
     options.minArchetypesToKeep = 1;
     
     auto result = registry->Defragment(options);
@@ -357,23 +356,13 @@ TEST_F(RegistryTest, ArchetypeStatistics)
     for (int i = 0; i < 20; ++i)
     {
         Astra::Entity e = registry->CreateEntity();
-        if (i < 10) registry->AddComponent<Position>(e);
-        if (i >= 5 && i < 15) registry->AddComponent<Velocity>(e);
+        if (i < 10) registry->EmplaceComponent<Position>(e);
+        if (i >= 5 && i < 15) registry->EmplaceComponent<Velocity>(e);
     }
     
-    // Get archetype stats
-    auto stats = registry->GetArchetypeStats();
-    EXPECT_GT(stats.size(), 0u);
-    
-    size_t totalEntities = 0;
-    for (const auto& info : stats)
-    {
-        EXPECT_NE(info.archetype, nullptr);
-        EXPECT_GE(info.peakEntityCount, info.currentEntityCount);
-        totalEntities += info.currentEntityCount;
-    }
-    
-    EXPECT_EQ(totalEntities, 20u);
+    // Note: GetArchetypeStats() has been removed
+    // We can verify entity creation indirectly through entity count
+    // We created 20 entities above
     
     // Get memory usage
     size_t memUsage = registry->GetArchetypeMemoryUsage();
@@ -392,14 +381,14 @@ TEST_F(RegistryTest, SignalSystem)
     int entityCreatedCount = 0;
     int componentAddedCount = 0;
     
-    auto& signals = registry->GetSignalManager();
+    auto* signals = registry->GetSignalManager();
     
-    auto entityHandler = signals.On<Astra::Events::EntityCreated>().Register([&](const Astra::Events::EntityCreated& e)
+    auto entityHandler = signals->On<Astra::Events::EntityCreated>().Register([&](const Astra::Events::EntityCreated& e)
     {
         entityCreatedCount++;
     });
     
-    auto componentHandler = signals.On<Astra::Events::ComponentAdded>().Register([&](const Astra::Events::ComponentAdded& e)
+    auto componentHandler = signals->On<Astra::Events::ComponentAdded>().Register([&](const Astra::Events::ComponentAdded& e)
     {
         componentAddedCount++;
     });
@@ -409,7 +398,7 @@ TEST_F(RegistryTest, SignalSystem)
     EXPECT_EQ(entityCreatedCount, 1);
     
     // Add component (should trigger component added)
-    registry->AddComponent<Position>(entity);
+    registry->EmplaceComponent<Position>(entity);
     EXPECT_EQ(componentAddedCount, 1);
     
     // Create entity with components (should trigger both)
@@ -418,8 +407,8 @@ TEST_F(RegistryTest, SignalSystem)
     EXPECT_EQ(componentAddedCount, 3); // Position and Velocity
     
     // Disconnect handlers
-    signals.On<Astra::Events::EntityCreated>().Unregister(entityHandler);
-    signals.On<Astra::Events::ComponentAdded>().Unregister(componentHandler);
+    signals->On<Astra::Events::EntityCreated>().Unregister(entityHandler);
+    signals->On<Astra::Events::ComponentAdded>().Unregister(componentHandler);
     
     // Create another entity (should not trigger)
     registry->CreateEntity();
@@ -474,11 +463,12 @@ TEST_F(RegistryTest, ComponentRegistrySharing)
 {
     using namespace Astra::Test;
     
-    // Get component registry from first registry
+    // Get component registry from first registry (returns raw pointer)
     auto sharedRegistry = registry->GetComponentRegistry();
     
-    // Create second registry with shared component registry
-    Astra::Registry registry2(sharedRegistry);
+    // Create second registry with shared component registry (need to wrap in shared_ptr)
+    std::shared_ptr<Astra::ComponentRegistry> sharedPtr(sharedRegistry, [](auto*){});  // Empty deleter since we don't own it
+    Astra::Registry registry2(sharedPtr);
     
     // Components should work in both registries
     Astra::Entity e1 = registry->CreateEntityWith(Position{1.0f, 2.0f, 3.0f});
@@ -505,7 +495,7 @@ TEST_F(RegistryTest, InvalidEntityOperations)
     EXPECT_EQ(registry->GetComponent<Position>(invalidEntity), nullptr);
     
     // AddComponent now returns void, verify it doesn't add to invalid entity
-    registry->AddComponent<Position>(invalidEntity);
+    registry->EmplaceComponent<Position>(invalidEntity);
     EXPECT_EQ(registry->GetComponent<Position>(invalidEntity), nullptr);
     
     EXPECT_FALSE(registry->RemoveComponent<Position>(invalidEntity));

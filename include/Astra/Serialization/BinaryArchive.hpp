@@ -6,10 +6,11 @@
 #include <concepts>
 #include <vector>
 #include <span>
+#include <bit>  // C++20 std::endian
 
 #include "../Core/Base.hpp"
 #include "../Core/Result.hpp"
-#include "../Platform/Simd.hpp"
+#include "../Core/Simd.hpp"
 #include "SerializationError.hpp"
 
 namespace Astra
@@ -124,10 +125,10 @@ namespace Astra
         }
         
     private:
-        [[nodiscard]] static bool IsLittleEndian() noexcept
+        [[nodiscard]] static constexpr bool IsLittleEndian() noexcept
         {
-            uint32_t test = 1;
-            return *reinterpret_cast<uint8_t*>(&test) == 1;
+            // C++20 compliant endianness detection - no UB
+            return std::endian::native == std::endian::little;
         }
     };
     ASTRA_PACK_END
@@ -156,7 +157,6 @@ namespace Astra
         BinaryArchive() = default;
         virtual ~BinaryArchive() = default;
         
-        // Non-copyable, movable
         BinaryArchive(const BinaryArchive&) = delete;
         BinaryArchive& operator=(const BinaryArchive&) = delete;
         BinaryArchive(BinaryArchive&&) = default;

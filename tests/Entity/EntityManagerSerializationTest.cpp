@@ -309,7 +309,7 @@ TEST_F(EntityManagerSerializationTest, VersionWraparound)
     
     // Create and destroy entity many times to test version wraparound
     Entity e = pool.Create();
-    Entity::IDType id = e.GetID();
+    Entity::StorageType id = e.GetID();
     
     // Destroy and recreate many times
     for (int i = 0; i < 300; ++i)  // Will wrap around 255

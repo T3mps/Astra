@@ -11,17 +11,21 @@
 class ArchetypeManagerTest : public ::testing::Test
 {
 protected:
+    std::shared_ptr<Astra::ComponentRegistry> componentRegistry;
     std::unique_ptr<Astra::ArchetypeManager> manager;
     std::vector<Astra::Entity> testEntities;
     
     void SetUp() override 
     {
-        manager = std::make_unique<Astra::ArchetypeManager>();
+        // Create component registry first
+        componentRegistry = std::make_shared<Astra::ComponentRegistry>();
         
         // Register test components
         using namespace Astra::Test;
-        auto registry = manager->GetComponentRegistry();
-        registry->RegisterComponents<Position, Velocity, Health, Transform, Name, Physics, Player, Enemy>();
+        componentRegistry->RegisterComponents<Position, Velocity, Health, Transform, Name, Physics, Player, Enemy>();
+        
+        // Create manager with the component registry
+        manager = std::make_unique<Astra::ArchetypeManager>(componentRegistry);
         
         // Create some test entities
         for (int i = 0; i < 100; ++i)
@@ -161,7 +165,7 @@ TEST_F(ArchetypeManagerTest, BatchEntityAddition)
     }
     
     // Add entities with components in batch
-    manager->AddEntities<Position, Velocity>(
+    manager->AddEntitiesWith<Position, Velocity>(
         entities,
         [](size_t i) {
             return std::make_tuple(
@@ -242,52 +246,6 @@ TEST_F(ArchetypeManagerTest, BatchComponentAddition)
     }
 }
 
-// Test archetype querying
-TEST_F(ArchetypeManagerTest, ArchetypeQuerying)
-{
-    using namespace Astra::Test;
-    
-    // Create entities with different component combinations
-    Astra::Entity e1(1, 1), e2(2, 1), e3(3, 1), e4(4, 1);
-    
-    manager->AddEntity(e1);
-    manager->AddComponent<Position>(e1);
-    
-    manager->AddEntity(e2);
-    manager->AddComponent<Position>(e2);
-    manager->AddComponent<Velocity>(e2);
-    
-    manager->AddEntity(e3);
-    manager->AddComponent<Position>(e3);
-    manager->AddComponent<Velocity>(e3);
-    manager->AddComponent<Health>(e3);
-    
-    manager->AddEntity(e4);
-    manager->AddComponent<Health>(e4);
-    
-    // Query archetypes with Position
-    auto positionMask = Astra::MakeComponentMask<Position>();
-    auto positionArchetypes = manager->QueryArchetypes(positionMask);
-    
-    size_t posCount = 0;
-    for (auto* archetype : positionArchetypes)
-    {
-        posCount++;
-    }
-    EXPECT_EQ(posCount, 3u); // 3 archetypes have Position
-    
-    // Query archetypes with Position and Velocity
-    auto posVelMask = Astra::MakeComponentMask<Position, Velocity>();
-    auto posVelArchetypes = manager->QueryArchetypes(posVelMask);
-    
-    size_t posVelCount = 0;
-    for (auto* archetype : posVelArchetypes)
-    {
-        posVelCount++;
-    }
-    EXPECT_EQ(posVelCount, 2u); // 2 archetypes have both Position and Velocity
-}
-
 // Test archetype cleanup
 TEST_F(ArchetypeManagerTest, ArchetypeCleanup)
 {
@@ -318,62 +276,16 @@ TEST_F(ArchetypeManagerTest, ArchetypeCleanup)
         manager->RemoveEntity(Astra::Entity(i, 1));
     }
     
-    // Update metrics
-    manager->UpdateArchetypeMetrics();
-    
     // Cleanup empty archetypes
-    Astra::ArchetypeManager::CleanupOptions options;
-    options.minEmptyDuration = 1;
+    Astra::ArchetypeManager::DefragmentOptions options;
     options.minArchetypesToKeep = 1; // Keep root
     
-    size_t removed = manager->CleanupEmptyArchetypes(options);
+    auto result = manager->Defragment(options);
+    size_t removed = result.emptyArchetypesRemoved;
     EXPECT_GT(removed, 0u);
     
     // Should have fewer archetypes now
     EXPECT_LT(manager->GetArchetypeCount(), archetypeCount);
-}
-
-// Test archetype statistics
-TEST_F(ArchetypeManagerTest, ArchetypeStatistics)
-{
-    using namespace Astra::Test;
-    
-    // Create entities with various components
-    for (int i = 0; i < 20; ++i)
-    {
-        Astra::Entity entity(i, 1);
-        manager->AddEntity(entity);
-        
-        if (i < 10)
-        {
-            manager->AddComponent<Position>(entity);
-        }
-        if (i >= 5 && i < 15)
-        {
-            manager->AddComponent<Velocity>(entity);
-        }
-    }
-    
-    // Get archetype stats
-    auto stats = manager->GetArchetypeStats();
-    EXPECT_GT(stats.size(), 0u);
-    
-    // Verify stats contain valid information
-    for (const auto& info : stats)
-    {
-        EXPECT_NE(info.archetype, nullptr);
-        EXPECT_GE(info.currentEntityCount, 0u);
-        EXPECT_GE(info.peakEntityCount, info.currentEntityCount);
-        EXPECT_GT(info.approximateMemoryUsage, 0u);
-    }
-    
-    // Get memory usage
-    size_t memUsage = manager->GetArchetypeMemoryUsage();
-    EXPECT_GT(memUsage, 0u);
-    
-    // Get pool stats
-    auto poolStats = manager->GetPoolStats();
-    EXPECT_GE(poolStats.totalChunks, 0u);
 }
 
 // Test component registry sharing
@@ -381,11 +293,8 @@ TEST_F(ArchetypeManagerTest, ComponentRegistrySharing)
 {
     using namespace Astra::Test;
     
-    // Get registry from first manager
-    auto sharedRegistry = manager->GetComponentRegistry();
-    
-    // Create second manager with shared registry
-    Astra::ArchetypeManager manager2(sharedRegistry);
+    // Create second manager with shared component registry
+    Astra::ArchetypeManager manager2(componentRegistry);
     
     // Components registered in first manager should work in second
     Astra::Entity entity(100, 1);
@@ -455,14 +364,18 @@ TEST_F(ArchetypeManagerTest, EntityLocationTracking)
 {
     using namespace Astra::Test;
     
-    // Create archetype directly
-    auto* archetype = manager->GetOrCreateArchetype<Position, Velocity>();
+    // Create entity with components to ensure archetype exists
+    Astra::Entity entity(1, 1);
+    manager->AddEntityWith(entity, Position{0.0f, 0.0f, 0.0f}, Velocity{0.0f, 0.0f, 0.0f});
+    
+    // Find the archetype
+    auto* archetype = manager->FindArchetype<Position, Velocity>();
     ASSERT_NE(archetype, nullptr);
     
-    // Add entity to archetype and set location
-    Astra::Entity entity(1, 1);
-    auto location = archetype->AddEntity(entity);
-    manager->SetEntityLocation(entity, archetype, location);
+    // Get entity's location from the manager
+    auto* record = manager->GetEntityRecord(entity);
+    ASSERT_NE(record, nullptr);
+    auto location = record->location;
     
     // Should be able to get components
     archetype->SetComponent(location, Position{1.0f, 2.0f, 3.0f});

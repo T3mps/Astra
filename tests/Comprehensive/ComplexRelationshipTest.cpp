@@ -93,10 +93,9 @@ TEST_F(ComplexRelationshipTest, VeryDeepHierarchy)
     // Traverse from root to leaf
     size_t traversalDepth = 0;
     auto rootRelations = registry->GetRelations(chain[0]);
-    for (auto entry : rootRelations.GetDescendants())
-    {
-        traversalDepth = std::max(traversalDepth, entry.depth);
-    }
+    rootRelations.ForEachDescendant([&traversalDepth](Entity, size_t depth) {
+        traversalDepth = std::max(traversalDepth, depth);
+    });
     
     EXPECT_EQ(traversalDepth, depth - 1) << "Should traverse entire hierarchy";
     
@@ -164,11 +163,10 @@ TEST_F(ComplexRelationshipTest, VeryWideHierarchy)
     // Verify hierarchy iteration finds all descendants
     size_t descendantCount = 0;
     size_t maxDepth = 0;
-    for (auto entry : rootRelations.GetDescendants())
-    {
+    rootRelations.ForEachDescendant([&descendantCount, &maxDepth](Entity, size_t depth) {
         descendantCount++;
-        maxDepth = std::max(maxDepth, entry.depth);
-    }
+        maxDepth = std::max(maxDepth, depth);
+    });
     EXPECT_LE(maxDepth, 2u) << "Max depth should be 2";
     
     EXPECT_EQ(descendantCount, children.size() + grandchildren.size());
@@ -396,10 +394,9 @@ TEST_F(ComplexRelationshipTest, ForestOfTrees)
         // Count nodes in tree
         size_t nodeCount = 0;
         auto treeRelations = registry->GetRelations(roots[t]);
-        for (auto entry : treeRelations.GetDescendants())
-        {
+        treeRelations.ForEachDescendant([&nodeCount](Entity, size_t) {
             nodeCount++;
-        }
+        });
         
         EXPECT_EQ(nodeCount, nodesPerTree - 1) << "Tree " << t << " has wrong node count";
     }

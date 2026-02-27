@@ -29,6 +29,9 @@ namespace Astra
         ParentChanged    = 1 << 5,
         LinkAdded        = 1 << 6,
         LinkRemoved      = 1 << 7,
+        ResourceAdded    = 1 << 8,
+        ResourceRemoved  = 1 << 9,
+        ResourceUpdated  = 1 << 10,
         // Reserve space for future signals
         All = ~0u
     };
@@ -72,9 +75,6 @@ namespace Astra
     {
         return (flags & signal) != Signal::None;
     }
-    
-
-    // Delegate and MulticastDelegate classes are now in Delegate.hpp
 
     template<typename T>
     concept Event = requires
@@ -140,6 +140,27 @@ namespace Astra
             Entity first;
             Entity second;
         };
+        
+        struct ResourceAdded
+        {
+            static constexpr Signal flag = Signal::ResourceAdded;
+            ComponentID resourceId;
+            void* resource;
+        };
+        
+        struct ResourceRemoved
+        {
+            static constexpr Signal flag = Signal::ResourceRemoved;
+            ComponentID resourceId;
+            void* resource;
+        };
+        
+        struct ResourceUpdated
+        {
+            static constexpr Signal flag = Signal::ResourceUpdated;
+            ComponentID resourceId;
+            void* resource;
+        };
     }
     
     namespace Detail
@@ -171,47 +192,6 @@ namespace Astra
     
     class SignalManager
     {
-    private:
-        using AllEventTypes = std::tuple<
-            Events::EntityCreated,
-            Events::EntityDestroyed,
-            Events::ComponentAdded,
-            Events::ComponentRemoved,
-            Events::ComponentUpdated,
-            Events::ParentChanged,
-            Events::LinkAdded,
-            Events::LinkRemoved
-        >;
-        
-        // Handler tuple
-        std::tuple<
-            MulticastDelegate<void(const Events::EntityCreated&)>,
-            MulticastDelegate<void(const Events::EntityDestroyed&)>,
-            MulticastDelegate<void(const Events::ComponentAdded&)>,
-            MulticastDelegate<void(const Events::ComponentRemoved&)>,
-            MulticastDelegate<void(const Events::ComponentUpdated&)>,
-            MulticastDelegate<void(const Events::ParentChanged&)>,
-            MulticastDelegate<void(const Events::LinkAdded&)>,
-            MulticastDelegate<void(const Events::LinkRemoved&)>
-        > m_handlers;
-        
-        Signal m_enabledSignals;
-        
-        template<Event E>
-        static constexpr size_t IndexOf() noexcept
-        {
-            return Detail::EventIndex<E,
-                Events::EntityCreated,
-                Events::EntityDestroyed,
-                Events::ComponentAdded,
-                Events::ComponentRemoved,
-                Events::ComponentUpdated,
-                Events::ParentChanged,
-                Events::LinkAdded,
-                Events::LinkRemoved
-            >;
-        }
-        
     public:
         SignalManager() noexcept : m_enabledSignals(Signal::None) {}
         
@@ -288,5 +268,40 @@ namespace Astra
                 ((handler.Clear()), ...);
             }, m_handlers);
         }
+
+    private:
+        template<Event E>
+        static constexpr size_t IndexOf() noexcept
+        {
+            return Detail::EventIndex<E,
+                Events::EntityCreated,
+                Events::EntityDestroyed,
+                Events::ComponentAdded,
+                Events::ComponentRemoved,
+                Events::ComponentUpdated,
+                Events::ParentChanged,
+                Events::LinkAdded,
+                Events::LinkRemoved,
+                Events::ResourceAdded,
+                Events::ResourceRemoved,
+                Events::ResourceUpdated
+            >;
+        }
+
+        std::tuple<
+            MulticastDelegate<void(const Events::EntityCreated&)>,
+            MulticastDelegate<void(const Events::EntityDestroyed&)>,
+            MulticastDelegate<void(const Events::ComponentAdded&)>,
+            MulticastDelegate<void(const Events::ComponentRemoved&)>,
+            MulticastDelegate<void(const Events::ComponentUpdated&)>,
+            MulticastDelegate<void(const Events::ParentChanged&)>,
+            MulticastDelegate<void(const Events::LinkAdded&)>,
+            MulticastDelegate<void(const Events::LinkRemoved&)>,
+            MulticastDelegate<void(const Events::ResourceAdded&)>,
+            MulticastDelegate<void(const Events::ResourceRemoved&)>,
+            MulticastDelegate<void(const Events::ResourceUpdated&)>
+        > m_handlers;
+
+        Signal m_enabledSignals;
     };
 }

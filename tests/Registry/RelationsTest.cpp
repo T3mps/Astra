@@ -106,7 +106,7 @@ TEST_F(RelationsTest, FilteredRelationsNot)
     for (Entity child : children)
     {
         count++;
-        EXPECT_EQ(registry->GetComponent<Enemy>(child), nullptr);
+        EXPECT_FALSE(registry->HasComponent<Enemy>(child));
     }
     EXPECT_EQ(count, 1u);
 }
@@ -134,8 +134,8 @@ TEST_F(RelationsTest, FilteredRelationsAny)
     for (Entity child : children)
     {
         count++;
-        bool hasPlayer = registry->GetComponent<Player>(child) != nullptr;
-        bool hasEnemy = registry->GetComponent<Enemy>(child) != nullptr;
+        bool hasPlayer = registry->HasComponent<Player>(child);
+        bool hasEnemy = registry->HasComponent<Enemy>(child);
         EXPECT_TRUE(hasPlayer || hasEnemy);
     }
     EXPECT_EQ(count, 3u);
@@ -164,8 +164,8 @@ TEST_F(RelationsTest, FilteredRelationsOneOf)
     for (Entity child : children)
     {
         count++;
-        bool hasPlayer = registry->GetComponent<Player>(child) != nullptr;
-        bool hasEnemy = registry->GetComponent<Enemy>(child) != nullptr;
+        bool hasPlayer = registry->HasComponent<Player>(child);
+        bool hasEnemy = registry->HasComponent<Enemy>(child);
         EXPECT_TRUE(hasPlayer != hasEnemy); // XOR - exactly one
     }
     EXPECT_EQ(count, 2u);
@@ -206,7 +206,7 @@ TEST_F(RelationsTest, FilteredLinks)
     for (Entity linked : linksNoEnemy)
     {
         count++;
-        EXPECT_EQ(registry->GetComponent<Enemy>(linked), nullptr);
+        EXPECT_FALSE(registry->HasComponent<Enemy>(linked));
     }
     EXPECT_EQ(count, 1u);
 }
@@ -261,27 +261,25 @@ TEST_F(RelationsTest, DescendantsTraversal)
     
     // Get all descendants
     auto relations = registry->GetRelations(root);
-    auto descendants = relations.GetDescendants();
     
     std::unordered_set<Entity> foundEntities;
     size_t maxDepth = 0;
     
-    for (auto entry : descendants)
-    {
-        foundEntities.insert(entry.entity);
-        maxDepth = std::max(maxDepth, entry.depth);
+    relations.ForEachDescendant([&](Entity entity, size_t depth) {
+        foundEntities.insert(entity);
+        maxDepth = std::max(maxDepth, depth);
         
-        if (entry.depth == 1)
+        if (depth == 1)
         {
             // Direct children
-            EXPECT_TRUE(entry.entity == child1 || entry.entity == child2);
+            EXPECT_TRUE(entity == child1 || entity == child2);
         }
-        else if (entry.depth == 2)
+        else if (depth == 2)
         {
             // Grandchildren
-            EXPECT_TRUE(entry.entity == grand1 || entry.entity == grand2);
+            EXPECT_TRUE(entity == grand1 || entity == grand2);
         }
-    }
+    });
     
     EXPECT_EQ(foundEntities.size(), 4u);
     EXPECT_EQ(maxDepth, 2u);
@@ -303,14 +301,12 @@ TEST_F(RelationsTest, FilteredDescendants)
     
     // Get descendants with Position
     auto relations = registry->GetRelations<Position>(root);
-    auto descendants = relations.GetDescendants();
     
     size_t count = 0;
-    for (auto entry : descendants)
-    {
+    relations.ForEachDescendant([&](Entity entity, size_t, Position&) {
         count++;
-        EXPECT_NE(registry->GetComponent<Position>(entry.entity), nullptr);
-    }
+        // Position is automatically provided as parameter when filtering
+    });
     // Should find: child1, grand1, and grand2 (all have Position)
     // Note: child2 is skipped but its children are still checked
     EXPECT_EQ(count, 3u);
@@ -328,21 +324,19 @@ TEST_F(RelationsTest, AncestorsTraversal)
     
     // Get ancestors of child
     auto relations = registry->GetRelations(child);
-    auto ancestors = relations.GetAncestors();
     
     std::vector<Entity> foundAncestors;
-    for (auto entry : ancestors)
-    {
-        foundAncestors.push_back(entry.entity);
-        if (entry.depth == 1)
+    relations.ForEachAncestor([&](Entity entity, size_t depth) {
+        foundAncestors.push_back(entity);
+        if (depth == 1)
         {
-            EXPECT_EQ(entry.entity, parent);
+            EXPECT_EQ(entity, parent);
         }
-        else if (entry.depth == 2)
+        else if (depth == 2)
         {
-            EXPECT_EQ(entry.entity, root);
+            EXPECT_EQ(entity, root);
         }
-    }
+    });
     
     EXPECT_EQ(foundAncestors.size(), 2u);
 }
@@ -359,14 +353,12 @@ TEST_F(RelationsTest, FilteredAncestors)
     
     // Get ancestors excluding Enemy
     auto relations = registry->GetRelations<Not<Enemy>>(child);
-    auto ancestors = relations.GetAncestors();
     
     size_t count = 0;
-    for (auto entry : ancestors)
-    {
+    relations.ForEachAncestor([&](Entity entity, size_t) {
         count++;
-        EXPECT_EQ(registry->GetComponent<Enemy>(entry.entity), nullptr);
-    }
+        EXPECT_FALSE(registry->HasComponent<Enemy>(entity));
+    });
     EXPECT_EQ(count, 1u); // Only parent (root has Enemy)
 }
 
@@ -399,8 +391,8 @@ TEST_F(RelationsTest, ComplexFiltering)
         // Must have Position
         EXPECT_NE(registry->GetComponent<Position>(child), nullptr);
         // Must have Player or Enemy
-        bool hasPlayer = registry->GetComponent<Player>(child) != nullptr;
-        bool hasEnemy = registry->GetComponent<Enemy>(child) != nullptr;
+        bool hasPlayer = registry->HasComponent<Player>(child);
+        bool hasEnemy = registry->HasComponent<Enemy>(child);
         EXPECT_TRUE(hasPlayer || hasEnemy);
         // Must NOT have Health
         EXPECT_EQ(registry->GetComponent<Health>(child), nullptr);
@@ -466,7 +458,7 @@ TEST_F(RelationsTest, BidirectionalLinkFiltering)
     for (Entity linked : links2)
     {
         count++;
-        EXPECT_NE(registry->GetComponent<Player>(linked), nullptr);
+        EXPECT_TRUE(registry->HasComponent<Player>(linked));
     }
     EXPECT_EQ(count, 1u); // Only entity1
 }
@@ -492,30 +484,26 @@ TEST_F(RelationsTest, LargeHierarchyPerformance)
     
     // Traverse all descendants from root
     auto relations = registry->GetRelations(root);
-    auto descendants = relations.GetDescendants();
     
     size_t count = 0;
     size_t maxDepth = 0;
-    for (auto entry : descendants)
-    {
+    relations.ForEachDescendant([&](Entity, size_t depth) {
         count++;
-        maxDepth = std::max(maxDepth, entry.depth);
-    }
+        maxDepth = std::max(maxDepth, depth);
+    });
     
     EXPECT_EQ(count, depth - 1); // All except root
     EXPECT_EQ(maxDepth, depth - 1);
     
     // Traverse ancestors from leaf
     auto leafRelations = registry->GetRelations(entities.back());
-    auto ancestors = leafRelations.GetAncestors();
     
     count = 0;
     maxDepth = 0;
-    for (auto entry : ancestors)
-    {
+    leafRelations.ForEachAncestor([&](Entity, size_t depth) {
         count++;
-        maxDepth = std::max(maxDepth, entry.depth);
-    }
+        maxDepth = std::max(maxDepth, depth);
+    });
     
     EXPECT_EQ(count, depth - 1); // All except leaf itself
     EXPECT_EQ(maxDepth, depth - 1);
@@ -524,75 +512,50 @@ TEST_F(RelationsTest, LargeHierarchyPerformance)
 // Test circular hierarchy handling
 TEST_F(RelationsTest, CircularHierarchyHandling)
 {
-    // Create a potential circular hierarchy
+    // Test that circular hierarchies are now prevented
     Entity a = registry->CreateEntity();
     Entity b = registry->CreateEntity();
     Entity c = registry->CreateEntity();
-    
-    // Create chain: a -> b -> c
+
+    // Create chain: a -> b -> c (a is root, b is child of a, c is child of b)
     registry->SetParent(b, a);
     registry->SetParent(c, b);
-    
-    // Try to create cycle: c -> a (would make a -> b -> c -> a)
-    // Note: Current implementation allows this, creating a cycle
+
+    // Verify the chain is correct
+    EXPECT_EQ(registry->GetParent(b), a);
+    EXPECT_EQ(registry->GetParent(c), b);
+    EXPECT_FALSE(registry->GetParent(a).IsValid()); // a has no parent
+
+    // Try to create cycle: a -> c (would make a -> b -> c -> a)
+    // This should be rejected because a is an ancestor of c
     registry->SetParent(a, c);
-    
-    // Test what happens when traversing (should not infinite loop)
-    // The queue-based traversal should handle this by visiting each node once
+
+    // Verify cycle was prevented - a should still have no parent
+    EXPECT_FALSE(registry->GetParent(a).IsValid());
+
+    // Verify the original chain is still intact
+    EXPECT_EQ(registry->GetParent(b), a);
+    EXPECT_EQ(registry->GetParent(c), b);
+
+    // Test traversal works correctly with the valid (non-cyclic) hierarchy
     auto relations = registry->GetRelations(a);
-    auto descendants = relations.GetDescendants();
-    
-    // Set a timeout for safety
-    auto start = std::chrono::high_resolution_clock::now();
-    size_t count = 0;
-    const size_t maxIterations = 1000; // Safety limit
-    
-    for (auto entry : descendants)
-    {
-        count++;
-        if (count > maxIterations)
-        {
-            FAIL() << "Infinite loop detected in circular hierarchy traversal!";
-            break;
-        }
-        
-        auto elapsed = std::chrono::high_resolution_clock::now() - start;
-        if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() > 1)
-        {
-            FAIL() << "Traversal timeout - possible infinite loop!";
-            break;
-        }
-    }
-    
-    // The BFS traversal in Relations should handle cycles by visiting each node once
-    // With the fixed implementation, we should visit b and c from a's perspective
-    EXPECT_EQ(count, 2u); // Should visit b and c (not a itself, as it's the root)
-    
-    // Test ancestor traversal with cycle
-    auto ancestorRelations = registry->GetRelations(a);
-    auto ancestors = ancestorRelations.GetAncestors();
-    
-    count = 0;
-    start = std::chrono::high_resolution_clock::now();
-    
-    for (auto entry : ancestors)
-    {
-        count++;
-        if (count > maxIterations)
-        {
-            FAIL() << "Infinite loop in ancestor traversal!";
-            break;
-        }
-        
-        auto elapsed = std::chrono::high_resolution_clock::now() - start;
-        if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() > 1)
-        {
-            FAIL() << "Ancestor traversal timeout!";
-            break;
-        }
-    }
-    
-    // Should also handle the cycle gracefully
-    // From a's perspective looking up, we see c (parent), then b (grandparent)
-    EXPECT_EQ(count, 2u);
+
+    size_t descendantCount = 0;
+    relations.ForEachDescendant([&](Entity, size_t) {
+        descendantCount++;
+    });
+
+    // Should visit b and c (descendants of a)
+    EXPECT_EQ(descendantCount, 2u);
+
+    // Test ancestor traversal from c
+    auto cRelations = registry->GetRelations(c);
+
+    size_t ancestorCount = 0;
+    cRelations.ForEachAncestor([&](Entity, size_t) {
+        ancestorCount++;
+    });
+
+    // Should visit b and a (ancestors of c)
+    EXPECT_EQ(ancestorCount, 2u);
 }

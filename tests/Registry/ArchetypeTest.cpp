@@ -309,7 +309,7 @@ TEST_F(ArchetypeTest, ChunkAllocationAndCapacity)
     
     // Add enough entities to require multiple chunks
     size_t totalEntities = entitiesPerChunk * 2 + 10;
-    for (Astra::Entity::IDType i = 0; i < totalEntities; ++i)
+    for (Astra::Entity::StorageType i = 0; i < totalEntities; ++i)
     {
         archetype.AddEntity(Astra::Entity(i, 1));
     }
@@ -499,7 +499,7 @@ TEST_F(ArchetypeTest, EnsureCapacity)
     // Add entities - should not need to allocate new chunks during loop
     for (size_t i = 0; i < targetCount; ++i)
     {
-        archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::IDType>(i), 1));
+        archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(i), 1));
     }
     
     EXPECT_EQ(archetype.GetEntityCount(), targetCount);
@@ -518,18 +518,18 @@ TEST_F(ArchetypeTest, CalculateRemainingCapacity)
     size_t entitiesPerChunk = archetype.GetEntitiesPerChunk();
     
     // Initially should have capacity of first chunk
-    size_t initialCapacity = archetype.CalculateRemainingCapacity();
+    size_t initialCapacity = archetype.GetRemainingCapacity();
     EXPECT_EQ(initialCapacity, entitiesPerChunk);
     
     // Add some entities
     size_t toAdd = entitiesPerChunk / 2;
     for (size_t i = 0; i < toAdd; ++i)
     {
-        archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::IDType>(i), 1));
+        archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(i), 1));
     }
     
     // Remaining capacity should decrease
-    size_t remainingCapacity = archetype.CalculateRemainingCapacity();
+    size_t remainingCapacity = archetype.GetRemainingCapacity();
     EXPECT_EQ(remainingCapacity, entitiesPerChunk - toAdd);
 }
 
@@ -551,7 +551,7 @@ TEST_F(ArchetypeTest, ChunkCoalescing)
     
     for (size_t i = 0; i < totalEntities; ++i)
     {
-        locations.push_back(archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::IDType>(i), 1)));
+        locations.push_back(archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(i), 1)));
     }
     
     // Remove many entities to create sparse chunks
@@ -568,7 +568,7 @@ TEST_F(ArchetypeTest, ChunkCoalescing)
     archetype.RemoveEntities(toRemove);
     
     // Check if coalescing is needed
-    bool needsCoalescing = archetype.NeedsCoalescing();
+    bool needsCoalescing = archetype.ShouldCoalesce();
     // This depends on thresholds but with 80% removed, it should need coalescing
     
     if (needsCoalescing)
@@ -640,7 +640,7 @@ TEST_F(ArchetypeTest, StressTestManyEntities)
     entities.reserve(entityCount);
     for (size_t i = 0; i < entityCount; ++i)
     {
-        entities.emplace_back(static_cast<Astra::Entity::IDType>(i), 1);
+        entities.emplace_back(static_cast<Astra::Entity::StorageType>(i), 1);
     }
     
     auto locations = archetype.AddEntities(entities);
@@ -681,14 +681,14 @@ TEST_F(ArchetypeTest, ChunkBoundaryConditions)
     // Fill exactly one chunk
     for (size_t i = 0; i < entitiesPerChunk; ++i)
     {
-        archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::IDType>(i), 1));
+        archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(i), 1));
     }
     
     EXPECT_EQ(archetype.GetEntityCount(), entitiesPerChunk);
     EXPECT_EQ(archetype.GetChunks().size(), 1u);
     
     // Add one more - should create new chunk
-    archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::IDType>(entitiesPerChunk), 1));
+    archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(entitiesPerChunk), 1));
     
     EXPECT_EQ(archetype.GetEntityCount(), entitiesPerChunk + 1);
     EXPECT_EQ(archetype.GetChunks().size(), 2u);
@@ -710,7 +710,7 @@ TEST_F(ArchetypeTest, ComponentAccessPatterns)
     
     for (size_t i = 0; i < count; ++i)
     {
-        locations.push_back(archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::IDType>(i), 1)));
+        locations.push_back(archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(i), 1)));
     }
     
     // Test different access patterns
@@ -801,10 +801,11 @@ TEST_F(ArchetypeTest, SerializeEmptyArchetype)
         std::vector<Astra::ComponentDescriptor> registryDescriptors;
         registry.GetAllDescriptors(registryDescriptors);
         
-        auto deserializedArchetype = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
-        
-        ASSERT_NE(deserializedArchetype, nullptr);
-        
+        auto deserializedResult = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
+
+        ASSERT_TRUE(deserializedResult.IsOk()) << "Deserialization failed";
+        auto deserializedArchetype = std::move(*deserializedResult.GetValue());
+
         // Verify the deserialized archetype matches
         EXPECT_EQ(deserializedArchetype->GetMask(), mask);
         EXPECT_EQ(deserializedArchetype->GetEntityCount(), 0u);
@@ -833,7 +834,7 @@ TEST_F(ArchetypeTest, SerializeWithEntities)
     
     for (size_t i = 0; i < entityCount; ++i)
     {
-        Astra::Entity entity(static_cast<Astra::Entity::IDType>(i), 1);
+        Astra::Entity entity(static_cast<Astra::Entity::StorageType>(i), 1);
         entities.push_back(entity);
         
         Astra::EntityLocation loc = archetype.AddEntity(entity);
@@ -861,10 +862,11 @@ TEST_F(ArchetypeTest, SerializeWithEntities)
         std::vector<Astra::ComponentDescriptor> registryDescriptors;
         registry.GetAllDescriptors(registryDescriptors);
         
-        auto deserializedArchetype = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
-        
-        ASSERT_NE(deserializedArchetype, nullptr);
-        
+        auto deserializedResult = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
+
+        ASSERT_TRUE(deserializedResult.IsOk()) << "Deserialization failed";
+        auto deserializedArchetype = std::move(*deserializedResult.GetValue());
+
         // Verify basic properties
         EXPECT_EQ(deserializedArchetype->GetMask(), mask);
         EXPECT_EQ(deserializedArchetype->GetEntityCount(), entityCount);
@@ -940,7 +942,7 @@ TEST_F(ArchetypeTest, SerializeMultipleChunks)
     std::vector<Astra::Entity> entities;
     for (size_t i = 0; i < entityCount; ++i)
     {
-        Astra::Entity entity(static_cast<Astra::Entity::IDType>(i), 1);
+        Astra::Entity entity(static_cast<Astra::Entity::StorageType>(i), 1);
         entities.push_back(entity);
         
         Astra::EntityLocation loc = archetype.AddEntity(entity);
@@ -966,12 +968,13 @@ TEST_F(ArchetypeTest, SerializeMultipleChunks)
         std::vector<Astra::ComponentDescriptor> registryDescriptors;
         registry.GetAllDescriptors(registryDescriptors);
         
-        auto deserializedArchetype = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
-        
-        ASSERT_NE(deserializedArchetype, nullptr);
-        
+        auto deserializedResult = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
+
+        ASSERT_TRUE(deserializedResult.IsOk()) << "Deserialization failed";
+        auto deserializedArchetype = std::move(*deserializedResult.GetValue());
+
         EXPECT_EQ(deserializedArchetype->GetEntityCount(), entityCount);
-        
+
         // Verify all entities and their data by iterating through chunks
         size_t verifiedCount = 0;
         const auto& chunks = deserializedArchetype->GetChunks();
@@ -1024,7 +1027,7 @@ TEST_F(ArchetypeTest, SerializeNonTrivialComponents)
     
     for (size_t i = 0; i < entityCount; ++i)
     {
-        Astra::Entity entity(static_cast<Astra::Entity::IDType>(i), 1);
+        Astra::Entity entity(static_cast<Astra::Entity::StorageType>(i), 1);
         entities.push_back(entity);
         
         Astra::EntityLocation loc = archetype.AddEntity(entity);
@@ -1049,10 +1052,11 @@ TEST_F(ArchetypeTest, SerializeNonTrivialComponents)
         std::vector<Astra::ComponentDescriptor> registryDescriptors;
         registry.GetAllDescriptors(registryDescriptors);
         
-        auto deserializedArchetype = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
-        
-        ASSERT_NE(deserializedArchetype, nullptr);
-        
+        auto deserializedResult = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
+
+        ASSERT_TRUE(deserializedResult.IsOk()) << "Deserialization failed";
+        auto deserializedArchetype = std::move(*deserializedResult.GetValue());
+
         // Verify string data is preserved by checking entities in chunks
         size_t verifiedCount = 0;
         const auto& chunks = deserializedArchetype->GetChunks();

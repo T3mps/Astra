@@ -109,6 +109,8 @@
     #define ASTRA_BUILD_TYPE "Debug"
 #elif defined(ASTRA_BUILD_RELEASE)
     #define ASTRA_BUILD_TYPE "Release"
+#elif defined(ASTRA_BUILD_DIST)
+    #define ASTRA_BUILD_TYPE "Dist"
 #else
     #define ASTRA_BUILD_TYPE "Unknown"
 #endif
@@ -125,7 +127,7 @@
 #endif
 
 // SIMD Capabilities Detection
-#if defined(ARCH_X64) || defined(ARCH_X86)
+#if defined(ASTRA_ARCH_X64) || defined(ASTRA_ARCH_X86)
     #ifdef __SSE2__
         #define ASTRA_HAS_SSE2 1
     #endif
@@ -146,5 +148,13 @@
     #endif
     #ifdef __AVX512VL__
         #define ASTRA_HAS_AVX512VL 1  // Vector Length extensions
+    #endif
+#endif
+
+// ARM SIMD Capabilities Detection
+#if defined(ASTRA_ARCH_ARM64) || defined(ASTRA_ARCH_ARM32)
+    // NEON is always available on ARM64 and most ARM32 targets
+    #if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        #define ASTRA_HAS_NEON 1
     #endif
 #endif

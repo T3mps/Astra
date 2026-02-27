@@ -11,15 +11,12 @@ namespace Astra
 
     inline constexpr ComponentID INVALID_COMPONENT = std::numeric_limits<ComponentID>::max();
 
-    // Allow users to override the maximum number of components
-    // Usage: #define ASTRA_MAX_COMPONENTS 128 before including Astra
     #ifndef ASTRA_MAX_COMPONENTS
-        #define ASTRA_MAX_COMPONENTS 64u
+        #define ASTRA_MAX_COMPONENTS 128u
     #endif
 
     constexpr std::size_t MAX_COMPONENTS = ASTRA_MAX_COMPONENTS;
     
-    // Component mask for tracking which components an archetype has
     using ComponentMask = Bitmap<MAX_COMPONENTS>;
 
     template<typename T>
@@ -29,11 +26,10 @@ namespace Astra
                         std::is_move_assignable_v<std::remove_const_t<T>> &&
                         std::is_destructible_v<std::remove_const_t<T>>;
 
-    // Forward declarations for serialization
     class BinaryWriter;
     class BinaryReader;
-    
-    // Component descriptor - shared metadata for component types
+    class TypeMeta;  // Forward declaration for reflection integration
+
     struct ComponentDescriptor
     {
         using ConstructFn = void(void*);
@@ -42,8 +38,8 @@ namespace Astra
         using MoveConstructFn = void(void*, void*);
         using MoveAssignFn = void(void*, void*);
         using CopyAssignFn = void(void*, const void*);
+        using ConstructWithFn = void(void*, const void*);  // Construct with value
         
-        // Serialization function types
         using SerializeFn = void(BinaryWriter&, void*);              // Non-const for unified Serialize method
         using DeserializeFn = void(BinaryReader&, void*);
         using SerializeVersionedFn = void(BinaryWriter&, void*);     // Non-const for unified Serialize method
@@ -52,37 +48,30 @@ namespace Astra
         ComponentID id;
         size_t size;
         size_t alignment;
-        
-        // Component identification
         uint64_t hash;           // XXHash64 of component type name
         const char* name;        // Component type name (for debugging)
-        
-        // Versioning info
         uint32_t version;        // Current component version
         uint32_t minVersion;     // Minimum supported version for migration
-        
-        // Type traits for optimization
         bool is_trivially_copyable;
         bool is_copy_constructible;
         bool is_nothrow_move_constructible;
         bool is_nothrow_default_constructible;
         bool is_empty;
-        
-        // Function pointers for operations
         ConstructFn* defaultConstruct;
         DestructFn* destruct;
         CopyConstructFn* copyConstruct;
         MoveConstructFn* moveConstruct;
         MoveAssignFn* moveAssign;
         CopyAssignFn* copyAssign;
-        
-        // Serialization function pointers
+        ConstructWithFn* constructWith;            // Construct with provided value
         SerializeFn* serialize;                    // Basic serialization
         DeserializeFn* deserialize;                // Basic deserialization
         SerializeVersionedFn* serializeVersioned;  // Versioned serialization
         DeserializeVersionedFn* deserializeVersioned; // Versioned deserialization with migration
-        
-        // Member functions for component operations - exactly match ComponentOps behavior
+
+        // Reflection integration - linked at registration time if type is reflected
+        const TypeMeta* meta = nullptr;
+
         inline void DefaultConstruct(void* ptr) const
         {
             if (is_trivially_copyable && is_nothrow_default_constructible)
@@ -90,10 +79,27 @@ namespace Astra
 #ifdef ASTRA_BUILD_DEBUG
                 std::memset(ptr, 0, size);
 #endif
-            // In release, skip initialization for true POD types
             }
             else
             {
+                defaultConstruct(ptr);
+            }
+        }
+        
+        inline void ConstructWith(void* ptr, const void* value) const
+        {
+            if (constructWith)
+            {
+                constructWith(ptr, value);
+            }
+            else if (copyConstruct)
+            {
+                // Fallback to copy construct if no specialized constructWith
+                copyConstruct(ptr, value);
+            }
+            else
+            {
+                // Should not happen for properly registered components
                 defaultConstruct(ptr);
             }
         }
@@ -102,13 +108,10 @@ namespace Astra
         {
             if (is_empty)
             {
-                return; // Nothing to do for empty types
             }
             
             if (is_trivially_copyable && is_nothrow_default_constructible)
             {
-                // For POD types, use memset for batch initialization
-                // This is much faster than calling default constructor in a loop
                 std::memset(ptr, 0, count * size);
             }
             else

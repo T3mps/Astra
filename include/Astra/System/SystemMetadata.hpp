@@ -11,16 +11,10 @@
 
 namespace Astra
 {
-    // Forward declarations
     class Registry;
     
     /**
      * @brief Metadata describing a system's component access patterns and scheduling hints
-     * 
-     * This information is used for:
-     * - Identifying safe parallelization opportunities
-     * - Debugging and profiling
-     * - Visualization of system dependencies
      */
     struct SystemMetadata
     {
@@ -77,5 +71,4 @@ namespace Astra
          */
         Registry* registry = nullptr;
     };
-    
 } // namespace Astra

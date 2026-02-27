@@ -14,6 +14,7 @@
 #include "../Component/Component.hpp"
 #include "../Entity/Entity.hpp"
 #include "Query.hpp"
+#include "ViewIterator.hpp"
 
 namespace Astra
 {
@@ -21,30 +22,47 @@ namespace Astra
     class View
     {
         static_assert(ValidQuery<QueryArgs...>, "View template arguments must be valid components or query modifiers");
-        
+
+        // Query type extraction - must be declared early for Iterator type
+        using RequiredTypes = typename Detail::QueryClassifier<QueryArgs...>::RequiredComponents;
+        using OptionalTypes = typename Detail::QueryClassifier<QueryArgs...>::OptionalComponents;
+        using QueryBuilder = QueryBuilder<QueryArgs...>;
+
         // Parallel execution thresholds - based on empirical testing
         static constexpr size_t AVG_ENTITIES_PER_CHUNK = 256;                           // Typical for 16KB chunks with ~50 byte entities
         static constexpr size_t MIN_CHUNKS_PER_THREAD = 4;                              // Each thread should process at least 4 chunks (64KB)
         static constexpr size_t MIN_CHUNKS_FOR_PARALLEL = MIN_CHUNKS_PER_THREAD * 2;    // Need enough for at least 2 threads
-        
+
         // Derive entity thresholds from chunk-based values
         static constexpr size_t MIN_ENTITIES_QUICK_CHECK = AVG_ENTITIES_PER_CHUNK / 2;  // Less than half a chunk = definitely sequential
         static constexpr size_t MIN_ENTITIES_FOR_PARALLEL = MIN_CHUNKS_FOR_PARALLEL * AVG_ENTITIES_PER_CHUNK / 2;  // ~4 chunks worth
-        
+
     public:
         explicit View(std::shared_ptr<ArchetypeManager> manager) :
-            m_archetypeManager(std::move(manager)),
+            m_archetypeManager(manager),
             m_lastRefreshCounter(0),
             m_lastGeneration(0)
         {
             CollectArchetypes();
-            m_lastRefreshCounter = m_archetypeManager->GetStructuralChangeCounter();
-            m_lastGeneration = m_archetypeManager->GetCurrentGeneration();
+            m_lastRefreshCounter = m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
+            m_lastGeneration = m_archetypeManager->m_generation;
+        }
+        
+        /**
+         * Check if the View is still valid (Registry not destroyed)
+         * @return true if the underlying ArchetypeManager is still alive
+         */
+        ASTRA_NODISCARD bool IsValid() const noexcept
+        {
+            return m_archetypeManager != nullptr;
         }
 
         template<typename Func>
         ASTRA_FORCEINLINE void ForEach(Func&& func)
         {
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
             EnsureArchetypes();
             
             if (m_archetypes.empty()) ASTRA_UNLIKELY
@@ -59,6 +77,9 @@ namespace Astra
         template<typename Func>
         ASTRA_FORCEINLINE void ParallelForEach(Func&& func)
         {
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
             EnsureArchetypes();
             
             if (m_archetypes.empty()) ASTRA_UNLIKELY
@@ -97,9 +118,7 @@ namespace Astra
             }
             
             // Fall back to sequential for tiny workloads
-            if (chunkWork.empty() || 
-                totalMatchingEntities < MIN_ENTITIES_FOR_PARALLEL || 
-                chunkWork.size() < MIN_CHUNKS_FOR_PARALLEL)
+            if (chunkWork.empty() || totalMatchingEntities < MIN_ENTITIES_FOR_PARALLEL || chunkWork.size() < MIN_CHUNKS_FOR_PARALLEL)
             {
                 return ForEach(std::forward<Func>(func));
             }
@@ -148,183 +167,36 @@ namespace Astra
             return m_archetypes.empty();
         }
 
-        class iterator
+        // ============= Range-based for loop support =============
+
+        /**
+         * Iterator type for range-based for loops.
+         * Uses the required components from the query.
+         */
+        using Iterator = ViewIteratorFromTuple_t<RequiredTypes>;
+
+        /**
+         * Begin iterator for range-based for loop.
+         * Ensures archetypes are up-to-date before returning iterator.
+         */
+        ASTRA_FORCEINLINE Iterator begin()
         {
-        public:
-            using iterator_category = std::forward_iterator_tag;
-            using difference_type = std::ptrdiff_t;
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return Iterator(nullptr, 0);
 
-            iterator() = default;
-
-            iterator(const std::vector<Archetype*>& archetypes) : m_archetypes(&archetypes)
-            {
-                if (!m_archetypes->empty() && !archetypes.empty())
-                {
-                    m_archIdx = 0;
-                    m_chunkIdx = 0;
-                    m_entityIdx = 0;
-                    CacheCurrentChunk();
-                    AdvanceToValid();
-                }
-                else
-                {
-                    m_archIdx = std::numeric_limits<size_t>::max();
-                    m_chunkIdx = 0;
-                    m_entityIdx = 0;
-                }
-            }
-
-            auto operator*() const
-            {
-                return BuildTuple(std::make_index_sequence<COMPONENT_COUNT>{});
-            }
-
-            iterator& operator++()
-            {
-                ++m_entityIdx;
-                AdvanceToValid();
-                return *this;
-            }
-
-            bool operator==(const iterator& other) const
-            {
-                if (IsEnd() && other.IsEnd())
-                    return true;
-                if (IsEnd() != other.IsEnd())
-                    return false;
-
-                return m_archIdx == other.m_archIdx && m_chunkIdx == other.m_chunkIdx && m_entityIdx == other.m_entityIdx;
-            }
-
-            bool operator!=(const iterator& other) const { return !(*this == other); }
-
-        private:
-            template<size_t... Is>
-            auto BuildTuple(std::index_sequence<Is...>) const
-            {
-                Entity entity = m_currentEntities[m_entityIdx];
-                return std::tuple{entity, GetComponent<Is>()...};
-            }
-
-            template<size_t I>
-            auto GetComponent() const -> std::tuple_element_t<I, typename View::IterationComponents>*
-            {
-                using Component = std::tuple_element_t<I, typename View::IterationComponents>;
-                constexpr size_t RequiredCount = std::tuple_size_v<typename View::RequiredTypes>;
-                constexpr bool isOptional = (I >= RequiredCount);
-
-                auto* arch = (*m_archetypes)[m_archIdx];
-                if (arch->HasComponent<Component>())
-                {
-                    auto& chunk = arch->GetChunks()[m_chunkIdx];
-                    auto* array = chunk->template GetComponentArray<Component>();
-                    return &array[m_entityIdx];
-                }
-                else if constexpr (isOptional)
-                {
-                    return nullptr;
-                }
-                else
-                {
-                    return nullptr;
-                }
-            }
-
-            void CacheCurrentChunk()
-            {
-                if (m_archIdx >= m_archetypes->size())
-                    return;
-
-                auto* arch = (*m_archetypes)[m_archIdx];
-                const auto& chunks = arch->GetChunks();
-
-                if (m_chunkIdx < chunks.size())
-                {
-                    const auto& chunk = chunks[m_chunkIdx];
-                    m_currentEntities = chunk->GetEntities().data();
-                    m_currentCount = chunk->GetCount();
-                }
-                else
-                {
-                    m_currentEntities = nullptr;
-                    m_currentCount = 0;
-                }
-            }
-
-            bool IsEnd() const
-            {
-                return !m_archetypes || m_archIdx == std::numeric_limits<size_t>::max() || m_archIdx >= m_archetypes->size();
-            }
-
-            void AdvanceToValid()
-            {
-                while (m_archIdx < m_archetypes->size())
-                {
-                    if (m_entityIdx < m_currentCount)
-                    {
-                        return;
-                    }
-
-                    auto* arch = (*m_archetypes)[m_archIdx];
-                    const auto& chunks = arch->GetChunks();
-
-                    ++m_chunkIdx;
-                    m_entityIdx = 0;
-
-                    if (m_chunkIdx < chunks.size())
-                    {
-                        CacheCurrentChunk();
-                    }
-                    else
-                    {
-                        ++m_archIdx;
-                        m_chunkIdx = 0;
-                        m_entityIdx = 0;
-
-                        if (m_archIdx < m_archetypes->size())
-                        {
-                            CacheCurrentChunk();
-                        }
-                    }
-                }
-
-                m_archIdx = std::numeric_limits<size_t>::max();
-            }
-
-            const std::vector<Archetype*>* m_archetypes = nullptr;
-            size_t m_archIdx = std::numeric_limits<size_t>::max();
-            size_t m_chunkIdx = 0;
-            size_t m_entityIdx = 0;
-            const Entity* m_currentEntities = nullptr;
-            size_t m_currentCount = 0;
-        };
-
-        using const_iterator = const iterator;
-
-        iterator begin() 
-        { 
             EnsureArchetypes();
-            return iterator(m_archetypes); 
+            return Iterator(m_archetypes.data(), m_archetypes.size());
         }
-        iterator end() { return iterator(); }
-        const_iterator begin() const 
-        { 
-            const_cast<View*>(this)->EnsureArchetypes();
-            return iterator(m_archetypes); 
+
+        /**
+         * End sentinel for range-based for loop.
+         */
+        ASTRA_FORCEINLINE ViewSentinel end() const noexcept
+        {
+            return ViewSentinel{};
         }
-        const_iterator end() const { return iterator(); }
-        
+
     private:
-        using RequiredTypes = Detail::QueryClassifier<QueryArgs...>::RequiredComponents;
-        using OptionalTypes = Detail::QueryClassifier<QueryArgs...>::OptionalComponents;
-        using QueryBuilder = QueryBuilder<QueryArgs...>;
-        
-        template<typename... Rs, typename... Os>
-        static auto CombineTypes(std::tuple<Rs...>, std::tuple<Os...>) -> std::tuple<Rs..., Os...>;
-        using IterationComponents = decltype(CombineTypes(RequiredTypes{}, OptionalTypes{}));
-
-        static constexpr size_t COMPONENT_COUNT = std::tuple_size_v<IterationComponents>;
-
         struct ArchetypeEntityCountComparator
         {
             bool operator()(Archetype* a, Archetype* b) const
@@ -335,7 +207,10 @@ namespace Astra
 
         void EnsureArchetypes()
         {
-            uint32_t currentCounter = m_archetypeManager->GetStructuralChangeCounter();
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+            
+            uint32_t currentCounter = m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
             if (m_lastRefreshCounter == currentCounter)
             {
                 return;
@@ -364,12 +239,18 @@ namespace Astra
             }
             
             m_lastRefreshCounter = currentCounter;
-            m_lastGeneration = m_archetypeManager->GetCurrentGeneration();
+            m_lastGeneration = m_archetypeManager->m_generation;
         }
         
         void CollectArchetypes()
         {
-            auto archetypes = m_archetypeManager->GetAllArchetypes();
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+            {
+                m_archetypes.clear();
+                return;  // Registry destroyed
+            }
+            
+            auto archetypes = m_archetypeManager->GetArchetypes();
             const size_t queryComponentCount = QueryBuilder::GetRequiredMask().Count();
             
             m_archetypes.reserve(archetypes.size());
@@ -441,7 +322,7 @@ namespace Astra
         {
             if constexpr (sizeof...(Optional) == 0)
             {
-                archetype->ParallelForEachChunk<Required...>(chunkIndex, std::forward<Func>(func));
+                archetype->ForEachChunk<Required...>(chunkIndex, std::forward<Func>(func));
             }
             else
             {

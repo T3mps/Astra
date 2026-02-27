@@ -304,50 +304,50 @@ TEST_F(EntityManagerTest, ReserveMethod)
     EXPECT_EQ(pool.Size(), 10000u);
 }
 
-// Test iterator functionality
-TEST_F(EntityManagerTest, IteratorFunctionality)
-{
-    Astra::EntityManager pool;
-    
-    // Empty pool
-    EXPECT_EQ(pool.begin(), pool.end());
-    
-    // Create entities
-    std::vector<Astra::Entity> entities;
-    pool.CreateBatch(10, std::back_inserter(entities));
-    
-    // Iterate and count
-    size_t count = 0;
-    for (auto it = pool.begin(); it != pool.end(); ++it)
-    {
-        EXPECT_TRUE(pool.IsValid(*it));
-        ++count;
-    }
-    EXPECT_EQ(count, 10u);
-    
-    // Range-based for loop
-    count = 0;
-    for (Astra::Entity entity : pool)
-    {
-        EXPECT_TRUE(pool.IsValid(entity));
-        ++count;
-    }
-    EXPECT_EQ(count, 10u);
-    
-    // Destroy some entities
-    pool.Destroy(entities[2]);
-    pool.Destroy(entities[5]);
-    pool.Destroy(entities[8]);
-    
-    // Iterator should skip destroyed entities
-    count = 0;
-    for (Astra::Entity entity : pool)
-    {
-        EXPECT_TRUE(pool.IsValid(entity));
-        ++count;
-    }
-    EXPECT_EQ(count, 7u);
-}
+// Test iterator functionality - REMOVED: EntityManager iterators have been removed
+// TEST_F(EntityManagerTest, IteratorFunctionality)
+// {
+//     Astra::EntityManager pool;
+//     
+//     // Empty pool
+//     EXPECT_EQ(pool.begin(), pool.end());
+//     
+//     // Create entities
+//     std::vector<Astra::Entity> entities;
+//     pool.CreateBatch(10, std::back_inserter(entities));
+//     
+//     // Iterate and count
+//     size_t count = 0;
+//     for (auto it = pool.begin(); it != pool.end(); ++it)
+//     {
+//         EXPECT_TRUE(pool.IsValid(*it));
+//         ++count;
+//     }
+//     EXPECT_EQ(count, 10u);
+//     
+//     // Range-based for loop
+//     count = 0;
+//     for (Astra::Entity entity : pool)
+//     {
+//         EXPECT_TRUE(pool.IsValid(entity));
+//         ++count;
+//     }
+//     EXPECT_EQ(count, 10u);
+//     
+//     // Destroy some entities
+//     pool.Destroy(entities[2]);
+//     pool.Destroy(entities[5]);
+//     pool.Destroy(entities[8]);
+//     
+//     // Iterator should skip destroyed entities
+//     count = 0;
+//     for (Astra::Entity entity : pool)
+//     {
+//         EXPECT_TRUE(pool.IsValid(entity));
+//         ++count;
+//     }
+//     EXPECT_EQ(count, 7u);
+// }
 
 // Test segmented memory allocation
 TEST_F(EntityManagerTest, SegmentedMemoryAllocation)

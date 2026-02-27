@@ -13,19 +13,58 @@
 #else
     #include <sys/mman.h>
     #include <unistd.h>
+    #include <fcntl.h>
+    #include <cstring>
+    #ifdef ASTRA_PLATFORM_LINUX
+        // memfd.h may not be available on all Linux systems (e.g., WSL)
+        #if __has_include(<sys/memfd.h>)
+            #include <sys/memfd.h>
+        #endif
+        #if __has_include(<linux/memfd.h>)
+            #include <linux/memfd.h>
+        #endif
+    #elif defined(ASTRA_PLATFORM_MACOS)
+        #include <sys/shm.h>
+    #endif
 #endif
 
 namespace Astra
 {
-    // Memory allocation flags
+    // Cache line size constants for proper alignment
+#ifdef __cpp_lib_hardware_interference_size
+    inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = std::hardware_destructive_interference_size;
+    inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = std::hardware_constructive_interference_size;
+#else
+    // Platform-specific fallbacks when C++17 hardware_interference_size is not available
+    #if defined(ASTRA_ARCH_X64) || defined(ASTRA_ARCH_X86)
+        inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 64;
+        inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
+    #elif defined(ASTRA_ARCH_ARM64)
+        inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 128;
+        inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
+    #else
+        inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 64;
+        inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
+    #endif
+#endif
+
+    // Cache line size - typically used for alignment
+    inline constexpr std::size_t CACHE_LINE_SIZE = std::max(DESTRUCTIVE_INTERFERENCE, CONSTRUCTIVE_INTERFERENCE);
+
+    // SIMD alignment requirements
+    inline constexpr std::size_t SIMD_ALIGNMENT = 16;
+
+    // Default page size for memory allocation
+    inline constexpr std::size_t DEFAULT_PAGE_SIZE = 4096; // 4KB
+    inline constexpr std::size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;  // 2MB on Windows
+
     enum class AllocFlags : uint32_t
     {
         None = 0,
-        HugePages = 1 << 0,  // Use 2MB/1GB huge pages if available
-        ZeroMem = 1 << 1,  // Zero-initialize allocated memory
+        HugePages = 1 << 0, // Use 2MB/1GB huge pages if available
+        ZeroMem = 1 << 1,   // Zero-initialize allocated memory
     };
     
-    // Combine allocation flags
     ASTRA_FORCEINLINE constexpr AllocFlags operator|(AllocFlags a, AllocFlags b) noexcept
     {
         return static_cast<AllocFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
@@ -36,7 +75,6 @@ namespace Astra
         return (static_cast<uint32_t>(a) & static_cast<uint32_t>(b)) != 0;
     }
     
-    // Memory allocation result
     struct AllocResult
     {
         void* ptr = nullptr;
@@ -44,19 +82,6 @@ namespace Astra
         bool usedHugePages = false;
     };
     
-    // Platform-specific huge page sizes
-    #ifdef ASTRA_PLATFORM_WINDOWS
-        constexpr size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;  // 2MB on Windows
-    #else
-        // Linux supports multiple huge page sizes, we'll try 2MB first
-        constexpr size_t HUGE_PAGE_SIZE_2MB = 2 * 1024 * 1024;
-        constexpr size_t HUGE_PAGE_SIZE_1GB = 1024 * 1024 * 1024;
-        constexpr size_t HUGE_PAGE_SIZE = HUGE_PAGE_SIZE_2MB;
-    #endif
-    
-    /**
-     * Check if huge pages are available on the system
-     */
     ASTRA_FORCEINLINE bool IsHugePagesAvailable() noexcept
     {
         static bool checked = false;
@@ -65,7 +90,6 @@ namespace Astra
         if (!checked)
         {
             #ifdef ASTRA_PLATFORM_WINDOWS
-                // Check if we have the lock pages in memory privilege
                 HANDLE token;
                 if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
                 {
@@ -85,14 +109,12 @@ namespace Astra
                     CloseHandle(token);
                 }
             #else
-                // On Linux, check if transparent huge pages are enabled
                 FILE* f = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
                 if (f)
                 {
                     char buffer[256];
                     if (fgets(buffer, sizeof(buffer), f))
                     {
-                        // Check if [always] or [madvise] is selected
                         available = (strstr(buffer, "[always]") != nullptr || 
                                    strstr(buffer, "[madvise]") != nullptr);
                     }
@@ -111,7 +133,6 @@ namespace Astra
         AllocResult result;
         result.size = size;
         
-        // Round size up to alignment
         size = (size + alignment - 1) & ~(alignment - 1);
         
         bool tryHugePages = (flags & AllocFlags::HugePages) && IsHugePagesAvailable();
@@ -120,10 +141,8 @@ namespace Astra
         #ifdef ASTRA_PLATFORM_WINDOWS
             if (tryHugePages && size >= HUGE_PAGE_SIZE)
             {
-                // Round up to huge page size
                 size_t hugePagesSize = (size + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
                 
-                // Try to allocate with large pages
                 void* ptr = VirtualAlloc(nullptr, hugePagesSize, MEM_COMMIT | MEM_RESERVE | MEM_LARGE_PAGES, PAGE_READWRITE);
                     
                 if (ptr)
@@ -135,7 +154,6 @@ namespace Astra
                 }
             }
             
-            // Fall back to regular allocation
             void* ptr = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
             if (ptr)
             {
@@ -153,7 +171,6 @@ namespace Astra
             
             if (tryHugePages && size >= HUGE_PAGE_SIZE)
             {
-                // Round up to huge page size
                 size_t hugePagesSize = (size + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
                 
                 // Try different huge page sizes
@@ -261,52 +278,5 @@ namespace Astra
                 std::free(ptr);
             }
         #endif
-    }
-    
-    /**
-     * Custom deleter for unique_ptr that tracks allocation info
-     */
-    struct MemoryDeleter
-    {
-        size_t size = 0;
-        bool usedHugePages = false;
-        
-        void operator()(void* ptr) const noexcept
-        {
-            FreeMemory(ptr, size, usedHugePages);
-        }
-    };
-    
-    /**
-     * Allocate aligned memory for components
-     * Ensures proper cache line alignment to avoid false sharing
-     */
-    template<typename T>
-    ASTRA_FORCEINLINE T* AllocateAligned(size_t count, size_t alignment = CACHE_LINE_SIZE) noexcept
-    {
-        size_t size = count * sizeof(T);
-        
-        // For large allocations, try huge pages
-        AllocFlags flags = AllocFlags::None;
-        if (size >= HUGE_PAGE_SIZE / 2)  // Use huge pages for allocations >= 1MB
-        {
-            flags = flags | AllocFlags::HugePages;
-        }
-        
-        AllocResult result = AllocateMemory(size, alignment, flags);
-        return static_cast<T*>(result.ptr);
-    }
-    
-    /**
-     * Free aligned memory
-     */
-    template<typename T>
-    ASTRA_FORCEINLINE void FreeAligned(T* ptr, size_t count) noexcept
-    {
-        if (!ptr) return;
-        
-        size_t size = count * sizeof(T);
-        bool maybeHugePages = (size >= HUGE_PAGE_SIZE / 2);
-        FreeMemory(ptr, size, maybeHugePages);
     }
 }
