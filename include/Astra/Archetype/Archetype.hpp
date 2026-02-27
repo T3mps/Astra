@@ -28,6 +28,7 @@
 #include "../Core/Memory.hpp"
 #include "../Core/Platform.hpp"
 #include "../Core/Result.hpp"
+#include "../Serialization/SerializationError.hpp"
 #include "../Core/Simd.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Entity/Entity.hpp"
@@ -130,24 +131,29 @@ namespace Astra
 
             m_componentDescriptors = componentDescriptors;
 
-            size_t totalOffset = 0;
             size_t perEntitySize = 0;
 
+            // Count non-empty components for alignment overhead estimation
+            size_t nonEmptyComponents = 0;
             for (size_t i = 0; i < m_componentDescriptors.size(); ++i)
             {
                 if (m_componentDescriptors[i].size == 0)
                 {
                     continue;
                 }
-                    
-                totalOffset = (totalOffset + CACHE_LINE_SIZE - 1) & ~(CACHE_LINE_SIZE - 1);
-                totalOffset += CACHE_LINE_SIZE;
-
                 perEntitySize += m_componentDescriptors[i].size;
+                ++nonEmptyComponents;
             }
 
+            // Estimate alignment overhead: each component array (except first) needs up to
+            // (CACHE_LINE_SIZE - 1) bytes of padding for cache-line alignment.
+            // Use conservative estimate of (numComponents - 1) * CACHE_LINE_SIZE for padding.
+            size_t alignmentOverhead = nonEmptyComponents > 1
+                ? (nonEmptyComponents - 1) * CACHE_LINE_SIZE
+                : 0;
+
             size_t chunkSize = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
-            size_t remainingSpace = chunkSize - totalOffset;
+            size_t remainingSpace = chunkSize > alignmentOverhead ? chunkSize - alignmentOverhead : 0;
             size_t maxEntities = perEntitySize > 0 ? remainingSpace / perEntitySize : 256;
 
             // Round down to nearest power of 2 for fast modulo/division operations
@@ -498,13 +504,22 @@ namespace Astra
             if (locations.empty())
                 return;
 
+            // Make a local copy to avoid any span/reference issues
+            std::vector<EntityLocation> locationsCopy(locations.begin(), locations.end());
+
             // Group by chunk for efficient processing
             FlatMap<size_t, std::vector<size_t>> chunkBatches;
+            chunkBatches.Reserve(8);  // Pre-allocate to reduce rehashing
 
-            for (const auto& location : locations)
+            for (const auto& location : locationsCopy)
             {
                 size_t chunkIndex = location.GetChunkIndex();
                 size_t entityIndex = location.GetEntityIndex();
+
+                // Validate before inserting
+                if (chunkIndex >= m_chunks.size()) ASTRA_UNLIKELY
+                    continue;
+
                 chunkBatches[chunkIndex].push_back(entityIndex);
             }
 
@@ -512,6 +527,8 @@ namespace Astra
             for (auto& [chunkIndex, indices] : chunkBatches)
             {
                 ASTRA_ASSERT(chunkIndex < m_chunks.size(), "Chunk index out of bounds");
+                if (chunkIndex >= m_chunks.size()) ASTRA_UNLIKELY
+                    continue;  // Skip invalid chunk indices in Release builds
                 m_chunks[chunkIndex]->BatchConstructComponent<T>(indices, value);
             }
         }
@@ -692,38 +709,55 @@ namespace Astra
             }
         }
         
-        static std::unique_ptr<Archetype> Deserialize(BinaryReader& reader, const std::vector<ComponentDescriptor>& registryDescriptors, ArchetypeChunkPool* componentPool = nullptr)
+        static Result<std::unique_ptr<Archetype>, SerializationError> Deserialize(BinaryReader& reader, const std::vector<ComponentDescriptor>& registryDescriptors, ArchetypeChunkPool* componentPool = nullptr)
         {
+            using ResultType = Result<std::unique_ptr<Archetype>, SerializationError>;
+
             // Read archetype metadata - deserialize the bitmap's words
             ComponentMask mask;
             for (size_t i = 0; i < ComponentMask::WORD_COUNT; ++i)
             {
                 reader(mask.Data()[i]);
             }
-            
+
+            if (reader.HasError())
+            {
+                return ResultType::Err(reader.GetError());
+            }
+
             size_t entityCount;
             size_t entitiesPerChunk;
             uint32_t chunkCount;
             reader(entityCount);
             reader(entitiesPerChunk);
             reader(chunkCount);
-            
+
+            if (reader.HasError())
+            {
+                return ResultType::Err(reader.GetError());
+            }
+
             // Read component descriptors
             uint32_t descriptorCount;
             reader(descriptorCount);
             std::vector<ComponentDescriptor> descriptors;
             descriptors.reserve(descriptorCount);
-            
+
             for (uint32_t i = 0; i < descriptorCount; ++i)
             {
                 uint64_t hash;
                 size_t size, alignment;
                 uint32_t version;
                 reader(hash)(size)(alignment)(version);
-                
+
+                if (reader.HasError())
+                {
+                    return ResultType::Err(reader.GetError());
+                }
+
                 // Find matching descriptor from registry by hash
                 auto it = std::find_if(registryDescriptors.begin(), registryDescriptors.end(), [hash](const auto& desc) { return desc.hash == hash; });
-                
+
                 if (it != registryDescriptors.end())
                 {
                     descriptors.push_back(*it);
@@ -731,38 +765,44 @@ namespace Astra
                 else
                 {
                     // Component not registered - cannot deserialize
-                    return nullptr;
+                    // The component with this hash needs to be registered before deserialization
+                    return ResultType::Err(SerializationError::UnknownComponent);
                 }
             }
-            
+
             // Create new archetype
             auto archetype = std::make_unique<Archetype>(mask);
             archetype->m_chunkPool = componentPool;
             archetype->Initialize(descriptors);
-            
+
             if (!archetype->IsInitialized())
             {
-                return nullptr;
+                return ResultType::Err(SerializationError::CorruptedData);
             }
             
             // Clear the pre-allocated chunk
             archetype->m_chunks.clear();
             archetype->m_entityCount = 0;
-            
+
             // Read each chunk's data
             for (uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex)
             {
                 uint32_t chunkEntityCount;
                 reader(chunkEntityCount);
-                
+
+                if (reader.HasError())
+                {
+                    return ResultType::Err(reader.GetError());
+                }
+
                 // Create new chunk
                 auto chunk = componentPool ? componentPool->CreateChunk(entitiesPerChunk, descriptors) : nullptr;
                 if (!chunk)
                 {
                     // Out of memory - cannot continue
-                    return nullptr;
+                    return ResultType::Err(SerializationError::OutOfMemory);
                 }
-                
+
                 // Read entities array
                 for (uint32_t i = 0; i < chunkEntityCount; ++i)
                 {
@@ -770,15 +810,20 @@ namespace Astra
                     reader(entity);
                     chunk->AddEntity(entity);
                 }
-                
+
+                if (reader.HasError())
+                {
+                    return ResultType::Err(reader.GetError());
+                }
+
                 // Read component arrays (SOA layout)
                 for (const auto& desc : descriptors)
                 {
                     void* componentArray = chunk->GetComponentArrayByID(desc.id);
                     if (!componentArray) continue;
-                    
+
                     size_t arraySize = chunkEntityCount * desc.size;
-                    
+
                     if (desc.deserializeVersioned || desc.deserialize)
                     {
                         // For custom deserialization, components are not compressed
@@ -799,6 +844,11 @@ namespace Astra
                                 desc.deserialize(reader, componentPtr);
                             }
                         }
+
+                        if (reader.HasError())
+                        {
+                            return ResultType::Err(reader.GetError());
+                        }
                     }
                     else if (desc.is_trivially_copyable)
                     {
@@ -807,27 +857,27 @@ namespace Astra
                         if (result.IsErr())
                         {
                             // Error reading compressed block
-                            return nullptr;
+                            return ResultType::Err(SerializationError::CorruptedData);
                         }
-                        
+
                         auto& data = *result.GetValue();
                         if (data.size() != arraySize)
                         {
                             // Size mismatch - data corruption
-                            return nullptr;
+                            return ResultType::Err(SerializationError::SizeMismatch);
                         }
-                        
+
                         // Copy decompressed data to component array
                         std::memcpy(componentArray, data.data(), arraySize);
                     }
                 }
-                
+
                 archetype->m_chunks.push_back(std::move(chunk));
             }
-            
+
             archetype->m_entityCount = entityCount;
-            
-            return archetype;
+
+            return ResultType::Ok(std::move(archetype));
         }
         
         ASTRA_NODISCARD bool ShouldCoalesce(float utilizationThreshold = 0.5f) const
@@ -1262,7 +1312,7 @@ namespace Astra
                     }
                     
                     void* srcPtr = static_cast<std::byte*>(srcInfo.base) + srcEntityIndex * srcInfo.stride;
-                    void* destPtr = static_cast<std::byte*>(destArrays[id].base) + destEntityIndex * srcInfo.stride;
+                    void* destPtr = static_cast<std::byte*>(destArrays[id].base) + destEntityIndex * destArrays[id].stride;
                     
                     // Use move constructor to transfer component data
                     srcInfo.descriptor.MoveConstruct(destPtr, srcPtr);

@@ -28,7 +28,8 @@ namespace Astra
 
     class BinaryWriter;
     class BinaryReader;
-    
+    class TypeMeta;  // Forward declaration for reflection integration
+
     struct ComponentDescriptor
     {
         using ConstructFn = void(void*);
@@ -67,6 +68,10 @@ namespace Astra
         DeserializeFn* deserialize;                // Basic deserialization
         SerializeVersionedFn* serializeVersioned;  // Versioned serialization
         DeserializeVersionedFn* deserializeVersioned; // Versioned deserialization with migration
+
+        // Reflection integration - linked at registration time if type is reflected
+        const TypeMeta* meta = nullptr;
+
         inline void DefaultConstruct(void* ptr) const
         {
             if (is_trivially_copyable && is_nothrow_default_constructible)

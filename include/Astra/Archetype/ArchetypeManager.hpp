@@ -354,7 +354,7 @@ namespace Astra
 
             ComponentID componentId = TypeID<T>::Value();
 
-            auto batches = GroupEntitiesByArchetype(entities, 
+            auto batches = GroupEntitiesByArchetype(entities,
                 [componentId](Archetype* arch)
                 {
                     return arch->GetMask().Test(componentId);
@@ -369,6 +369,131 @@ namespace Astra
                 Archetype* dstArchetype = GetArchetypeWithRemoved(srcArchetype, componentId);
                 BatchMoveEntitiesWithoutComponent(srcArchetype, dstArchetype, entityBatch);
                 removedCount += entityBatch.size();
+            }
+
+            return removedCount;
+        }
+
+        /**
+         * Type-erased component addition for use by CommandBuffer.
+         * Adds a component to an entity using the component ID and raw data pointer.
+         * The component must already be registered in the ComponentRegistry.
+         *
+         * @param entity The entity to add the component to
+         * @param componentId The ComponentID of the component to add
+         * @param data Pointer to the source component data (will be copy-constructed)
+         * @param dataSize Size of the component data (for validation)
+         * @return true if component was added successfully, false otherwise
+         */
+        bool AddComponentByID(Entity entity, ComponentID componentId, const void* data, size_t dataSize)
+        {
+            auto registry = m_componentRegistry.lock();
+            if (!registry) ASTRA_UNLIKELY
+                return false;
+
+            const ComponentDescriptor* desc = registry->GetComponentDescriptor(componentId);
+            if (!desc) ASTRA_UNLIKELY
+                return false;
+
+            // Validate data size matches component size
+            if (dataSize != desc->size && desc->size > 0) ASTRA_UNLIKELY
+                return false;
+
+            auto it = m_entityMap.find(entity);
+            if (it == m_entityMap.end()) ASTRA_UNLIKELY
+                return false;
+
+            EntityRecord& oldLoc = it->second;
+
+            // Check if entity already has this component
+            if (oldLoc.archetype->GetMask().Test(componentId)) ASTRA_UNLIKELY
+                return false;
+
+            // Get or create the target archetype
+            Archetype* newArchetype = GetArchetypeWithAdded(oldLoc.archetype, componentId);
+            if (!newArchetype) ASTRA_UNLIKELY
+                return false;
+
+            // Move entity to new archetype with the new component
+            EntityLocation newEntityLocation = MoveEntityWithComponentByID(entity, oldLoc, newArchetype, componentId, data, *desc);
+
+            return newEntityLocation.IsValid();
+        }
+
+        /**
+         * Type-erased batch component addition for use by CommandBuffer.
+         * Adds a component to multiple entities using the component ID and raw data pointer.
+         *
+         * @param entities Span of entities to add the component to
+         * @param componentId The ComponentID of the component to add
+         * @param data Pointer to the source component data (will be copy-constructed to each entity)
+         * @param dataSize Size of the component data (for validation)
+         * @return Number of entities that successfully had the component added
+         */
+        size_t AddComponentsByID(std::span<Entity> entities, ComponentID componentId, const void* data, size_t dataSize)
+        {
+            if (entities.empty()) ASTRA_UNLIKELY
+                return 0;
+
+            // Use the simpler single-entity path to avoid complexity with batch moves
+            // This is less efficient but more reliable
+            size_t addedCount = 0;
+            for (Entity entity : entities)
+            {
+                if (AddComponentByID(entity, componentId, data, dataSize))
+                {
+                    ++addedCount;
+                }
+            }
+
+            return addedCount;
+        }
+
+        /**
+         * Type-erased component removal for use by CommandBuffer.
+         *
+         * @param entity The entity to remove the component from
+         * @param componentId The ComponentID of the component to remove
+         * @return true if component was removed successfully, false otherwise
+         */
+        bool RemoveComponentByID(Entity entity, ComponentID componentId)
+        {
+            auto it = m_entityMap.find(entity);
+            if (it == m_entityMap.end()) ASTRA_UNLIKELY
+                return false;
+
+            EntityRecord& oldLoc = it->second;
+
+            // Check if entity has this component
+            if (!oldLoc.archetype->GetMask().Test(componentId)) ASTRA_UNLIKELY
+                return false;
+
+            Archetype* newArchetype = GetArchetypeWithRemoved(oldLoc.archetype, componentId);
+            EntityLocation newEntityLocation = MoveEntity(entity, oldLoc, newArchetype);
+
+            return newEntityLocation.IsValid();
+        }
+
+        /**
+         * Type-erased batch component removal for use by CommandBuffer.
+         *
+         * @param entities Span of entities to remove the component from
+         * @param componentId The ComponentID of the component to remove
+         * @return Number of entities that successfully had the component removed
+         */
+        size_t RemoveComponentsByID(std::span<Entity> entities, ComponentID componentId)
+        {
+            if (entities.empty()) ASTRA_UNLIKELY
+                return 0;
+
+            // Use the simpler single-entity path to avoid complexity with batch moves
+            size_t removedCount = 0;
+            for (Entity entity : entities)
+            {
+                if (RemoveComponentByID(entity, componentId))
+                {
+                    ++removedCount;
+                }
             }
 
             return removedCount;
@@ -640,11 +765,12 @@ namespace Astra
                 archetypeIndices.push_back(index);
                 
                 // Deserialize the archetype
-                auto archetype = Archetype::Deserialize(reader, registryDescriptors, &m_chunkPool);
-                if (!archetype || reader.HasError())
+                auto archetypeResult = Archetype::Deserialize(reader, registryDescriptors, &m_chunkPool);
+                if (archetypeResult.IsErr() || reader.HasError())
                 {
                     return false;
                 }
+                auto archetype = std::move(*archetypeResult.GetValue());
                 
                 // Read metrics
                 // Read entity count for validation
@@ -946,10 +1072,16 @@ namespace Astra
                 }
             }
             
-            // Remove processed entities from source archetype in reverse order
-            for (size_t i = processedCount; i > 0; --i)
+            // Sort processed entities by location in DESCENDING order before removal
+            // This ensures we remove from highest location to lowest, preventing
+            // swap-and-pop from invalidating locations we haven't processed yet
+            std::sort(entities.begin(), entities.begin() + processedCount,
+                [](const auto& a, const auto& b) { return a.second > b.second; });
+
+            // Remove processed entities from source archetype (now in descending location order)
+            for (size_t i = 0; i < processedCount; ++i)
             {
-                auto& [entity, location] = entities[i - 1];
+                auto& [entity, location] = entities[i];
                 if (auto movedEntity = srcArchetype->RemoveEntity(location)) ASTRA_LIKELY
                 {
                     m_entityMap[*movedEntity].location = location;
@@ -1064,14 +1196,121 @@ namespace Astra
         template<Component T, typename... Args>
         void BatchMoveEntitiesWithComponent(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch, Args&&... args)
         {
-            BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch, [&args...](Archetype* dst, const std::vector<EntityLocation>& locs) { dst->SetComponents<T>(locs, T{args...}); });
+            // Create component value upfront and capture by value to avoid dangling reference
+            // The lambda may be invoked after args go out of scope in optimized builds
+            T component{std::forward<Args>(args)...};
+            BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch, [component](Archetype* dst, const std::vector<EntityLocation>& locs) { dst->SetComponents<T>(locs, component); });
         }
 
         void BatchMoveEntitiesWithoutComponent(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch)
         {
             BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch, [](Archetype*, const std::vector<EntityLocation>&) { /* No component operation needed for removal */ });
         }
-        
+
+        /**
+         * Type-erased version of MoveEntityWithComponent for CommandBuffer use.
+         */
+        EntityLocation MoveEntityWithComponentByID(Entity entity, EntityRecord& oldLoc, Archetype* newArchetype,
+                                                   ComponentID componentId, const void* data, const ComponentDescriptor& desc)
+        {
+            // Allocate slot in new archetype
+            EntityLocation newEntityLocation = newArchetype->AllocateEntitySlot(entity);
+            if (!newEntityLocation.IsValid()) ASTRA_UNLIKELY
+                return newEntityLocation;
+
+            // Copy component data to new location
+            if (oldLoc.archetype->IsInitialized() && newArchetype->IsInitialized()) ASTRA_LIKELY
+                MoveAndAddByID(newEntityLocation, newArchetype, oldLoc.location, oldLoc.archetype, componentId, data, desc);
+
+            // Remove from old archetype
+            if (auto movedEntity = oldLoc.archetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
+                m_entityMap[*movedEntity].location = oldLoc.location;
+
+            // Update entity record
+            oldLoc.archetype = newArchetype;
+            oldLoc.location = newEntityLocation;
+
+            return newEntityLocation;
+        }
+
+        /**
+         * Type-erased version of MoveAndAdd for CommandBuffer use.
+         */
+        void MoveAndAddByID(EntityLocation dstEntityLocation, Archetype* dstArchetype,
+                           EntityLocation srcEntityLocation, Archetype* srcArchetype,
+                           ComponentID newComponentId, const void* componentData, const ComponentDescriptor& newDesc)
+        {
+            auto& dstComponents = dstArchetype->GetComponentDescriptors();
+            auto& srcComponents = srcArchetype->GetComponentDescriptors();
+
+            // Get chunks
+            auto [dstChunk, dstEntityIdx] = dstArchetype->ResolveLocation(dstEntityLocation);
+            auto [srcChunk, srcEntityIdx] = srcArchetype->ResolveLocation(srcEntityLocation);
+
+            // Create index map for source components - use array for O(1) access
+            std::array<size_t, MAX_COMPONENTS> srcIndexMap;
+            srcIndexMap.fill(std::numeric_limits<size_t>::max());
+            for (size_t i = 0; i < srcComponents.size(); ++i)
+            {
+                srcIndexMap[srcComponents[i].id] = i;
+            }
+
+            for (size_t dstIdx = 0; dstIdx < dstComponents.size(); ++dstIdx)
+            {
+                auto& dstComp = dstComponents[dstIdx];
+                const auto& dstArrayInfo = dstChunk->m_componentArrays[dstComp.id];
+                void* dstPtr = static_cast<std::byte*>(dstArrayInfo.base) + dstEntityIdx * dstArrayInfo.stride;
+
+                if (dstComp.id == newComponentId) ASTRA_UNLIKELY
+                {
+                    // Copy new component data - use memcpy for trivially copyable types
+                    if (newDesc.is_trivially_copyable)
+                    {
+                        std::memcpy(dstPtr, componentData, newDesc.size);
+                    }
+                    else if (newDesc.constructWith)
+                    {
+                        newDesc.constructWith(dstPtr, componentData);
+                    }
+                    else if (newDesc.copyConstruct)
+                    {
+                        newDesc.copyConstruct(dstPtr, componentData);
+                    }
+                }
+                else
+                {
+                    size_t srcIdx = srcIndexMap[dstComp.id];
+                    if (srcIdx != std::numeric_limits<size_t>::max()) ASTRA_LIKELY
+                    {
+                        const auto& srcArrayInfo = srcChunk->m_componentArrays[dstComp.id];
+                        void* srcPtr = static_cast<std::byte*>(srcArrayInfo.base) + srcEntityIdx * srcArrayInfo.stride;
+                        dstComp.MoveConstruct(dstPtr, srcPtr);
+                    }
+                }
+            }
+        }
+
+        /**
+         * Type-erased version of BatchMoveEntitiesWithComponent for CommandBuffer use.
+         */
+        void BatchMoveEntitiesWithComponentByID(Archetype* srcArchetype, Archetype* dstArchetype,
+                                                SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch,
+                                                ComponentID componentId, const void* data, const ComponentDescriptor& desc)
+        {
+            BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch,
+                [componentId, data, &desc](Archetype* dst, const std::vector<EntityLocation>& locs)
+                {
+                    // Set the new component for all entities at their new locations
+                    for (const auto& location : locs)
+                    {
+                        auto [chunk, entityIdx] = dst->ResolveLocation(location);
+                        const auto& arrayInfo = chunk->m_componentArrays[componentId];
+                        void* dstPtr = static_cast<std::byte*>(arrayInfo.base) + entityIdx * arrayInfo.stride;
+                        desc.ConstructWith(dstPtr, data);
+                    }
+                });
+        }
+
         ArchetypeChunkPool m_chunkPool;
         std::weak_ptr<ComponentRegistry> m_componentRegistry;
         ArchetypeGraph m_edgeGraph;

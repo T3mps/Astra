@@ -801,10 +801,11 @@ TEST_F(ArchetypeTest, SerializeEmptyArchetype)
         std::vector<Astra::ComponentDescriptor> registryDescriptors;
         registry.GetAllDescriptors(registryDescriptors);
         
-        auto deserializedArchetype = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
-        
-        ASSERT_NE(deserializedArchetype, nullptr);
-        
+        auto deserializedResult = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
+
+        ASSERT_TRUE(deserializedResult.IsOk()) << "Deserialization failed";
+        auto deserializedArchetype = std::move(*deserializedResult.GetValue());
+
         // Verify the deserialized archetype matches
         EXPECT_EQ(deserializedArchetype->GetMask(), mask);
         EXPECT_EQ(deserializedArchetype->GetEntityCount(), 0u);
@@ -861,10 +862,11 @@ TEST_F(ArchetypeTest, SerializeWithEntities)
         std::vector<Astra::ComponentDescriptor> registryDescriptors;
         registry.GetAllDescriptors(registryDescriptors);
         
-        auto deserializedArchetype = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
-        
-        ASSERT_NE(deserializedArchetype, nullptr);
-        
+        auto deserializedResult = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
+
+        ASSERT_TRUE(deserializedResult.IsOk()) << "Deserialization failed";
+        auto deserializedArchetype = std::move(*deserializedResult.GetValue());
+
         // Verify basic properties
         EXPECT_EQ(deserializedArchetype->GetMask(), mask);
         EXPECT_EQ(deserializedArchetype->GetEntityCount(), entityCount);
@@ -966,12 +968,13 @@ TEST_F(ArchetypeTest, SerializeMultipleChunks)
         std::vector<Astra::ComponentDescriptor> registryDescriptors;
         registry.GetAllDescriptors(registryDescriptors);
         
-        auto deserializedArchetype = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
-        
-        ASSERT_NE(deserializedArchetype, nullptr);
-        
+        auto deserializedResult = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
+
+        ASSERT_TRUE(deserializedResult.IsOk()) << "Deserialization failed";
+        auto deserializedArchetype = std::move(*deserializedResult.GetValue());
+
         EXPECT_EQ(deserializedArchetype->GetEntityCount(), entityCount);
-        
+
         // Verify all entities and their data by iterating through chunks
         size_t verifiedCount = 0;
         const auto& chunks = deserializedArchetype->GetChunks();
@@ -1049,10 +1052,11 @@ TEST_F(ArchetypeTest, SerializeNonTrivialComponents)
         std::vector<Astra::ComponentDescriptor> registryDescriptors;
         registry.GetAllDescriptors(registryDescriptors);
         
-        auto deserializedArchetype = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
-        
-        ASSERT_NE(deserializedArchetype, nullptr);
-        
+        auto deserializedResult = Astra::Archetype::Deserialize(reader, registryDescriptors, &componentPool);
+
+        ASSERT_TRUE(deserializedResult.IsOk()) << "Deserialization failed";
+        auto deserializedArchetype = std::move(*deserializedResult.GetValue());
+
         // Verify string data is preserved by checking entities in chunks
         size_t verifiedCount = 0;
         const auto& chunks = deserializedArchetype->GetChunks();

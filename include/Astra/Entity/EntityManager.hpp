@@ -281,7 +281,7 @@ namespace Astra
             // Verify that alive count matches table's alive count
             // Note: Can't iterate without iterators, so we trust the table's count
             ASTRA_ASSERT(m_table.AliveCount() == Size(), "Alive count mismatch");
-            ASTRA_ASSERT(m_idStack.GetNextID() <= Entity::ID_MASK + 1, "Next ID overflow");
+            ASTRA_ASSERT(m_idStack.GetNextID() <= Entity::ID_MASK, "Next ID overflow");
 #endif
         }
 

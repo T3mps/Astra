@@ -425,6 +425,378 @@ namespace Astra
             return m_archetypeManager->HasComponent<T>(entity);
         }
 
+        /**
+         * Type-erased component addition for use by CommandBuffer.
+         * Adds a component to an entity using the component ID and raw data pointer.
+         * The component must already be registered in the ComponentRegistry.
+         *
+         * @param entity The entity to add the component to
+         * @param componentId The ComponentID of the component to add
+         * @param data Pointer to the source component data (will be copy-constructed)
+         * @param dataSize Size of the component data (for validation)
+         * @return true if component was added successfully, false otherwise
+         */
+        bool AddComponentByID(Entity entity, ComponentID componentId, const void* data, size_t dataSize)
+        {
+            if (!m_entityManager.IsValid(entity))
+                return false;
+
+            bool result = m_archetypeManager->AddComponentByID(entity, componentId, data, dataSize);
+
+            if (result && m_signalManager.IsSignalEnabled(Signal::ComponentAdded))
+            {
+                // Get the newly added component pointer for the signal
+                auto* record = m_archetypeManager->GetEntityRecord(entity);
+                if (record)
+                {
+                    // We need to get the component descriptor to find the component
+                    const auto* desc = m_componentRegistry->GetComponentDescriptor(componentId);
+                    if (desc)
+                    {
+                        auto& chunks = record->archetype->GetChunks();
+                        if (record->location.GetChunkIndex() < chunks.size())
+                        {
+                            void* compPtr = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
+                            if (compPtr)
+                            {
+                                void* actualPtr = static_cast<std::byte*>(compPtr) + record->location.GetEntityIndex() * desc->size;
+                                m_signalManager.Emit<Events::ComponentAdded>(entity, componentId, actualPtr);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /**
+         * Type-erased batch component addition for use by CommandBuffer.
+         * Note: This function does NOT emit ComponentAdded signals for performance.
+         * Use individual AddComponentByID calls if signals are required.
+         *
+         * @param entities Span of entities to add the component to
+         * @param componentId The ComponentID of the component to add
+         * @param data Pointer to the source component data (will be copy-constructed to each entity)
+         * @param dataSize Size of the component data (for validation)
+         * @return Number of entities that successfully had the component added
+         */
+        size_t AddComponentsByID(std::span<Entity> entities, ComponentID componentId, const void* data, size_t dataSize)
+        {
+            return m_archetypeManager->AddComponentsByID(entities, componentId, data, dataSize);
+        }
+
+        /**
+         * Type-erased component removal for use by CommandBuffer.
+         *
+         * @param entity The entity to remove the component from
+         * @param componentId The ComponentID of the component to remove
+         * @return true if component was removed successfully, false otherwise
+         */
+        bool RemoveComponentByID(Entity entity, ComponentID componentId)
+        {
+            if (!m_entityManager.IsValid(entity))
+                return false;
+
+            // Get component pointer before removal for signal emission
+            void* componentPtr = nullptr;
+            if (m_signalManager.IsSignalEnabled(Signal::ComponentRemoved))
+            {
+                auto* record = m_archetypeManager->GetEntityRecord(entity);
+                if (record)
+                {
+                    const auto* desc = m_componentRegistry->GetComponentDescriptor(componentId);
+                    if (desc)
+                    {
+                        auto& chunks = record->archetype->GetChunks();
+                        if (record->location.GetChunkIndex() < chunks.size())
+                        {
+                            void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
+                            if (compArray)
+                            {
+                                componentPtr = static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc->size;
+                            }
+                        }
+                    }
+                }
+            }
+
+            bool result = m_archetypeManager->RemoveComponentByID(entity, componentId);
+
+            if (result && m_signalManager.IsSignalEnabled(Signal::ComponentRemoved))
+            {
+                // Note: componentPtr points to now-invalid memory after removal,
+                // matching the behavior of the templated RemoveComponent
+                m_signalManager.Emit<Events::ComponentRemoved>(entity, componentId, componentPtr);
+            }
+
+            return result;
+        }
+
+        /**
+         * Type-erased batch component removal for use by CommandBuffer.
+         * Note: This function does NOT emit ComponentRemoved signals for performance.
+         * Use individual RemoveComponentByID calls if signals are required.
+         *
+         * @param entities Span of entities to remove the component from
+         * @param componentId The ComponentID of the component to remove
+         * @return Number of entities that successfully had the component removed
+         */
+        size_t RemoveComponentsByID(std::span<Entity> entities, ComponentID componentId)
+        {
+            return m_archetypeManager->RemoveComponentsByID(entities, componentId);
+        }
+
+        // ====================== Reflection Integration ======================
+
+        /**
+         * Gets a component by type hash (for reflection/runtime access).
+         * The type hash should come from TypeID<T>::Hash() for a registered component.
+         *
+         * @param entity The entity to get the component from
+         * @param typeHash XXHash64 of the component type name
+         * @return Pointer to the component data, or nullptr if not found
+         */
+        ASTRA_NODISCARD void* GetComponentByHash(Entity entity, uint64_t typeHash)
+        {
+            if (!m_entityManager.IsValid(entity))
+                return nullptr;
+
+            // Look up component ID from type hash
+            auto result = m_componentRegistry->GetComponentIDFromHash(typeHash);
+            if (result.IsErr())
+                return nullptr;
+
+            ComponentID componentId = *result.GetValue();
+            auto* record = m_archetypeManager->GetEntityRecord(entity);
+            if (!record)
+                return nullptr;
+
+            const auto* desc = m_componentRegistry->GetComponentDescriptor(componentId);
+            if (!desc)
+                return nullptr;
+
+            auto& chunks = record->archetype->GetChunks();
+            if (record->location.GetChunkIndex() >= chunks.size())
+                return nullptr;
+
+            void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
+            if (!compArray)
+                return nullptr;
+
+            return static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc->size;
+        }
+
+        /**
+         * Gets a component by type hash (const version).
+         *
+         * @param entity The entity to get the component from
+         * @param typeHash XXHash64 of the component type name
+         * @return Const pointer to the component data, or nullptr if not found
+         */
+        ASTRA_NODISCARD const void* GetComponentByHash(Entity entity, uint64_t typeHash) const
+        {
+            return const_cast<Registry*>(this)->GetComponentByHash(entity, typeHash);
+        }
+
+        /**
+         * Checks if an entity has a component by type hash.
+         *
+         * @param entity The entity to check
+         * @param typeHash XXHash64 of the component type name
+         * @return true if the entity has the component
+         */
+        ASTRA_NODISCARD bool HasComponentByHash(Entity entity, uint64_t typeHash) const
+        {
+            if (!m_entityManager.IsValid(entity))
+                return false;
+
+            auto result = m_componentRegistry->GetComponentIDFromHash(typeHash);
+            if (result.IsErr())
+                return false;
+
+            ComponentID componentId = *result.GetValue();
+            auto* record = m_archetypeManager->GetEntityRecord(entity);
+            if (!record)
+                return false;
+
+            return record->archetype->GetMask().Test(componentId);
+        }
+
+        /**
+         * Gets all component descriptors for an entity.
+         * Useful for editor/inspector UI that needs to enumerate all components.
+         *
+         * @param entity The entity to query
+         * @return Vector of ComponentDescriptor pointers for all components on the entity
+         */
+        ASTRA_NODISCARD std::vector<const ComponentDescriptor*> GetEntityComponents(Entity entity) const
+        {
+            std::vector<const ComponentDescriptor*> result;
+
+            if (!m_entityManager.IsValid(entity))
+                return result;
+
+            auto* record = m_archetypeManager->GetEntityRecord(entity);
+            if (!record)
+                return result;
+
+            const ComponentMask& mask = record->archetype->GetMask();
+
+            // Iterate through all registered components and check if entity has them
+            for (const auto& [id, desc] : m_componentRegistry->GetAllComponentIDs())
+            {
+                if (mask.Test(id))
+                {
+                    result.push_back(&desc);
+                }
+            }
+
+            return result;
+        }
+
+        /**
+         * Information about a component on an entity for inspection.
+         */
+        struct ComponentInfo
+        {
+            const ComponentDescriptor* descriptor;  // Component type info and lifecycle ops
+            const TypeMeta* meta;                   // Reflection metadata (may be nullptr if not reflected)
+            void* data;                             // Pointer to the component data
+        };
+
+        /**
+         * Inspects an entity and returns detailed information about all its components.
+         * This is the primary method for editor/inspector UIs to enumerate and modify components.
+         *
+         * @param entity The entity to inspect
+         * @return Vector of ComponentInfo for all components on the entity
+         */
+        ASTRA_NODISCARD std::vector<ComponentInfo> InspectEntity(Entity entity)
+        {
+            std::vector<ComponentInfo> result;
+
+            if (!m_entityManager.IsValid(entity))
+                return result;
+
+            auto* record = m_archetypeManager->GetEntityRecord(entity);
+            if (!record)
+                return result;
+
+            const ComponentMask& mask = record->archetype->GetMask();
+            auto& chunks = record->archetype->GetChunks();
+
+            if (record->location.GetChunkIndex() >= chunks.size())
+                return result;
+
+            // Iterate through all registered components and collect info
+            for (const auto& [id, desc] : m_componentRegistry->GetAllComponentIDs())
+            {
+                if (mask.Test(id))
+                {
+                    ComponentInfo info;
+                    info.descriptor = &desc;
+                    info.meta = desc.meta;  // May be nullptr if type is not reflected
+
+                    // Get component data pointer
+                    void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(id);
+                    if (compArray && desc.size > 0)
+                    {
+                        info.data = static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc.size;
+                    }
+                    else
+                    {
+                        info.data = nullptr;  // Empty component
+                    }
+
+                    result.push_back(info);
+                }
+            }
+
+            return result;
+        }
+
+        /**
+         * Inspects an entity (const version - returns const data pointers).
+         * @param entity The entity to inspect
+         * @return Vector of ComponentInfo for all components (data pointers are const)
+         */
+        ASTRA_NODISCARD std::vector<ComponentInfo> InspectEntity(Entity entity) const
+        {
+            return const_cast<Registry*>(this)->InspectEntity(entity);
+        }
+
+        /**
+         * Information about a resource for inspection.
+         */
+        struct ResourceInfo
+        {
+            const ComponentDescriptor* descriptor;  // Resource type info and lifecycle ops
+            const TypeMeta* meta;                   // Reflection metadata (may be nullptr if not reflected)
+            void* data;                             // Pointer to the resource data
+        };
+
+        /**
+         * Inspects all resources and returns detailed information.
+         * This is the primary method for editor/inspector UIs to enumerate and modify resources.
+         *
+         * @return Vector of ResourceInfo for all active resources
+         */
+        ASTRA_NODISCARD std::vector<ResourceInfo> InspectResources()
+        {
+            std::vector<ResourceInfo> result;
+
+            auto descriptors = m_resourceStorage.GetAllResources();
+            result.reserve(descriptors.size());
+
+            for (const auto* desc : descriptors)
+            {
+                ResourceInfo info;
+                info.descriptor = desc;
+                info.meta = desc->meta;  // May be nullptr if type is not reflected
+                info.data = m_resourceStorage.GetByID(desc->id);
+                result.push_back(info);
+            }
+
+            return result;
+        }
+
+        /**
+         * Inspects all resources (const version - returns const data pointers).
+         * @return Vector of ResourceInfo for all active resources
+         */
+        ASTRA_NODISCARD std::vector<ResourceInfo> InspectResources() const
+        {
+            return const_cast<Registry*>(this)->InspectResources();
+        }
+
+        /**
+         * Gets a component by name (for debugging/scripting).
+         * This is slower than GetComponentByHash as it requires a name lookup.
+         *
+         * @param entity The entity to get the component from
+         * @param name Component type name (as returned by TypeID<T>::Name())
+         * @return Pointer to the component data, or nullptr if not found
+         */
+        ASTRA_NODISCARD void* GetComponentByName(Entity entity, std::string_view name)
+        {
+            // Compute hash from name
+            uint64_t hash = Detail::XXHash::XXHash64(name);
+            return GetComponentByHash(entity, hash);
+        }
+
+        /**
+         * Gets a component by name (const version).
+         *
+         * @param entity The entity to get the component from
+         * @param name Component type name
+         * @return Const pointer to the component data, or nullptr if not found
+         */
+        ASTRA_NODISCARD const void* GetComponentByName(Entity entity, std::string_view name) const
+        {
+            return const_cast<Registry*>(this)->GetComponentByName(entity, name);
+        }
+
         // Resource (singleton component) management
         
         template<Component T>
@@ -504,7 +876,95 @@ namespace Astra
             // If needed, users can listen to a bulk clear event or iterate resources first
             m_resourceStorage.Clear();
         }
-        
+
+        // ====================== Resource Reflection ======================
+
+        /**
+         * Gets a resource by type hash (for reflection/runtime access).
+         * @param typeHash XXHash64 of the resource type name
+         * @return Pointer to the resource data, or nullptr if not found
+         */
+        ASTRA_NODISCARD void* GetResourceByHash(uint64_t typeHash)
+        {
+            return m_resourceStorage.GetResourceByHash(typeHash);
+        }
+
+        /**
+         * Gets a resource by type hash (const version).
+         * @param typeHash XXHash64 of the resource type name
+         * @return Const pointer to the resource data, or nullptr if not found
+         */
+        ASTRA_NODISCARD const void* GetResourceByHash(uint64_t typeHash) const
+        {
+            return m_resourceStorage.GetResourceByHash(typeHash);
+        }
+
+        /**
+         * Checks if a resource exists by type hash.
+         * @param typeHash XXHash64 of the resource type name
+         * @return true if the resource exists
+         */
+        ASTRA_NODISCARD bool HasResourceByHash(uint64_t typeHash) const
+        {
+            return m_resourceStorage.HasResourceByHash(typeHash);
+        }
+
+        /**
+         * Gets all resource descriptors.
+         * Useful for editor/inspector UI that needs to enumerate all resources.
+         * @return Vector of ComponentDescriptor pointers for all active resources
+         */
+        ASTRA_NODISCARD std::vector<const ComponentDescriptor*> GetAllResources() const
+        {
+            return m_resourceStorage.GetAllResources();
+        }
+
+        /**
+         * Gets a resource by ComponentID.
+         * @param componentId The ComponentID of the resource
+         * @return Pointer to the resource data, or nullptr if not found
+         */
+        ASTRA_NODISCARD void* GetResourceByID(ComponentID componentId)
+        {
+            return m_resourceStorage.GetByID(componentId);
+        }
+
+        /**
+         * Gets a resource by ComponentID (const version).
+         * @param componentId The ComponentID of the resource
+         * @return Const pointer to the resource data, or nullptr if not found
+         */
+        ASTRA_NODISCARD const void* GetResourceByID(ComponentID componentId) const
+        {
+            return m_resourceStorage.GetByID(componentId);
+        }
+
+        /**
+         * Type-erased resource setting for use by CommandBuffer.
+         * Sets a resource using the component ID and raw data pointer.
+         * The component must already be registered in the ComponentRegistry.
+         *
+         * @param componentId The ComponentID of the resource
+         * @param data Pointer to the source resource data (will be copy-constructed)
+         * @param dataSize Size of the resource data (for validation)
+         * @return true if resource was set successfully, false otherwise
+         */
+        bool SetResourceByID(ComponentID componentId, const void* data, size_t dataSize)
+        {
+            return m_resourceStorage.SetByID(componentId, data, dataSize);
+        }
+
+        /**
+         * Type-erased resource removal for use by CommandBuffer.
+         *
+         * @param componentId The ComponentID of the resource to remove
+         * @return true if resource was removed, false if it didn't exist
+         */
+        bool RemoveResourceByID(ComponentID componentId)
+        {
+            return m_resourceStorage.RemoveByID(componentId);
+        }
+
         // View creation
         
         template<ValidQueryArg... QueryArgs>

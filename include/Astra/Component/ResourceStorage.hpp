@@ -122,7 +122,6 @@ namespace Astra
         template<typename T>
         T* Set(T&& resource)
         {
-            static_assert(std::is_trivially_copyable_v<T>, "Resources must be trivially copyable");
 
             ComponentID id = TypeID<T>::Value();
             ASTRA_ASSERT(id < MAX_COMPONENTS, "Component ID out of range");
@@ -198,7 +197,6 @@ namespace Astra
         template<typename T, typename... Args>
         T* Emplace(Args&&... args)
         {
-            static_assert(std::is_trivially_copyable_v<T>, "Resources must be trivially copyable");
 
             ComponentID id = TypeID<T>::Value();
             ASTRA_ASSERT(id < MAX_COMPONENTS, "Component ID out of range");
@@ -356,7 +354,7 @@ namespace Astra
         ASTRA_NODISCARD size_t GetMemoryUsage() const noexcept
         {
             size_t totalSize = sizeof(ResourceStorage) + (m_resources.capacity() * sizeof(ResourceSlot));
-            
+
             // Add heap-allocated resource sizes
             for (const auto& slot : m_resources)
             {
@@ -365,8 +363,266 @@ namespace Astra
                     totalSize += slot.size;
                 }
             }
-            
+
             return totalSize;
+        }
+
+        // ====================== Reflection Integration ======================
+
+        /**
+         * Gets a resource by type hash (for reflection/runtime access).
+         * @param typeHash XXHash64 of the resource type name
+         * @return Pointer to the resource data, or nullptr if not found
+         */
+        ASTRA_NODISCARD void* GetResourceByHash(uint64_t typeHash)
+        {
+            auto registry = m_componentRegistry.lock();
+            if (!registry)
+                return nullptr;
+
+            auto result = registry->GetComponentIDFromHash(typeHash);
+            if (result.IsErr())
+                return nullptr;
+
+            ComponentID id = *result.GetValue();
+            if (id >= MAX_COMPONENTS)
+                return nullptr;
+
+            uint16_t index = m_sparse[id];
+            if (index == INVALID_INDEX || index >= m_resources.size())
+                return nullptr;
+
+            auto& slot = m_resources[index];
+            if (!slot.isValid)
+                return nullptr;
+
+            return slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData;
+        }
+
+        /**
+         * Gets a resource by type hash (const version).
+         * @param typeHash XXHash64 of the resource type name
+         * @return Const pointer to the resource data, or nullptr if not found
+         */
+        ASTRA_NODISCARD const void* GetResourceByHash(uint64_t typeHash) const
+        {
+            return const_cast<ResourceStorage*>(this)->GetResourceByHash(typeHash);
+        }
+
+        /**
+         * Checks if a resource exists by type hash.
+         * @param typeHash XXHash64 of the resource type name
+         * @return true if the resource exists
+         */
+        ASTRA_NODISCARD bool HasResourceByHash(uint64_t typeHash) const
+        {
+            auto registry = m_componentRegistry.lock();
+            if (!registry)
+                return false;
+
+            auto result = registry->GetComponentIDFromHash(typeHash);
+            if (result.IsErr())
+                return false;
+
+            ComponentID id = *result.GetValue();
+            if (id >= MAX_COMPONENTS)
+                return false;
+
+            uint16_t index = m_sparse[id];
+            return index != INVALID_INDEX && index < m_resources.size() && m_resources[index].isValid;
+        }
+
+        /**
+         * Gets all resource descriptors.
+         * Useful for editor/inspector UI that needs to enumerate all resources.
+         * @return Vector of ComponentDescriptor pointers for all active resources
+         */
+        ASTRA_NODISCARD std::vector<const ComponentDescriptor*> GetAllResources() const
+        {
+            std::vector<const ComponentDescriptor*> result;
+            result.reserve(m_resources.size());
+
+            for (const auto& slot : m_resources)
+            {
+                if (slot.isValid && slot.descriptor)
+                {
+                    result.push_back(slot.descriptor);
+                }
+            }
+
+            return result;
+        }
+
+        /**
+         * Gets the resource data pointer for a given ComponentID.
+         * @param id ComponentID of the resource
+         * @return Pointer to resource data, or nullptr if not found
+         */
+        ASTRA_NODISCARD void* GetByID(ComponentID id)
+        {
+            if (id >= MAX_COMPONENTS)
+                return nullptr;
+
+            uint16_t index = m_sparse[id];
+            if (index == INVALID_INDEX || index >= m_resources.size())
+                return nullptr;
+
+            auto& slot = m_resources[index];
+            if (!slot.isValid)
+                return nullptr;
+
+            return slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData;
+        }
+
+        /**
+         * Gets the resource data pointer for a given ComponentID (const version).
+         * @param id ComponentID of the resource
+         * @return Const pointer to resource data, or nullptr if not found
+         */
+        ASTRA_NODISCARD const void* GetByID(ComponentID id) const
+        {
+            return const_cast<ResourceStorage*>(this)->GetByID(id);
+        }
+
+        /**
+         * Type-erased resource setting for use by CommandBuffer.
+         * Sets a resource using the component ID and raw data pointer.
+         * The component must already be registered in the ComponentRegistry.
+         *
+         * @param id The ComponentID of the resource
+         * @param data Pointer to the source resource data (will be copy-constructed)
+         * @param dataSize Size of the resource data (for validation)
+         * @return true if resource was set successfully, false otherwise
+         */
+        bool SetByID(ComponentID id, const void* data, size_t dataSize)
+        {
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return false;
+
+            auto registry = m_componentRegistry.lock();
+            if (!registry) ASTRA_UNLIKELY
+                return false;
+
+            const ComponentDescriptor* desc = registry->GetComponentDescriptor(id);
+            if (!desc) ASTRA_UNLIKELY
+                return false;
+
+            // Validate data size matches component size
+            if (dataSize != desc->size && desc->size > 0) ASTRA_UNLIKELY
+                return false;
+
+            uint16_t index = m_sparse[id];
+
+            if (index == INVALID_INDEX)
+            {
+                // New resource - allocate slot
+                index = static_cast<uint16_t>(m_resources.size());
+                if (index >= INVALID_INDEX) ASTRA_UNLIKELY
+                    return false;
+
+                m_sparse[id] = index;
+                m_resources.emplace_back();
+
+                auto& slot = m_resources[index];
+                slot.id = id;
+                slot.size = static_cast<uint16_t>(desc->size);
+                slot.descriptor = desc;
+                slot.isValid = true;
+
+                // Decide between inline storage and heap allocation
+                if (desc->size <= SBO_SIZE)
+                {
+                    slot.isHeap = false;
+                    desc->ConstructWith(slot.storage.inlineData, data);
+                }
+                else
+                {
+                    slot.isHeap = true;
+                    AllocResult result = AllocateMemory(desc->size, desc->alignment);
+                    if (!result.ptr) ASTRA_UNLIKELY
+                        return false;
+                    slot.storage.heapPtr = result.ptr;
+                    desc->ConstructWith(slot.storage.heapPtr, data);
+                }
+            }
+            else
+            {
+                // Update existing resource
+                auto& slot = m_resources[index];
+                if (!slot.isValid) ASTRA_UNLIKELY
+                    return false;
+
+                // Copy assign the new data
+                void* existing = slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData;
+                if (desc->copyAssign)
+                {
+                    desc->copyAssign(existing, data);
+                }
+                else if (desc->is_trivially_copyable)
+                {
+                    std::memcpy(existing, data, desc->size);
+                }
+                else
+                {
+                    return false;  // Can't copy-assign
+                }
+            }
+
+            return true;
+        }
+
+        /**
+         * Type-erased resource removal for use by CommandBuffer.
+         *
+         * @param id The ComponentID of the resource to remove
+         * @return true if resource was removed, false if it didn't exist
+         */
+        bool RemoveByID(ComponentID id)
+        {
+            if (id >= MAX_COMPONENTS)
+                return false;
+
+            uint16_t index = m_sparse[id];
+            if (index == INVALID_INDEX)
+                return false;
+
+            if (index >= m_resources.size()) ASTRA_UNLIKELY
+                return false;
+
+            auto& slot = m_resources[index];
+
+            if (!slot.isValid)
+                return false;
+
+            // Destruct the resource
+            if (slot.descriptor)
+            {
+                if (slot.isHeap)
+                {
+                    slot.descriptor->Destruct(slot.storage.heapPtr);
+                    FreeMemory(slot.storage.heapPtr, slot.size);
+                    slot.storage.heapPtr = nullptr;
+                }
+                else
+                {
+                    slot.descriptor->Destruct(slot.storage.inlineData);
+                }
+            }
+
+            slot.isValid = false;
+
+            // Swap-and-pop to maintain density
+            size_t lastIndex = m_resources.size() - 1;
+            if (index != lastIndex)
+            {
+                m_resources[index] = std::move(m_resources[lastIndex]);
+                m_sparse[m_resources[index].id] = index;
+            }
+
+            m_resources.pop_back();
+            m_sparse[id] = INVALID_INDEX;
+
+            return true;
         }
 
     private:

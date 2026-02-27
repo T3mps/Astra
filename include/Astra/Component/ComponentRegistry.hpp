@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <string_view>
 #include <type_traits>
@@ -7,6 +8,7 @@
 #include "../Container/FlatMap.hpp"
 #include "../Core/Result.hpp"
 #include "../Core/TypeID.hpp"
+#include "../Reflection/MetaRegistry.hpp"
 #include "../Serialization/BinaryArchive.hpp"
 #include "../Serialization/BinaryReader.hpp"
 #include "../Serialization/BinaryWriter.hpp"
@@ -82,7 +84,16 @@ namespace Astra
             desc.deserialize = &Deserialize<T>;
             desc.serializeVersioned = &SerializeVersioned<T>;
             desc.deserializeVersioned = &DeserializeVersioned<T>;
-            
+
+            // Link to reflection metadata if type is registered with MetaRegistry
+            desc.meta = MetaRegistry::Instance().Get<T>();
+
+            // Also link MetaRegistry to ComponentID for reverse lookup
+            if (desc.meta)
+            {
+                MetaRegistry::Instance().LinkToComponent(desc.hash, id);
+            }
+
             m_components[id] = desc;
             m_hashToID[desc.hash] = id;
         }
@@ -218,6 +229,8 @@ namespace Astra
 
         FlatMap<ComponentID, ComponentDescriptor> m_components;
         FlatMap<uint64_t, ComponentID> m_hashToID;
-        std::vector<std::string> m_componentNames;
+        // Use deque instead of vector to prevent pointer invalidation when adding new names.
+        // Vector reallocation would invalidate all c_str() pointers stored in ComponentDescriptor::name
+        std::deque<std::string> m_componentNames;
     };
 }

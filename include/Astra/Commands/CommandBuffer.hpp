@@ -1,465 +1,618 @@
 #pragma once
 
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <type_traits>
 #include <vector>
 
-#include "../Core/Delegate.hpp"
+#include "../Container/SmallVector.hpp"
+#include "../Core/Base.hpp"
 #include "../Core/Result.hpp"
+#include "../Core/TypeID.hpp"
 #include "../Registry/Registry.hpp"
 #include "Command.hpp"
 
 namespace Astra
 {
-    
+    /**
+     * Error types for command buffer execution.
+     */
+    enum class CommandError
+    {
+        None,
+        InvalidRegistry,
+        ExecutionFailed,
+        AllocationFailed
+    };
+
+    /**
+     * Result of command buffer execution.
+     */
+    struct ExecutionResult
+    {
+        CommandError error = CommandError::None;
+        size_t executedCount = 0;
+        size_t totalCount = 0;
+
+        [[nodiscard]] bool IsOk() const noexcept { return error == CommandError::None; }
+        [[nodiscard]] bool IsErr() const noexcept { return error != CommandError::None; }
+    };
+
+    /**
+     * Internal byte buffer for storing commands contiguously.
+     * Commands are stored as [Header][Payload] pairs.
+     */
+    class CommandByteBuffer
+    {
+    public:
+        static constexpr size_t DEFAULT_INITIAL_CAPACITY = 4096;
+        static constexpr size_t ALIGNMENT = 8;
+
+        explicit CommandByteBuffer(size_t initialCapacity = DEFAULT_INITIAL_CAPACITY)
+        {
+            m_data.reserve(initialCapacity);
+        }
+
+        /**
+         * Allocate space in the buffer for a command.
+         * @param size Total size needed (header + payload + data)
+         * @return Pointer to the allocated space, or nullptr if allocation failed
+         */
+        std::byte* Allocate(size_t size, size_t* outAlignedSize = nullptr)
+        {
+            // Align the size to 8 bytes
+            size_t alignedSize = AlignUp(size, ALIGNMENT);
+
+            size_t currentSize = m_data.size();
+            m_data.resize(currentSize + alignedSize);
+
+            if (outAlignedSize)
+                *outAlignedSize = alignedSize;
+
+            return m_data.data() + currentSize;
+        }
+
+        /**
+         * Get pointer to the beginning of the buffer.
+         */
+        [[nodiscard]] std::byte* Data() noexcept { return m_data.data(); }
+        [[nodiscard]] const std::byte* Data() const noexcept { return m_data.data(); }
+
+        /**
+         * Get the current size of the buffer in bytes.
+         */
+        [[nodiscard]] size_t Size() const noexcept { return m_data.size(); }
+
+        /**
+         * Check if the buffer is empty.
+         */
+        [[nodiscard]] bool IsEmpty() const noexcept { return m_data.empty(); }
+
+        /**
+         * Clear the buffer, but keep the allocated capacity.
+         */
+        void Clear() noexcept { m_data.clear(); }
+
+        /**
+         * Reserve capacity in the buffer.
+         */
+        void Reserve(size_t capacity) { m_data.reserve(capacity); }
+
+    private:
+        std::vector<std::byte> m_data;
+    };
+
+    /**
+     * CommandBuffer stores deferred operations to be executed on a Registry.
+     *
+     * This implementation uses a type-erased byte buffer approach where commands and
+     * component data are stored inline in a contiguous buffer. This avoids the UB issues
+     * with lambda captures and provides better cache locality.
+     *
+     * IMPORTANT: Execution is NOT fully transactional. If a command fails during Execute():
+     * - Commands that already executed successfully are NOT rolled back
+     * - Only pre-allocated entities that haven't been processed yet are destroyed
+     * - Use smaller command buffers if you need atomic all-or-nothing semantics
+     * - Consider validating preconditions before adding commands
+     *
+     * Usage:
+     *   CommandBuffer cmd(&registry);
+     *   Entity e = cmd.CreateEntity();
+     *   cmd.AddComponent(e, Position{1, 2, 3});
+     *   auto result = cmd.Execute();
+     *   if (result.IsErr()) { // handle error }
+     */
     class CommandBuffer
     {
     public:
-        enum class ExecutionError
-        {
-            None,
-            InvalidRegistry,
-            InvalidEntityManager,
-            CommandFailed
-        };
-        
+        using ExecutionError = CommandError;
+
         explicit CommandBuffer(Registry* registry) :
             m_registry(registry)
         {
             ASTRA_ASSERT(registry != nullptr, "Registry cannot be null");
         }
 
+        ~CommandBuffer()
+        {
+            // Clean up any pending commands that have destructors
+            CleanupPendingCommands();
+        }
+
+        // ============= Entity Commands =============
+
+        /**
+         * Create a new entity. The entity ID is allocated immediately,
+         * but the entity is not added to the archetype system until Execute().
+         */
         Entity CreateEntity()
         {
-            if (m_registry)
-            {
-                auto& manager = m_registry->GetEntityManager();
-                Entity entity = manager.Create();
-                    if (entity == Entity::Invalid())
-                    {
-                        return Entity::Invalid();
-                    }
-                    
-                    m_allocatedEntities.push_back(entity);
-                    
-                    m_commands.emplace_back(
-                        [entity](Registry* registry) -> bool
-                        {
-#ifdef ASTRA_BUILD_DEBUG
-                            printf("CommandBuffer: Executing CreateEntity for entity %u\n", entity.GetID());
-#endif
-                            // Entity already created, just add to archetype system
-                            registry->GetArchetypeManager()->AddEntity(entity);
-                            registry->GetSignalManager()->Emit<Events::EntityCreated>(entity);
-                            return true;
-                        },
-                        Command::Type::Entity,
-                        "CreateEntity"
-                    );
-                    
-                return entity;
-            }
-            return Entity::Invalid();
+            if (!m_registry)
+                return Entity::Invalid();
+
+            auto& manager = m_registry->GetEntityManager();
+            Entity entity = manager.Create();
+            if (entity == Entity::Invalid())
+                return Entity::Invalid();
+
+            m_allocatedEntities.push_back(entity);
+
+            // Write command to buffer
+            size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntityPayload);
+            size_t alignedSize = 0;
+            std::byte* ptr = m_buffer.Allocate(totalSize, &alignedSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::CreateEntity, 0, static_cast<uint32_t>(alignedSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntityPayload{entity};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
+            return entity;
         }
 
+        /**
+         * Destroy an entity. The entity is destroyed when Execute() is called.
+         */
         void DestroyEntity(Entity entity)
         {
-            m_commands.emplace_back(
-                [entity](Registry* registry) -> bool
-                {
-                    if (entity == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->DestroyEntity(entity);
-                    return true;
-                },
-                Command::Type::Entity,
-                "DestroyEntity"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(DestroyEntityPayload);
+            size_t alignedSize = 0;
+            std::byte* ptr = m_buffer.Allocate(totalSize, &alignedSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::DestroyEntity, 0, static_cast<uint32_t>(alignedSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) DestroyEntityPayload{entity};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
 
+        /**
+         * Create multiple entities at once.
+         */
         void CreateEntities(size_t count, Entity* outEntities)
         {
-            if (m_registry)
+            if (!m_registry || count == 0)
+                return;
+
+            auto& manager = m_registry->GetEntityManager();
+            manager.CreateBatch(count, outEntities);
+
+            // Track for potential rollback
+            for (size_t i = 0; i < count; ++i)
             {
-                auto& manager = m_registry->GetEntityManager();
-                // Allocate entities immediately
-                manager.CreateBatch(count, outEntities);
-                
-                    // Track for potential rollback
-                    for (size_t i = 0; i < count; ++i)
-                    {
-                        m_allocatedEntities.push_back(outEntities[i]);
-                    }
-                
-                    // Copy entities for command since outEntities might not be valid at execution
-                    std::vector<Entity> entities(outEntities, outEntities + count);
-                    m_commands.emplace_back(
-                        [entities](Registry* registry) -> bool
-                        {
-                            // Entities already created, just add them to archetype system
-                            auto* archetypeManager = registry->GetArchetypeManager();
-                            auto* signalManager = registry->GetSignalManager();
-                        
-                            for (Entity e : entities)
-                            {
-                                archetypeManager->AddEntity(e);
-                                signalManager->Emit<Events::EntityCreated>(e);
-                            }
-                            return true;
-                        },
-                        Command::Type::Entity,
-                        "CreateEntities"
-                    );
+                m_allocatedEntities.push_back(outEntities[i]);
             }
+
+            // Calculate total size
+            size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntitiesPayload) + count * sizeof(Entity);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::CreateEntities, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntitiesPayload{static_cast<uint32_t>(count)};
+            (void)header;
+
+            // Copy entities after payload
+            Entity* entityDst = reinterpret_cast<Entity*>(payload + 1);
+            std::memcpy(entityDst, outEntities, count * sizeof(Entity));
+
+            m_commandCount++;
         }
 
+        /**
+         * Destroy multiple entities at once.
+         */
         void DestroyEntities(std::span<const Entity> entities)
         {
-            // Copy entities since the span might not be valid at execution time
-            std::vector<Entity> entityCopy(entities.begin(), entities.end());
-            m_commands.emplace_back(
-                [entityCopy = std::move(entityCopy)](Registry* registry) -> bool
-                {
-                    SmallVector<Entity, 256> validEntities;
-                    validEntities.reserve(entityCopy.size());
-                    
-                    for (Entity e : entityCopy)
-                    {
-                        if (e != Entity::Invalid())
-                        {
-                            validEntities.push_back(e);
-                        }
-                    }
-                    
-                    if (!validEntities.empty())
-                    {
-                        registry->DestroyEntities(validEntities);
-                    }
-                    return true;
-                },
-                Command::Type::Entity,
-                "DestroyEntities"
-            );
+            if (entities.empty())
+                return;
+
+            size_t count = entities.size();
+            size_t totalSize = sizeof(CommandHeader) + sizeof(DestroyEntitiesPayload) + count * sizeof(Entity);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::DestroyEntities, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) DestroyEntitiesPayload{static_cast<uint32_t>(count)};
+            (void)header;
+
+            // Copy entities after payload
+            Entity* entityDst = reinterpret_cast<Entity*>(payload + 1);
+            std::memcpy(entityDst, entities.data(), count * sizeof(Entity));
+
+            m_commandCount++;
         }
 
+        // ============= Component Commands =============
+
+        /**
+         * Add a component to an entity. The component data is stored inline in the buffer.
+         */
         template<Component T>
         void AddComponent(Entity entity, T&& component)
         {
-            m_commands.emplace_back(
-                [entity, comp = std::forward<T>(component)](Registry* registry) -> bool
-                {
-                    if (entity == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->AddComponent(entity, std::move(comp));
-                    return true;
-                },
-                Command::Type::Component,
-                "AddComponent"
-            );
+            using DecayedT = std::decay_t<T>;
+
+            // Register component type
+            m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
+
+            constexpr size_t dataSize = sizeof(DecayedT);
+            constexpr size_t dataAlignment = alignof(DecayedT);
+
+            // Calculate total size with alignment padding
+            size_t headerSize = sizeof(CommandHeader);
+            size_t payloadSize = sizeof(AddComponentPayload);
+            size_t dataOffset = AlignUp(headerSize + payloadSize, dataAlignment);
+            size_t totalSize = dataOffset + dataSize;
+
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            // Write header
+            auto* header = new (ptr) CommandHeader{CommandType::AddComponent, 0, static_cast<uint32_t>(totalSize)};
+            (void)header;
+
+            // Write payload
+            auto* payload = new (ptr + headerSize) AddComponentPayload{
+                entity,
+                TypeID<DecayedT>::Value(),
+                static_cast<uint16_t>(dataSize),
+                static_cast<uint16_t>(dataAlignment),
+                &DestructComponent<DecayedT>
+            };
+            (void)payload;
+
+            // Write component data inline (properly aligned)
+            void* dataPtr = ptr + dataOffset;
+            new (dataPtr) DecayedT(std::forward<T>(component));
+
+            m_commandCount++;
         }
-        
+
+        /**
+         * Emplace a component on an entity with constructor arguments.
+         */
         template<Component T, typename... Args>
         void EmplaceComponent(Entity entity, Args&&... args)
         {
-            m_commands.emplace_back(
-                [entity, comp = T(std::forward<Args>(args)...)](Registry* registry) -> bool
-                {
-                    if (entity == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->AddComponent<T>(entity, comp);
-                    return true;
-                },
-                Command::Type::Component,
-                "EmplaceComponent"
-            );
+            // Create the component and add it
+            AddComponent<T>(entity, T(std::forward<Args>(args)...));
         }
 
+        /**
+         * Remove a component from an entity.
+         */
         template<Component T>
         void RemoveComponent(Entity entity)
         {
-            m_commands.emplace_back(
-                [entity](Registry* registry) -> bool
-                {
-                    if (entity == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->RemoveComponent<T>(entity);
-                    return true;
-                },
-                Command::Type::Component,
-                "RemoveComponent"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveComponentPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::RemoveComponent, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveComponentPayload{entity, TypeID<T>::Value()};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
 
+        /**
+         * Add a component to multiple entities with the same value.
+         */
         template<Component T>
         void AddComponents(std::span<const Entity> entities, const T& component)
         {
-            std::vector<Entity> entityCopy(entities.begin(), entities.end());
-            m_commands.emplace_back(
-                [entityCopy = std::move(entityCopy), component](Registry* registry) -> bool
-                {
-#ifdef ASTRA_BUILD_DEBUG
-                    printf("CommandBuffer: Executing AddComponents for %zu entities\n", entityCopy.size());
-#endif
-                    SmallVector<Entity, 256> validEntities;
-                    validEntities.reserve(entityCopy.size());
-                    for (Entity e : entityCopy)
-                    {
-                        if (e != Entity::Invalid())
-                        {
-                            validEntities.push_back(e);
-#ifdef ASTRA_BUILD_DEBUG
-                            printf("  Entity %u is valid\n", e.GetID());
-#endif
-                        }
-                    }
-                    if (!validEntities.empty())
-                    {
-#ifdef ASTRA_BUILD_DEBUG
-                        printf("  Calling registry->AddComponents with %zu valid entities\n", validEntities.size());
-#endif
-                        registry->AddComponents<T>(validEntities, component);
-                    }
-                    return true;
-                },
-                Command::Type::Component,
-                "AddComponents"
-            );
+            if (entities.empty())
+                return;
+
+            using DecayedT = std::decay_t<T>;
+
+            // Register component type
+            m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
+
+            constexpr size_t dataSize = sizeof(DecayedT);
+            constexpr size_t dataAlignment = alignof(DecayedT);
+
+            size_t entityCount = entities.size();
+            size_t headerSize = sizeof(CommandHeader);
+            size_t payloadSize = sizeof(AddComponentBatchPayload);
+            size_t entitiesSize = entityCount * sizeof(Entity);
+            size_t dataOffset = AlignUp(headerSize + payloadSize + entitiesSize, dataAlignment);
+            size_t totalSize = dataOffset + dataSize;
+
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            // Write header
+            auto* header = new (ptr) CommandHeader{CommandType::AddComponentBatch, 0, static_cast<uint32_t>(totalSize)};
+            (void)header;
+
+            // Write payload
+            auto* payload = new (ptr + headerSize) AddComponentBatchPayload{
+                TypeID<DecayedT>::Value(),
+                static_cast<uint16_t>(dataSize),
+                static_cast<uint16_t>(dataAlignment),
+                static_cast<uint32_t>(entityCount),
+                &DestructComponent<DecayedT>
+            };
+
+            // Copy entities
+            Entity* entityDst = payload->GetEntitiesPtr();
+            std::memcpy(entityDst, entities.data(), entitiesSize);
+
+            // Write component data inline
+            void* dataPtr = ptr + dataOffset;
+            new (dataPtr) DecayedT(component);
+
+            m_commandCount++;
         }
-        
+
+        /**
+         * Emplace a component on multiple entities with the same constructor arguments.
+         */
         template<Component T, typename... Args>
         void EmplaceComponents(std::span<const Entity> entities, Args&&... args)
         {
-            std::vector<Entity> entityCopy(entities.begin(), entities.end());
-            m_commands.emplace_back(
-                [entityCopy = std::move(entityCopy), comp = T(std::forward<Args>(args)...)](Registry* registry) -> bool
-                {
-                    SmallVector<Entity, 256> validEntities;
-                    validEntities.reserve(entityCopy.size());
-                    for (Entity e : entityCopy)
-                    {
-                        if (e != Entity::Invalid())
-                        {
-                            validEntities.push_back(e);
-                        }
-                    }
-                    if (!validEntities.empty())
-                    {
-                        registry->AddComponents<T>(validEntities, comp);
-                    }
-                    return true;
-                },
-                Command::Type::Component,
-                "EmplaceComponents"
-            );
+            AddComponents<T>(entities, T(std::forward<Args>(args)...));
         }
 
+        /**
+         * Remove a component from multiple entities.
+         */
         template<Component T>
         void RemoveComponents(std::span<const Entity> entities)
         {
-            std::vector<Entity> entityCopy(entities.begin(), entities.end());
-            m_commands.emplace_back(
-                [entityCopy = std::move(entityCopy)](Registry* registry) -> bool
-                {
-                    SmallVector<Entity, 256> validEntities;
-                    validEntities.reserve(entityCopy.size());
-                    for (Entity e : entityCopy)
-                    {
-                        if (e != Entity::Invalid())
-                        {
-                            validEntities.push_back(e);
-                        }
-                    }
-                    if (!validEntities.empty())
-                    {
-                        registry->RemoveComponents<T>(validEntities);
-                    }
-                    return true;
-                },
-                Command::Type::Component,
-                "RemoveComponents"
-            );
+            if (entities.empty())
+                return;
+
+            size_t entityCount = entities.size();
+            size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveComponentBatchPayload) + entityCount * sizeof(Entity);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::RemoveComponentBatch, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveComponentBatchPayload{
+                TypeID<T>::Value(),
+                0,  // padding
+                static_cast<uint32_t>(entityCount)
+            };
+            (void)header;
+
+            // Copy entities
+            Entity* entityDst = payload->GetEntitiesPtr();
+            std::memcpy(entityDst, entities.data(), entityCount * sizeof(Entity));
+
+            m_commandCount++;
         }
 
         // ============= Relationship Commands =============
 
+        /**
+         * Set the parent of an entity.
+         */
         void SetParent(Entity child, Entity parent)
         {
-            m_commands.emplace_back(
-                [child, parent](Registry* registry) -> bool
-                {
-                    if (child == Entity::Invalid() || parent == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->SetParent(child, parent);
-                    return true;
-                },
-                Command::Type::Relationship,
-                "SetParent"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(SetParentPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::SetParent, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) SetParentPayload{child, parent};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
-        
+
+        /**
+         * Add a child to a parent (same as SetParent with reversed parameters).
+         */
         void AddChild(Entity parent, Entity child)
         {
-            // AddChild is just SetParent with reversed parameters
             SetParent(child, parent);
         }
 
+        /**
+         * Remove the parent from an entity.
+         */
         void RemoveParent(Entity child)
         {
-            m_commands.emplace_back(
-                [child](Registry* registry) -> bool
-                {
-                    if (child == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->RemoveParent(child);
-                    return true;
-                },
-                Command::Type::Relationship,
-                "RemoveParent"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveParentPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::RemoveParent, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveParentPayload{child};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
-        
+
+        /**
+         * Remove a specific child from a parent.
+         */
         void RemoveChild(Entity parent, Entity child)
         {
-            m_commands.emplace_back(
-                [parent, child](Registry* registry) -> bool
-                {
-                    if (parent == Entity::Invalid() || child == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->RemoveChild(parent, child);
-                    return true;
-                },
-                Command::Type::Relationship,
-                "RemoveChild"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveChildPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::RemoveChild, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveChildPayload{parent, child};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
-        
+
+        /**
+         * Remove all children from a parent.
+         */
         void RemoveAllChildren(Entity parent)
         {
-            m_commands.emplace_back(
-                [parent](Registry* registry) -> bool
-                {
-                    if (parent == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->RemoveAllChildren(parent);
-                    return true;
-                },
-                Command::Type::Relationship,
-                "RemoveAllChildren"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveAllChildrenPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::RemoveAllChildren, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveAllChildrenPayload{parent};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
 
+        /**
+         * Add a bidirectional link between two entities.
+         */
         void AddLink(Entity a, Entity b)
         {
-            m_commands.emplace_back(
-                [a, b](Registry* registry) -> bool
-                {
-                    if (a == Entity::Invalid() || b == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->AddLink(a, b);
-                    return true;
-                },
-                Command::Type::Relationship,
-                "AddLink"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(AddLinkPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::AddLink, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) AddLinkPayload{a, b};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
 
+        /**
+         * Remove a bidirectional link between two entities.
+         */
         void RemoveLink(Entity a, Entity b)
         {
-            m_commands.emplace_back(
-                [a, b](Registry* registry) -> bool
-                {
-                    if (a == Entity::Invalid() || b == Entity::Invalid())
-                    {
-                        return false;
-                    }
-                    registry->RemoveLink(a, b);
-                    return true;
-                },
-                Command::Type::Relationship,
-                "RemoveLink"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveLinkPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::RemoveLink, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveLinkPayload{a, b};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
-        
+
         // ============= Resource Commands =============
-        
+
+        /**
+         * Set a global resource.
+         */
         template<Component T>
         void SetResource(T&& resource)
         {
-            m_commands.emplace_back(
-                [res = std::forward<T>(resource)](Registry* registry) mutable -> bool
-                {
-                    registry->SetResource<T>(std::move(res));
-                    return true;
-                },
-                Command::Type::Resource,
-                "SetResource"
-            );
+            using DecayedT = std::decay_t<T>;
+
+            // Register component type
+            m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
+
+            constexpr size_t dataSize = sizeof(DecayedT);
+            constexpr size_t dataAlignment = alignof(DecayedT);
+
+            size_t headerSize = sizeof(CommandHeader);
+            size_t payloadSize = sizeof(SetResourcePayload);
+            size_t dataOffset = AlignUp(headerSize + payloadSize, dataAlignment);
+            size_t totalSize = dataOffset + dataSize;
+
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            // Write header
+            auto* header = new (ptr) CommandHeader{CommandType::SetResource, 0, static_cast<uint32_t>(totalSize)};
+            (void)header;
+
+            // Write payload
+            auto* payload = new (ptr + headerSize) SetResourcePayload{
+                TypeID<DecayedT>::Value(),
+                static_cast<uint16_t>(dataSize),
+                static_cast<uint16_t>(dataAlignment),
+                0,  // padding
+                &DestructComponent<DecayedT>
+            };
+            (void)payload;
+
+            // Write resource data inline
+            void* dataPtr = ptr + dataOffset;
+            new (dataPtr) DecayedT(std::forward<T>(resource));
+
+            m_commandCount++;
         }
-        
+
+        /**
+         * Emplace a global resource with constructor arguments.
+         */
         template<Component T, typename... Args>
         void EmplaceResource(Args&&... args)
         {
-            m_commands.emplace_back(
-                [res = T(std::forward<Args>(args)...)](Registry* registry) mutable -> bool
-                {
-                    registry->SetResource<T>(std::move(res));
-                    return true;
-                },
-                Command::Type::Resource,
-                "EmplaceResource"
-            );
+            SetResource<T>(T(std::forward<Args>(args)...));
         }
-        
+
+        /**
+         * Remove a global resource.
+         */
         template<Component T>
         void RemoveResource()
         {
-            m_commands.emplace_back(
-                [](Registry* registry) -> bool
-                {
-                    registry->RemoveResource<T>();
-                    return true;
-                },
-                Command::Type::Resource,
-                "RemoveResource"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveResourcePayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::RemoveResource, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveResourcePayload{TypeID<T>::Value()};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
-        
+
+        /**
+         * Clear all global resources.
+         */
         void ClearResources()
         {
-            m_commands.emplace_back(
-                [](Registry* registry) -> bool
-                {
-                    registry->ClearResources();
-                    return true;
-                },
-                Command::Type::Resource,
-                "ClearResources"
-            );
+            size_t totalSize = sizeof(CommandHeader) + sizeof(ClearResourcesPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+
+            auto* header = new (ptr) CommandHeader{CommandType::ClearResources, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) ClearResourcesPayload{};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
         }
 
         // ============= Execution and Management =============
 
+        /**
+         * Execute all recorded commands.
+         * On success, the buffer is cleared (if clearAfterExecution is true).
+         *
+         * On failure:
+         * - Commands that already executed remain in effect (NOT rolled back)
+         * - Pre-allocated entities that weren't processed yet are destroyed
+         * - Component data in the buffer is cleaned up
+         * - Returns error with m_lastExecutedCount set for debugging
+         *
+         * @param clearAfterExecution If true, clears the buffer after successful execution
+         * @return Result indicating success or the type of failure
+         */
         Result<void, ExecutionError> Execute(bool clearAfterExecution = true)
         {
             if (!m_registry)
@@ -467,89 +620,127 @@ namespace Astra
                 RollbackAllocatedEntities();
                 return Result<void, ExecutionError>::Err(ExecutionError::InvalidRegistry);
             }
-            
-            // EntityManager is always valid if Registry exists
-            
-            // Execute all commands
-            for (size_t i = 0; i < m_commands.size(); ++i)
+
+            std::byte* ptr = m_buffer.Data();
+            std::byte* end = ptr + m_buffer.Size();
+            m_lastExecutedCount = 0;
+
+            while (ptr < end)
             {
-                if (!m_commands[i].execute(m_registry))
+                auto* header = reinterpret_cast<CommandHeader*>(ptr);
+                std::byte* payloadPtr = ptr + sizeof(CommandHeader);
+
+                bool success = ExecuteCommand(header->type, payloadPtr);
+
+                if (!success)
                 {
-                    // Command failed - rollback
+                    // Partial execution occurred - clean up what we can
+                    // Note: Already-executed commands are NOT rolled back
                     RollbackAllocatedEntities();
-                    
-#ifdef ASTRA_BUILD_DEBUG
-                    if (m_commands[i].debugName)
-                    {
-                        printf("Command failed: %s (index %zu)\n", m_commands[i].debugName, i);
-                    }
-#endif
-                    
-                    return Result<void, ExecutionError>::Err(ExecutionError::CommandFailed);
+                    CleanupPendingCommands();
+                    m_buffer.Clear();
+                    m_commandCount = 0;
+                    return Result<void, ExecutionError>::Err(ExecutionError::ExecutionFailed);
                 }
+
+                // Advance by aligned size (buffer allocates with 8-byte alignment)
+                ptr += AlignUp(static_cast<size_t>(header->totalSize), CommandByteBuffer::ALIGNMENT);
+                m_lastExecutedCount++;
             }
-            
-            // Success
-            m_allocatedEntities.clear(); 
-            
+
+            // Success - clear allocated entities tracking
+            m_allocatedEntities.clear();
+
             if (clearAfterExecution)
             {
                 Clear();
             }
-            
+
             return Result<void, ExecutionError>::Ok();
         }
 
+        /**
+         * Get the number of commands that were successfully executed in the last Execute() call.
+         * Useful for debugging partial execution failures.
+         */
+        [[nodiscard]] size_t GetLastExecutedCount() const noexcept { return m_lastExecutedCount; }
+
+        /**
+         * Clear all pending commands without executing them.
+         * Also cleans up any component data destructors.
+         */
         void Clear()
         {
-            m_commands.clear();
+            CleanupPendingCommands();
+            m_buffer.Clear();
             m_allocatedEntities.clear();
+            m_commandCount = 0;
         }
-        
-        void Reserve(size_t commandCount)
-        {
-            m_commands.reserve(commandCount);
-        }
-        
+
         /**
-         * Merge commands from another buffer into this one
-         * The other buffer is moved from and left empty
+         * Reserve space in the command buffer for the expected number of bytes.
+         */
+        void Reserve(size_t bytes)
+        {
+            m_buffer.Reserve(bytes);
+        }
+
+        /**
+         * Merge commands from another buffer into this one.
+         * The other buffer is left empty after the merge.
          */
         void MergeFrom(CommandBuffer&& other)
         {
-            // Move all commands
-            m_commands.insert(
-                m_commands.end(),
-                std::make_move_iterator(other.m_commands.begin()),
-                std::make_move_iterator(other.m_commands.end())
-            );
-            
+            // Copy buffer data
+            size_t otherSize = other.m_buffer.Size();
+            if (otherSize > 0)
+            {
+                std::byte* dst = m_buffer.Allocate(otherSize);
+                std::memcpy(dst, other.m_buffer.Data(), otherSize);
+            }
+
             // Merge allocated entities
             m_allocatedEntities.insert(
                 m_allocatedEntities.end(),
                 other.m_allocatedEntities.begin(),
                 other.m_allocatedEntities.end()
             );
-            
-            // Clear the other buffer
-            other.Clear();
-        }
-        
-        [[nodiscard]] size_t GetCommandCount() const noexcept
-        {
-            return m_commands.size();
+
+            m_commandCount += other.m_commandCount;
+
+            // Clear other buffer (don't call CleanupPendingCommands since we copied the data)
+            other.m_buffer.Clear();
+            other.m_allocatedEntities.clear();
+            other.m_commandCount = 0;
         }
 
+        /**
+         * Get the number of commands in the buffer.
+         */
+        [[nodiscard]] size_t GetCommandCount() const noexcept
+        {
+            return m_commandCount;
+        }
+
+        /**
+         * Check if the buffer is empty.
+         */
         [[nodiscard]] bool IsEmpty() const noexcept
         {
-            return m_commands.empty();
+            return m_commandCount == 0;
         }
-        
+
+        /**
+         * Get the memory usage of the command buffer in bytes.
+         */
         [[nodiscard]] size_t GetMemoryUsage() const noexcept
         {
-            return m_commands.capacity() * sizeof(Command) + m_allocatedEntities.capacity() * sizeof(Entity);
+            return m_buffer.Size() + m_allocatedEntities.capacity() * sizeof(Entity);
         }
-        
+
+        /**
+         * Rollback all entities that were allocated but not yet added to archetypes.
+         */
         void RollbackAllocatedEntities()
         {
             if (m_registry)
@@ -563,16 +754,316 @@ namespace Astra
             m_allocatedEntities.clear();
         }
 
-    private:        
+    private:
+        /**
+         * Destructor function for component cleanup.
+         */
+        template<typename T>
+        static void DestructComponent(void* ptr)
+        {
+            static_cast<T*>(ptr)->~T();
+        }
+
+        /**
+         * Execute a single command from the buffer.
+         */
+        bool ExecuteCommand(CommandType type, std::byte* payload)
+        {
+            switch (type)
+            {
+                case CommandType::CreateEntity:
+                    return ExecuteCreateEntity(payload);
+                case CommandType::DestroyEntity:
+                    return ExecuteDestroyEntity(payload);
+                case CommandType::CreateEntities:
+                    return ExecuteCreateEntities(payload);
+                case CommandType::DestroyEntities:
+                    return ExecuteDestroyEntities(payload);
+                case CommandType::AddComponent:
+                    return ExecuteAddComponent(payload);
+                case CommandType::RemoveComponent:
+                    return ExecuteRemoveComponent(payload);
+                case CommandType::AddComponentBatch:
+                    return ExecuteAddComponentBatch(payload);
+                case CommandType::RemoveComponentBatch:
+                    return ExecuteRemoveComponentBatch(payload);
+                case CommandType::SetParent:
+                    return ExecuteSetParent(payload);
+                case CommandType::RemoveParent:
+                    return ExecuteRemoveParent(payload);
+                case CommandType::AddChild:
+                    return ExecuteSetParent(payload);  // Same implementation
+                case CommandType::RemoveChild:
+                    return ExecuteRemoveChild(payload);
+                case CommandType::RemoveAllChildren:
+                    return ExecuteRemoveAllChildren(payload);
+                case CommandType::AddLink:
+                    return ExecuteAddLink(payload);
+                case CommandType::RemoveLink:
+                    return ExecuteRemoveLink(payload);
+                case CommandType::SetResource:
+                    return ExecuteSetResource(payload);
+                case CommandType::RemoveResource:
+                    return ExecuteRemoveResource(payload);
+                case CommandType::ClearResources:
+                    return ExecuteClearResources(payload);
+                default:
+                    return false;
+            }
+        }
+
+        // ============= Command Executors =============
+
+        bool ExecuteCreateEntity(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<CreateEntityPayload*>(payload);
+            m_registry->GetArchetypeManager()->AddEntity(cmd->entity);
+            m_registry->GetSignalManager()->Emit<Events::EntityCreated>(cmd->entity);
+            return true;
+        }
+
+        bool ExecuteDestroyEntity(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<DestroyEntityPayload*>(payload);
+            if (cmd->entity == Entity::Invalid())
+                return false;
+            m_registry->DestroyEntity(cmd->entity);
+            return true;
+        }
+
+        bool ExecuteCreateEntities(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<CreateEntitiesPayload*>(payload);
+            Entity* entities = reinterpret_cast<Entity*>(cmd + 1);
+
+            auto* archetypeManager = m_registry->GetArchetypeManager();
+            auto* signalManager = m_registry->GetSignalManager();
+
+            for (uint32_t i = 0; i < cmd->entityCount; ++i)
+            {
+                archetypeManager->AddEntity(entities[i]);
+                signalManager->Emit<Events::EntityCreated>(entities[i]);
+            }
+            return true;
+        }
+
+        bool ExecuteDestroyEntities(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<DestroyEntitiesPayload*>(payload);
+            Entity* entities = reinterpret_cast<Entity*>(cmd + 1);
+
+            SmallVector<Entity, 256> validEntities;
+            validEntities.reserve(cmd->entityCount);
+
+            for (uint32_t i = 0; i < cmd->entityCount; ++i)
+            {
+                if (entities[i] != Entity::Invalid())
+                {
+                    validEntities.push_back(entities[i]);
+                }
+            }
+
+            if (!validEntities.empty())
+            {
+                m_registry->DestroyEntities(validEntities);
+            }
+            return true;
+        }
+
+        bool ExecuteAddComponent(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<AddComponentPayload*>(payload);
+
+            if (cmd->entity == Entity::Invalid())
+                return false;
+
+            const void* data = cmd->GetDataPtr();
+            return m_registry->AddComponentByID(cmd->entity, cmd->componentId, data, cmd->dataSize);
+        }
+
+        bool ExecuteRemoveComponent(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<RemoveComponentPayload*>(payload);
+            if (cmd->entity == Entity::Invalid())
+                return false;
+
+            return m_registry->RemoveComponentByID(cmd->entity, cmd->componentId);
+        }
+
+        bool ExecuteAddComponentBatch(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<AddComponentBatchPayload*>(payload);
+            const Entity* entities = cmd->GetEntitiesPtr();
+            const void* data = cmd->GetDataPtr();
+
+            // Use direct single-entity calls to avoid any span conversion issues
+            for (uint32_t i = 0; i < cmd->entityCount; ++i)
+            {
+                if (entities[i] != Entity::Invalid())
+                {
+                    m_registry->AddComponentByID(entities[i], cmd->componentId, data, cmd->dataSize);
+                }
+            }
+            return true;
+        }
+
+        bool ExecuteRemoveComponentBatch(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<RemoveComponentBatchPayload*>(payload);
+            const Entity* entities = cmd->GetEntitiesPtr();
+
+            // Use direct single-entity calls to avoid any span conversion issues
+            for (uint32_t i = 0; i < cmd->entityCount; ++i)
+            {
+                if (entities[i] != Entity::Invalid())
+                {
+                    m_registry->RemoveComponentByID(entities[i], cmd->componentId);
+                }
+            }
+            return true;
+        }
+
+        bool ExecuteSetParent(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<SetParentPayload*>(payload);
+            if (cmd->child == Entity::Invalid() || cmd->parent == Entity::Invalid())
+                return false;
+            m_registry->SetParent(cmd->child, cmd->parent);
+            return true;
+        }
+
+        bool ExecuteRemoveParent(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<RemoveParentPayload*>(payload);
+            if (cmd->child == Entity::Invalid())
+                return false;
+            m_registry->RemoveParent(cmd->child);
+            return true;
+        }
+
+        bool ExecuteRemoveChild(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<RemoveChildPayload*>(payload);
+            if (cmd->parent == Entity::Invalid() || cmd->child == Entity::Invalid())
+                return false;
+            m_registry->RemoveChild(cmd->parent, cmd->child);
+            return true;
+        }
+
+        bool ExecuteRemoveAllChildren(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<RemoveAllChildrenPayload*>(payload);
+            if (cmd->parent == Entity::Invalid())
+                return false;
+            m_registry->RemoveAllChildren(cmd->parent);
+            return true;
+        }
+
+        bool ExecuteAddLink(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<AddLinkPayload*>(payload);
+            if (cmd->a == Entity::Invalid() || cmd->b == Entity::Invalid())
+                return false;
+            m_registry->AddLink(cmd->a, cmd->b);
+            return true;
+        }
+
+        bool ExecuteRemoveLink(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<RemoveLinkPayload*>(payload);
+            if (cmd->a == Entity::Invalid() || cmd->b == Entity::Invalid())
+                return false;
+            m_registry->RemoveLink(cmd->a, cmd->b);
+            return true;
+        }
+
+        bool ExecuteSetResource(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<SetResourcePayload*>(payload);
+            const void* data = cmd->GetDataPtr();
+            return m_registry->SetResourceByID(cmd->componentId, data, cmd->dataSize);
+        }
+
+        bool ExecuteRemoveResource(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<RemoveResourcePayload*>(payload);
+            return m_registry->RemoveResourceByID(cmd->componentId);
+        }
+
+        bool ExecuteClearResources([[maybe_unused]] std::byte* payload)
+        {
+            m_registry->ClearResources();
+            return true;
+        }
+
+        /**
+         * Clean up any component data stored in pending commands.
+         * Called during Clear() and destructor.
+         */
+        void CleanupPendingCommands()
+        {
+            std::byte* ptr = m_buffer.Data();
+            std::byte* end = ptr + m_buffer.Size();
+
+            while (ptr < end)
+            {
+                auto* header = reinterpret_cast<CommandHeader*>(ptr);
+                std::byte* payloadPtr = ptr + sizeof(CommandHeader);
+
+                // Only need to cleanup commands with inline component data
+                switch (header->type)
+                {
+                    case CommandType::AddComponent:
+                    {
+                        auto* cmd = reinterpret_cast<AddComponentPayload*>(payloadPtr);
+                        if (cmd->destructor)
+                        {
+                            cmd->destructor(cmd->GetDataPtr());
+                        }
+                        break;
+                    }
+                    case CommandType::AddComponentBatch:
+                    {
+                        auto* cmd = reinterpret_cast<AddComponentBatchPayload*>(payloadPtr);
+                        if (cmd->destructor)
+                        {
+                            cmd->destructor(cmd->GetDataPtr());
+                        }
+                        break;
+                    }
+                    case CommandType::SetResource:
+                    {
+                        auto* cmd = reinterpret_cast<SetResourcePayload*>(payloadPtr);
+                        if (cmd->destructor)
+                        {
+                            cmd->destructor(cmd->GetDataPtr());
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+
+                // Advance by aligned size (buffer allocates with 8-byte alignment)
+                ptr += AlignUp(static_cast<size_t>(header->totalSize), CommandByteBuffer::ALIGNMENT);
+            }
+        }
+
         Registry* m_registry;
-        std::vector<Command> m_commands;
+        CommandByteBuffer m_buffer;
         std::vector<Entity> m_allocatedEntities;
+        size_t m_commandCount = 0;
+        size_t m_lastExecutedCount = 0;  // For debugging partial execution failures
     };
-    
+
+    /**
+     * Thread-safe command buffer that provides per-thread buffers.
+     * Commands from all threads are executed sequentially when Execute() is called.
+     */
     class ParallelCommandBuffer
     {
     public:
-        explicit ParallelCommandBuffer(Registry* registry) : 
+        explicit ParallelCommandBuffer(Registry* registry) :
             m_registry(registry)
         {
             ASTRA_ASSERT(registry != nullptr, "Registry cannot be null");
@@ -580,7 +1071,11 @@ namespace Astra
             const size_t expectedThreads = std::thread::hardware_concurrency();
             m_buffers.reserve(expectedThreads);
         }
-        
+
+        /**
+         * Get the command buffer for the current thread.
+         * Creates a new buffer if one doesn't exist for this thread.
+         */
         CommandBuffer& GetThreadBuffer() const
         {
             // Fast path: check thread-local cache
@@ -588,11 +1083,14 @@ namespace Astra
             {
                 return *t_cache.buffer;
             }
-            
+
             // Slow path: create new buffer for this thread
             return InitializeThreadBuffer();
         }
-        
+
+        /**
+         * Execute all commands from all thread buffers.
+         */
         Result<void, CommandBuffer::ExecutionError> Execute()
         {
             for (size_t i = 0; i < m_buffers.size(); ++i)
@@ -617,9 +1115,11 @@ namespace Astra
             return Result<void, CommandBuffer::ExecutionError>::Ok();
         }
 
+        /**
+         * Merge all thread buffers into a single target buffer.
+         */
         void MergeInto(CommandBuffer& target)
         {
-            // Properly merge all thread buffers into the target
             for (auto& buffer : m_buffers)
             {
                 if (buffer && !buffer->IsEmpty())
@@ -628,7 +1128,10 @@ namespace Astra
                 }
             }
         }
-        
+
+        /**
+         * Clear all thread buffers.
+         */
         void Clear()
         {
             for (auto& buffer : m_buffers)
@@ -640,7 +1143,10 @@ namespace Astra
             }
         }
 
-        ASTRA_NODISCARD size_t GetCommandCount() const
+        /**
+         * Get the total number of commands across all thread buffers.
+         */
+        [[nodiscard]] size_t GetCommandCount() const
         {
             size_t total = 0;
             for (const auto& buffer : m_buffers)
@@ -653,7 +1159,10 @@ namespace Astra
             return total;
         }
 
-        ASTRA_NODISCARD bool IsEmpty() const
+        /**
+         * Check if all thread buffers are empty.
+         */
+        [[nodiscard]] bool IsEmpty() const
         {
             for (const auto& buffer : m_buffers)
             {
@@ -665,42 +1174,45 @@ namespace Astra
             return true;
         }
 
-        ASTRA_NODISCARD size_t GetThreadCount() const
+        /**
+         * Get the number of thread buffers that have been created.
+         */
+        [[nodiscard]] size_t GetThreadCount() const
         {
             return m_buffers.size();
         }
-        
+
     private:
         CommandBuffer& InitializeThreadBuffer() const
         {
             // Allocate a new index for this thread
             const size_t index = m_nextIndex.fetch_add(1, std::memory_order_relaxed);
-            
+
             // Lock only for vector modification
             std::unique_lock lock(m_mutex);
-            
+
             // Ensure vector is large enough
             if (index >= m_buffers.size())
             {
                 m_buffers.resize(index + 1);
             }
-            
+
             // Create the buffer if it doesn't exist
             if (!m_buffers[index])
             {
                 m_buffers[index] = std::make_unique<CommandBuffer>(m_registry);
             }
-            
+
             CommandBuffer* buffer = m_buffers[index].get();
-            
+
             // Unlock before updating thread-local cache
             lock.unlock();
-            
+
             // Update thread-local cache
             t_cache.context = const_cast<ParallelCommandBuffer*>(this);
             t_cache.buffer = buffer;
             t_cache.index = index;
-            
+
             return *buffer;
         }
 
@@ -719,8 +1231,8 @@ namespace Astra
 
         static thread_local ThreadCache t_cache;
     };
-    
+
     // Thread-local storage definition
     inline thread_local ParallelCommandBuffer::ThreadCache ParallelCommandBuffer::t_cache;
-    
+
 } // namespace Astra

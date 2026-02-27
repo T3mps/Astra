@@ -66,3 +66,6 @@
 #include "Serialization/Compression/Compression.hpp"
 #include "Serialization/Compression/LZ4Decoder.hpp"
 #include "Serialization/SerializationError.hpp"
+
+// Reflection
+#include "Reflection/Reflection.hpp"

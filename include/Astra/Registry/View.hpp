@@ -14,6 +14,7 @@
 #include "../Component/Component.hpp"
 #include "../Entity/Entity.hpp"
 #include "Query.hpp"
+#include "ViewIterator.hpp"
 
 namespace Astra
 {
@@ -21,16 +22,21 @@ namespace Astra
     class View
     {
         static_assert(ValidQuery<QueryArgs...>, "View template arguments must be valid components or query modifiers");
-        
+
+        // Query type extraction - must be declared early for Iterator type
+        using RequiredTypes = typename Detail::QueryClassifier<QueryArgs...>::RequiredComponents;
+        using OptionalTypes = typename Detail::QueryClassifier<QueryArgs...>::OptionalComponents;
+        using QueryBuilder = QueryBuilder<QueryArgs...>;
+
         // Parallel execution thresholds - based on empirical testing
         static constexpr size_t AVG_ENTITIES_PER_CHUNK = 256;                           // Typical for 16KB chunks with ~50 byte entities
         static constexpr size_t MIN_CHUNKS_PER_THREAD = 4;                              // Each thread should process at least 4 chunks (64KB)
         static constexpr size_t MIN_CHUNKS_FOR_PARALLEL = MIN_CHUNKS_PER_THREAD * 2;    // Need enough for at least 2 threads
-        
+
         // Derive entity thresholds from chunk-based values
         static constexpr size_t MIN_ENTITIES_QUICK_CHECK = AVG_ENTITIES_PER_CHUNK / 2;  // Less than half a chunk = definitely sequential
         static constexpr size_t MIN_ENTITIES_FOR_PARALLEL = MIN_CHUNKS_FOR_PARALLEL * AVG_ENTITIES_PER_CHUNK / 2;  // ~4 chunks worth
-        
+
     public:
         explicit View(std::shared_ptr<ArchetypeManager> manager) :
             m_archetypeManager(manager),
@@ -160,12 +166,37 @@ namespace Astra
         {
             return m_archetypes.empty();
         }
-        
-    private:
-        using RequiredTypes = Detail::QueryClassifier<QueryArgs...>::RequiredComponents;
-        using OptionalTypes = Detail::QueryClassifier<QueryArgs...>::OptionalComponents;
-        using QueryBuilder = QueryBuilder<QueryArgs...>;
 
+        // ============= Range-based for loop support =============
+
+        /**
+         * Iterator type for range-based for loops.
+         * Uses the required components from the query.
+         */
+        using Iterator = ViewIteratorFromTuple_t<RequiredTypes>;
+
+        /**
+         * Begin iterator for range-based for loop.
+         * Ensures archetypes are up-to-date before returning iterator.
+         */
+        ASTRA_FORCEINLINE Iterator begin()
+        {
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return Iterator(nullptr, 0);
+
+            EnsureArchetypes();
+            return Iterator(m_archetypes.data(), m_archetypes.size());
+        }
+
+        /**
+         * End sentinel for range-based for loop.
+         */
+        ASTRA_FORCEINLINE ViewSentinel end() const noexcept
+        {
+            return ViewSentinel{};
+        }
+
+    private:
         struct ArchetypeEntityCountComparator
         {
             bool operator()(Archetype* a, Archetype* b) const

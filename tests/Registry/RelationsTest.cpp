@@ -512,71 +512,50 @@ TEST_F(RelationsTest, LargeHierarchyPerformance)
 // Test circular hierarchy handling
 TEST_F(RelationsTest, CircularHierarchyHandling)
 {
-    // Create a potential circular hierarchy
+    // Test that circular hierarchies are now prevented
     Entity a = registry->CreateEntity();
     Entity b = registry->CreateEntity();
     Entity c = registry->CreateEntity();
-    
-    // Create chain: a -> b -> c
+
+    // Create chain: a -> b -> c (a is root, b is child of a, c is child of b)
     registry->SetParent(b, a);
     registry->SetParent(c, b);
-    
-    // Try to create cycle: c -> a (would make a -> b -> c -> a)
-    // Note: Current implementation allows this, creating a cycle
+
+    // Verify the chain is correct
+    EXPECT_EQ(registry->GetParent(b), a);
+    EXPECT_EQ(registry->GetParent(c), b);
+    EXPECT_FALSE(registry->GetParent(a).IsValid()); // a has no parent
+
+    // Try to create cycle: a -> c (would make a -> b -> c -> a)
+    // This should be rejected because a is an ancestor of c
     registry->SetParent(a, c);
-    
-    // Test what happens when traversing (should not infinite loop)
-    // The queue-based traversal should handle this by visiting each node once
+
+    // Verify cycle was prevented - a should still have no parent
+    EXPECT_FALSE(registry->GetParent(a).IsValid());
+
+    // Verify the original chain is still intact
+    EXPECT_EQ(registry->GetParent(b), a);
+    EXPECT_EQ(registry->GetParent(c), b);
+
+    // Test traversal works correctly with the valid (non-cyclic) hierarchy
     auto relations = registry->GetRelations(a);
-    
-    // Set a timeout for safety
-    auto start = std::chrono::high_resolution_clock::now();
-    size_t count = 0;
-    const size_t maxIterations = 1000; // Safety limit
-    
+
+    size_t descendantCount = 0;
     relations.ForEachDescendant([&](Entity, size_t) {
-        count++;
-        if (count > maxIterations)
-        {
-            FAIL() << "Infinite loop detected in circular hierarchy traversal!";
-            return;
-        }
-        
-        auto elapsed = std::chrono::high_resolution_clock::now() - start;
-        if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() > 1)
-        {
-            FAIL() << "Traversal timeout - possible infinite loop!";
-            return;
-        }
+        descendantCount++;
     });
-    
-    // The BFS traversal in Relations should handle cycles by visiting each node once
-    // With the fixed implementation, we should visit b and c from a's perspective
-    EXPECT_EQ(count, 2u); // Should visit b and c (not a itself, as it's the root)
-    
-    // Test ancestor traversal with cycle
-    auto ancestorRelations = registry->GetRelations(a);
-    
-    count = 0;
-    start = std::chrono::high_resolution_clock::now();
-    
-    ancestorRelations.ForEachAncestor([&](Entity, size_t) {
-        count++;
-        if (count > maxIterations)
-        {
-            FAIL() << "Infinite loop in ancestor traversal!";
-            return;
-        }
-        
-        auto elapsed = std::chrono::high_resolution_clock::now() - start;
-        if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() > 1)
-        {
-            FAIL() << "Ancestor traversal timeout!";
-            return;
-        }
+
+    // Should visit b and c (descendants of a)
+    EXPECT_EQ(descendantCount, 2u);
+
+    // Test ancestor traversal from c
+    auto cRelations = registry->GetRelations(c);
+
+    size_t ancestorCount = 0;
+    cRelations.ForEachAncestor([&](Entity, size_t) {
+        ancestorCount++;
     });
-    
-    // Should also handle the cycle gracefully
-    // From a's perspective looking up, we see c (parent), then b (grandparent)
-    EXPECT_EQ(count, 2u);
+
+    // Should visit b and a (ancestors of c)
+    EXPECT_EQ(ancestorCount, 2u);
 }

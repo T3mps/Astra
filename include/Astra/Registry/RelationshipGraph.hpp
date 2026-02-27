@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 #include "../Container/FlatMap.hpp"
@@ -83,6 +85,7 @@ namespace Astra
             m_links(std::move(other.m_links)),
             m_descendantCaches(std::move(other.m_descendantCaches)),
             m_ancestorCaches(std::move(other.m_ancestorCaches)),
+            m_cacheMutex(),  // shared_mutex is not movable, create new one
             m_structureVersion(other.m_structureVersion.load())
         {
             other.m_structureVersion = 1;
@@ -125,22 +128,44 @@ namespace Astra
             return (it != m_parents.end()) ? it->second : Entity::Invalid();
         }
 
+        /**
+         * Check if 'ancestor' is an ancestor of 'entity' in the parent hierarchy.
+         * Used to detect cycles before setting a parent relationship.
+         */
+        bool IsAncestorOf(Entity ancestor, Entity entity) const
+        {
+            Entity current = GetParent(entity);
+            while (current.IsValid())
+            {
+                if (current == ancestor)
+                    return true;
+                current = GetParent(current);
+            }
+            return false;
+        }
+
         void SetParent(Entity child, Entity parent)
         {
             ASTRA_ASSERT(child != parent, "Entity cannot be its own parent");
             ASTRA_ASSERT(child.IsValid() && parent.IsValid(), "Invalid entity in relationship");
-            
+
             // Silently ignore invalid operations in release builds
             if (!child.IsValid() || !parent.IsValid() || child == parent)
                 return;
-            
+
+            // Check for circular hierarchy: if child is an ancestor of parent,
+            // setting parent as child's parent would create a cycle
+            ASTRA_ASSERT(!IsAncestorOf(child, parent), "Circular hierarchy detected: child is an ancestor of parent");
+            if (IsAncestorOf(child, parent))
+                return;
+
             // Remove from old parent if exists
             RemoveParent(child);
-            
+
             // Set new parent
             m_parents[child] = parent;
             m_children[parent].push_back(child);
-            
+
             // Invalidate caches
             IncrementVersion();
         }
@@ -647,29 +672,57 @@ namespace Astra
         // Get cached descendants for a root entity
         const TraversalCache& GetDescendantsCached(Entity root) const
         {
-            auto& cache = m_descendantCaches[root];
             uint32_t currentVersion = m_structureVersion.load(std::memory_order_acquire);
 
-            if (!cache.IsValid(currentVersion))
+            // First check with shared lock (allows concurrent reads)
             {
-                BuildDescendantCache(root, cache);
+                std::shared_lock<std::shared_mutex> readLock(m_cacheMutex);
+                auto it = m_descendantCaches.Find(root);
+                if (it != m_descendantCaches.end() && it->second.IsValid(currentVersion))
+                {
+                    return it->second;
+                }
             }
 
-            return cache;
+            // Need to rebuild - acquire exclusive lock
+            {
+                std::unique_lock<std::shared_mutex> writeLock(m_cacheMutex);
+                // Double-check after acquiring write lock (another thread may have built it)
+                auto& cache = m_descendantCaches[root];
+                if (!cache.IsValid(currentVersion))
+                {
+                    BuildDescendantCache(root, cache);
+                }
+                return cache;
+            }
         }
 
         // Get cached ancestors for an entity
         const TraversalCache& GetAncestorsCached(Entity entity) const
         {
-            auto& cache = m_ancestorCaches[entity];
             uint32_t currentVersion = m_structureVersion.load(std::memory_order_acquire);
 
-            if (!cache.IsValid(currentVersion))
+            // First check with shared lock (allows concurrent reads)
             {
-                BuildAncestorCache(entity, cache);
+                std::shared_lock<std::shared_mutex> readLock(m_cacheMutex);
+                auto it = m_ancestorCaches.Find(entity);
+                if (it != m_ancestorCaches.end() && it->second.IsValid(currentVersion))
+                {
+                    return it->second;
+                }
             }
 
-            return cache;
+            // Need to rebuild - acquire exclusive lock
+            {
+                std::unique_lock<std::shared_mutex> writeLock(m_cacheMutex);
+                // Double-check after acquiring write lock (another thread may have built it)
+                auto& cache = m_ancestorCaches[entity];
+                if (!cache.IsValid(currentVersion))
+                {
+                    BuildAncestorCache(entity, cache);
+                }
+                return cache;
+            }
         }
         
         // Increment version to invalidate all caches
@@ -686,7 +739,10 @@ namespace Astra
         // Traversal caches
         mutable FlatMap<Entity, TraversalCache> m_descendantCaches;
         mutable FlatMap<Entity, TraversalCache> m_ancestorCaches;
-        
+
+        // Mutex for thread-safe cache access (shared_mutex allows concurrent reads)
+        mutable std::shared_mutex m_cacheMutex;
+
         // Version tracking for cache invalidation
         std::atomic<uint32_t> m_structureVersion{1};
         

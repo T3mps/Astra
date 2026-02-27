@@ -7,11 +7,11 @@
 
 #include "../Core/Base.hpp"
 
-#if defined(ARCH_X64) || defined(ARCH_X86)
+#if defined(ASTRA_ARCH_X64) || defined(ASTRA_ARCH_X86)
     #if defined(ASTRA_COMPILER_MSVC)
         #include <intrin.h>
         #include <nmmintrin.h>  // SSE4.2
-        #if defined(HAS_AVX) || defined(HAS_AVX2)
+        #if defined(ASTRA_HAS_AVX) || defined(ASTRA_HAS_AVX2)
             #include <immintrin.h>  // AVX/AVX2
         #endif
     #else
@@ -22,11 +22,10 @@
     #if defined(__ARM_FEATURE_CRC32)
         #define ASTRA_HAS_ARM_CRC32 1
     #endif
-#include <cstdarg>
-#include <intrin0.inl.h>
-#include "FlatMap.hpp"
-#include "Platform.hpp"
 #endif
+
+// Include Platform.hpp after architecture detection for SIMD capability macros
+#include "Platform.hpp"
 
 namespace Astra
 {
@@ -72,7 +71,7 @@ namespace Astra
             {
                 if constexpr (std::is_same_v<Width, Width128>)
                 {
-#if defined(HAS_SSE2) || defined(HAS_NEON)
+#if defined(ASTRA_HAS_SSE2) || defined(ASTRA_HAS_NEON)
                     return true;
 #else
                     return false;
@@ -80,7 +79,7 @@ namespace Astra
                 }
                 else if constexpr (std::is_same_v<Width, Width256>)
                 {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                     return true;
 #else
                     return false;
@@ -109,7 +108,7 @@ namespace Astra
                     return 16;
 
                 // For larger data, use wider vectors if available
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                 return 32;
 #else
                 return 16;
@@ -124,7 +123,7 @@ namespace Astra
             {
                 ASTRA_FORCEINLINE uint16_t MatchByteMask_SSE(const void* data, uint8_t value) noexcept
                 {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                     const __m128i group = _mm_load_si128(static_cast<const __m128i*>(data));
                     const __m128i match = _mm_set1_epi8(static_cast<char>(value));
                     const __m128i eq = _mm_cmpeq_epi8(group, match);
@@ -136,7 +135,7 @@ namespace Astra
 
                 ASTRA_FORCEINLINE uint16_t MatchByteMask_NEON(const void* data, uint8_t value) noexcept
                 {
-#if defined(HAS_NEON)
+#if defined(ASTRA_HAS_NEON)
                     const uint8x16_t group = vld1q_u8(static_cast<const uint8_t*>(data));
                     const uint8x16_t match = vdupq_n_u8(value);
                     const uint8x16_t eq = vceqq_u8(group, match);
@@ -173,7 +172,7 @@ namespace Astra
 
                 ASTRA_FORCEINLINE uint16_t MatchEitherByteMask_SSE(const void* data, uint8_t val1, uint8_t val2) noexcept
                 {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                     const __m128i group = _mm_load_si128(static_cast<const __m128i*>(data));
                     const __m128i match1 = _mm_set1_epi8(static_cast<char>(val1));
                     const __m128i match2 = _mm_set1_epi8(static_cast<char>(val2));
@@ -188,7 +187,7 @@ namespace Astra
 
                 ASTRA_FORCEINLINE uint16_t MatchEitherByteMask_NEON(const void* data, uint8_t val1, uint8_t val2) noexcept
                 {
-#if defined(HAS_NEON)
+#if defined(ASTRA_HAS_NEON)
                     const uint8x16_t group = vld1q_u8(static_cast<const uint8_t*>(data));
                     const uint8x16_t match1 = vdupq_n_u8(val1);
                     const uint8x16_t match2 = vdupq_n_u8(val2);
@@ -236,7 +235,7 @@ namespace Astra
             {
                 ASTRA_FORCEINLINE uint32_t MatchByteMask_AVX(const void* data, uint8_t value) noexcept
                 {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                     const __m256i group = _mm256_load_si256(static_cast<const __m256i*>(data));
                     const __m256i match = _mm256_set1_epi8(static_cast<char>(value));
                     const __m256i eq = _mm256_cmpeq_epi8(group, match);
@@ -248,7 +247,7 @@ namespace Astra
 
                 ASTRA_FORCEINLINE uint32_t MatchByteMask_Fallback(const void* data, uint8_t value) noexcept
                 {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                     // Optimized 2x128 with better scheduling
                     const uint8_t* ptr = static_cast<const uint8_t*>(data);
                     const __m128i* ptr_low = reinterpret_cast<const __m128i*>(ptr);
@@ -280,7 +279,7 @@ namespace Astra
 
                 ASTRA_FORCEINLINE uint32_t MatchEitherByteMask_AVX(const void* data, uint8_t val1, uint8_t val2) noexcept
                 {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                     const __m256i group = _mm256_load_si256(static_cast<const __m256i*>(data));
                     const __m256i match1 = _mm256_set1_epi8(static_cast<char>(val1));
                     const __m256i match2 = _mm256_set1_epi8(static_cast<char>(val2));
@@ -295,7 +294,7 @@ namespace Astra
 
                 ASTRA_FORCEINLINE uint32_t MatchEitherByteMask_Fallback(const void* data, uint8_t val1, uint8_t val2) noexcept
                 {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                     // Optimized 2x128 with better scheduling
                     const uint8_t* ptr = static_cast<const uint8_t*>(data);
                     const __m128i* ptr_low = reinterpret_cast<const __m128i*>(ptr);
@@ -344,9 +343,9 @@ namespace Astra
 
                 if constexpr (std::is_same_v<Width, Width128>)
                 {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                     return Detail128::MatchByteMask_SSE(data, value);
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
                     return Detail128::MatchByteMask_NEON(data, value);
 #else
                     return Detail128::MatchByteMask_Scalar(data, value);
@@ -354,9 +353,9 @@ namespace Astra
                 }
                 else if constexpr (std::is_same_v<Width, Width256>)
                 {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                     return Detail256::MatchByteMask_AVX(data, value);
-#elif defined(HAS_SSE2)
+#elif defined(ASTRA_HAS_SSE2)
                     return Detail256::MatchByteMask_Fallback(data, value);
 #else
                     // Scalar fallback for 256-bit
@@ -381,9 +380,9 @@ namespace Astra
 
                 if constexpr (std::is_same_v<Width, Width128>)
                 {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                     return Detail128::MatchEitherByteMask_SSE(data, val1, val2);
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
                     return Detail128::MatchEitherByteMask_NEON(data, val1, val2);
 #else
                     return Detail128::MatchEitherByteMask_Scalar(data, val1, val2);
@@ -391,9 +390,9 @@ namespace Astra
                 }
                 else if constexpr (std::is_same_v<Width, Width256>)
                 {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                     return Detail256::MatchEitherByteMask_AVX(data, val1, val2);
-#elif defined(HAS_SSE2)
+#elif defined(ASTRA_HAS_SSE2)
                     return Detail256::MatchEitherByteMask_Fallback(data, val1, val2);
 #else
                     // Scalar fallback for 256-bit
@@ -560,9 +559,9 @@ namespace Astra
             }
 
             // 128-bit SIMD operations for Bitmap optimization
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
             using Int128 = __m128i;
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
             using Int128 = uint8x16_t;
 #else
             struct Int128 {
@@ -574,9 +573,9 @@ namespace Astra
             // Load 128 bits from memory
             ASTRA_FORCEINLINE Int128 Load128(const void* ptr) noexcept
             {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                 return _mm_load_si128(static_cast<const __m128i*>(ptr));
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
                 return vld1q_u8(static_cast<const uint8_t*>(ptr));
 #else
                 const uint64_t* p = static_cast<const uint64_t*>(ptr);
@@ -587,9 +586,9 @@ namespace Astra
             // Bitwise AND of 128-bit values
             ASTRA_FORCEINLINE Int128 And128(Int128 a, Int128 b) noexcept
             {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                 return _mm_and_si128(a, b);
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
                 return vandq_u8(a, b);
 #else
                 return {a.low & b.low, a.high & b.high};
@@ -599,9 +598,9 @@ namespace Astra
             // Bitwise OR of 128-bit values
             ASTRA_FORCEINLINE Int128 Or128(Int128 a, Int128 b) noexcept
             {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                 return _mm_or_si128(a, b);
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
                 return vorrq_u8(a, b);
 #else
                 return {a.low | b.low, a.high | b.high};
@@ -611,9 +610,9 @@ namespace Astra
             // Store 128 bits to memory
             ASTRA_FORCEINLINE void Store128(void* ptr, Int128 value) noexcept
             {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                 _mm_store_si128(static_cast<__m128i*>(ptr), value);
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
                 vst1q_u8(static_cast<uint8_t*>(ptr), value);
 #else
                 uint64_t* p = static_cast<uint64_t*>(ptr);
@@ -625,9 +624,9 @@ namespace Astra
             // Compare 128-bit values for equality (returns mask)
             ASTRA_FORCEINLINE Int128 CompareEqual128(Int128 a, Int128 b) noexcept
             {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                 return _mm_cmpeq_epi64(a, b);
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
                 return vreinterpretq_u8_u64(vceqq_u64(vreinterpretq_u64_u8(a), vreinterpretq_u64_u8(b)));
 #else
                 Int128 result;
@@ -640,10 +639,10 @@ namespace Astra
             // Test if two 128-bit values are equal
             ASTRA_FORCEINLINE bool TestEqual128(Int128 a, Int128 b) noexcept
             {
-#if defined(HAS_SSE2)
+#if defined(ASTRA_HAS_SSE2)
                 __m128i cmp = _mm_cmpeq_epi8(a, b);
                 return _mm_movemask_epi8(cmp) == 0xFFFF;
-#elif defined(HAS_NEON)
+#elif defined(ASTRA_HAS_NEON)
                 uint8x16_t cmp = vceqq_u8(a, b);
                 // Check if all bytes are equal
                 uint8x8_t low = vget_low_u8(cmp);
@@ -664,7 +663,7 @@ namespace Astra
             }
 
             // 256-bit SIMD operations (for extended bloom filters)
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
             using Int256 = __m256i;
 #else
             struct Int256 {
@@ -676,7 +675,7 @@ namespace Astra
             // Load 256 bits from memory
             ASTRA_FORCEINLINE Int256 Load256(const void* ptr) noexcept
             {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                 return _mm256_load_si256(static_cast<const __m256i*>(ptr));
 #else
                 const uint8_t* p = static_cast<const uint8_t*>(ptr);
@@ -687,7 +686,7 @@ namespace Astra
             // Store 256 bits to memory
             ASTRA_FORCEINLINE void Store256(void* ptr, Int256 value) noexcept
             {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                 _mm256_store_si256(static_cast<__m256i*>(ptr), value);
 #else
                 uint8_t* p = static_cast<uint8_t*>(ptr);
@@ -699,7 +698,7 @@ namespace Astra
             // Bitwise AND of 256-bit values
             ASTRA_FORCEINLINE Int256 And256(Int256 a, Int256 b) noexcept
             {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                 return _mm256_and_si256(a, b);
 #else
                 return {And128(a.low, b.low), And128(a.high, b.high)};
@@ -709,7 +708,7 @@ namespace Astra
             // Bitwise OR of 256-bit values
             ASTRA_FORCEINLINE Int256 Or256(Int256 a, Int256 b) noexcept
             {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                 return _mm256_or_si256(a, b);
 #else
                 return {Or128(a.low, b.low), Or128(a.high, b.high)};
@@ -719,7 +718,7 @@ namespace Astra
             // Compare 256-bit values for equality
             ASTRA_FORCEINLINE Int256 CompareEqual256(Int256 a, Int256 b) noexcept
             {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                 return _mm256_cmpeq_epi64(a, b);
 #else
                 return {CompareEqual128(a.low, b.low), CompareEqual128(a.high, b.high)};
@@ -729,7 +728,7 @@ namespace Astra
             // Test if two 256-bit values are equal
             ASTRA_FORCEINLINE bool TestEqual256(Int256 a, Int256 b) noexcept
             {
-#if defined(HAS_AVX2)
+#if defined(ASTRA_HAS_AVX2)
                 __m256i cmp = _mm256_cmpeq_epi64(a, b);
                 return _mm256_movemask_epi8(cmp) == 0xFFFFFFFF;
 #else
@@ -793,7 +792,7 @@ namespace Astra
 
             ASTRA_FORCEINLINE void PrefetchRead(const void* ptr, PrefetchHint hint = PrefetchHint::T0) noexcept
             {
-#if defined(ARCH_X64) || defined(ARCH_X86)
+#if defined(ASTRA_ARCH_X64) || defined(ASTRA_ARCH_X86)
 #if defined(ASTRA_COMPILER_MSVC)
                 switch (hint)
                 {
@@ -814,7 +813,7 @@ namespace Astra
 #elif ASTRA_HAS_BUILTIN(__builtin_prefetch)
                 int locality = 3 - static_cast<int>(hint);
                 __builtin_prefetch(ptr, 0, locality);
-#elif defined(HAS_NEON) && defined(__ARM_FEATURE_UNALIGNED)
+#elif defined(ASTRA_HAS_NEON) && defined(__ARM_FEATURE_UNALIGNED)
                 __pld(ptr);
 #else
                 (void)ptr;

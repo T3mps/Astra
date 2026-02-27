@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <limits>
 #include <memory>
 #include <type_traits>
@@ -22,11 +23,39 @@ namespace Astra
     class SystemScheduler
     {
     public:
+        // RAII guard for execution lock (prevents use-after-free during parallel execution)
+        class ExecutionGuard
+        {
+        public:
+            explicit ExecutionGuard(std::atomic<bool>& flag) : m_flag(flag)
+            {
+                m_flag.store(true, std::memory_order_release);
+            }
+            ~ExecutionGuard()
+            {
+                m_flag.store(false, std::memory_order_release);
+            }
+            ExecutionGuard(const ExecutionGuard&) = delete;
+            ExecutionGuard& operator=(const ExecutionGuard&) = delete;
+        private:
+            std::atomic<bool>& m_flag;
+        };
+
+        // Check if scheduler is currently executing (cannot be modified during execution)
+        ASTRA_NODISCARD bool IsExecuting() const noexcept
+        {
+            return m_isExecuting.load(std::memory_order_acquire);
+        }
+
         template<System T, typename... Args>
         void AddSystem(Args&&... args)
         {
+            // Prevent modification during execution to avoid use-after-free
+            ASTRA_ASSERT(!IsExecuting(), "Cannot add system while scheduler is executing");
+            if (IsExecuting()) return;
+
             size_t typeId = TypeID<T>::Value();
-            
+
             // Check if system type is already registered
             if (m_systemIndices.Contains(typeId))
             {
@@ -84,6 +113,10 @@ namespace Astra
         template<System T>
         void RemoveSystem()
         {
+            // Prevent modification during execution to avoid use-after-free
+            ASTRA_ASSERT(!IsExecuting(), "Cannot remove system while scheduler is executing");
+            if (IsExecuting()) return;
+
             size_t typeId = TypeID<T>::Value();
             auto it = m_systemIndices.Find(typeId);
             if (it == m_systemIndices.end())
@@ -120,34 +153,42 @@ namespace Astra
         void Execute(Registry& registry, ISystemExecutor* executor)
         {
             ASTRA_ASSERT(executor != nullptr, "Executor cannot be null");
-            
+
             if (m_systems.empty())
                 return;
-            
+
+            // Acquire execution lock - prevents modification during parallel execution
+            // This prevents use-after-free when systems are removed while executing
+            ExecutionGuard guard(m_isExecuting);
+
             if (m_needsRebuild)
             {
                 BuildExecutionPlan();
             }
-            
+
             // Build execution context
             SystemExecutionContext context;
             context.registry = &registry;
             context.parallelGroups = m_executionPlan;
             context.systems.reserve(m_systems.size());
             context.metadata.reserve(m_systems.size());
-            
+
             for (const auto& entry : m_systems)
             {
                 context.systems.push_back(entry.execute);
                 context.metadata.push_back(entry.metadata);
             }
-            
+
             // Execute via the provided executor
             executor->Execute(context);
         }
         
         void Clear()
         {
+            // Prevent modification during execution to avoid use-after-free
+            ASTRA_ASSERT(!IsExecuting(), "Cannot clear scheduler while executing");
+            if (IsExecuting()) return;
+
             m_systems.clear();
             m_systemIndices.Clear();
             m_executionPlan.clear();
@@ -342,6 +383,10 @@ namespace Astra
         template<typename SystemType>
         void AddSystemInternal(SystemType system)
         {
+            // Prevent modification during execution to avoid use-after-free
+            ASTRA_ASSERT(!IsExecuting(), "Cannot add system while scheduler is executing");
+            if (IsExecuting()) return;
+
             size_t typeId = TypeID<SystemType>::Value();
 
             // Check if system type is already registered
@@ -390,5 +435,6 @@ namespace Astra
         FlatMap<size_t, size_t> m_systemIndices;                        // TypeID value to index mapping
         mutable std::vector<std::vector<size_t>> m_executionPlan;       // Cached parallel groups
         mutable bool m_needsRebuild = true;                             // Whether execution plan needs rebuild
+        mutable std::atomic<bool> m_isExecuting{false};                 // Execution lock to prevent modification during parallel execution
     };
 } // namespace Astra

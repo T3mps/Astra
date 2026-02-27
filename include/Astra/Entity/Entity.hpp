@@ -123,6 +123,9 @@ namespace Astra
         static constexpr StorageType ID_MASK = (StorageType{1} << ID_BITS) - 1;
         static constexpr StorageType VERSION_MASK = (StorageType{1} << VersionBits) - 1;
         static constexpr StorageType INVALID = std::numeric_limits<StorageType>::max();
+        // Max ID that can be safely allocated without collision with INVALID
+        // When maxID is combined with maxVersion, it equals INVALID, so we reserve it
+        static constexpr StorageType MAX_SAFE_ID = ID_MASK - 1;
     };
 
 #ifndef ASTRA_ENTITY_BITS
@@ -139,7 +142,9 @@ namespace Astra
     using Entity = Detail::BasicEntity<EntityTraits<ASTRA_ENTITY_BITS, ASTRA_ENTITY_VERSION_BITS>>;
     
 #ifndef ASTRA_MAX_ENTITIES
-    #define ASTRA_MAX_ENTITIES (Entity::ID_MASK + 1)
+    // Max ID (ID_MASK) is reserved to prevent collision with INVALID sentinel
+    // so max allocatable entities is ID_MASK (IDs 0 to ID_MASK-1)
+    #define ASTRA_MAX_ENTITIES (Entity::ID_MASK)
 #endif
 
     constexpr std::size_t MAX_ENTITIES = ASTRA_MAX_ENTITIES;
@@ -150,10 +155,13 @@ namespace Astra
         {
             uint64_t hash = entity.GetValue();
             hash = Simd::Ops::HashCombine(hash, 0x9E3779B97F4A7C15ULL);
-            if ((hash & 0x7F) == 0)
+            // Swiss table H2 extracts high 7 bits: (hash >> 57) & 0x7F
+            // H2 must be in range [1, 127] for proper match operations
+            // Check if high 7 bits are zero and fix them
+            if (((hash >> 57) & 0x7F) == 0)
             {
-                // Ensure valid H2
-                hash |= 1;
+                // Set bit 57 to ensure H2 != 0
+                hash |= (1ULL << 57);
             }
             return hash;
         }

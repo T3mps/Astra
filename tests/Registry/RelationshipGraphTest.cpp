@@ -374,46 +374,49 @@ TEST_F(RelationshipGraphTest, CircularRelationshipPrevention)
     Astra::Entity b(2, 1);
     Astra::Entity c(3, 1);
     Astra::Entity d(4, 1);
-    
+
     // Test direct self-parenting prevention
     graph->SetParent(a, a); // Should be ignored
     EXPECT_FALSE(graph->GetParent(a).IsValid());
     EXPECT_FALSE(graph->HasParent(a));
-    
+
     // Test 2-level circular prevention
-    graph->SetParent(b, a);
+    graph->SetParent(b, a); // a is parent of b
     EXPECT_EQ(graph->GetParent(b), a);
-    
+
     // This would create a cycle: a -> b -> a
-    // Current implementation doesn't prevent this, but let's test current behavior
+    // SetParent should detect that b is an ancestor of a and reject
     graph->SetParent(a, b);
-    // The implementation currently allows this, creating a cycle
-    // This is actually a bug that should be fixed in production
-    EXPECT_EQ(graph->GetParent(a), b); // Currently allowed (bug)
-    
+    EXPECT_FALSE(graph->GetParent(a).IsValid()); // Cycle prevented
+
     // Clean up for next test
-    graph->RemoveParent(a);
     graph->RemoveParent(b);
-    
+
     // Test 3-level circular scenario
-    graph->SetParent(b, a);
-    graph->SetParent(c, b);
-    // This would create: a -> b -> c -> a
+    graph->SetParent(b, a); // a -> b
+    graph->SetParent(c, b); // a -> b -> c
+    EXPECT_EQ(graph->GetParent(b), a);
+    EXPECT_EQ(graph->GetParent(c), b);
+
+    // This would create: a -> b -> c -> a (cycle)
     graph->SetParent(a, c);
-    EXPECT_EQ(graph->GetParent(a), c); // Currently allowed (bug)
-    
+    EXPECT_FALSE(graph->GetParent(a).IsValid()); // Cycle prevented
+
     // Test with 4 entities
     graph->Clear();
-    graph->SetParent(b, a);
-    graph->SetParent(c, b);
-    graph->SetParent(d, c);
-    // This would create: a -> b -> c -> d -> a
+    graph->SetParent(b, a); // a -> b
+    graph->SetParent(c, b); // a -> b -> c
+    graph->SetParent(d, c); // a -> b -> c -> d
+    EXPECT_EQ(graph->GetParent(d), c);
+
+    // This would create: a -> b -> c -> d -> a (cycle)
     graph->SetParent(a, d);
-    EXPECT_EQ(graph->GetParent(a), d); // Currently allowed (bug)
-    
-    // Note: The current implementation does NOT prevent circular relationships
-    // This is a potential issue that should be addressed in production code
-    // For now, we're documenting the actual behavior
+    EXPECT_FALSE(graph->GetParent(a).IsValid()); // Cycle prevented
+
+    // Verify the chain is still intact
+    EXPECT_EQ(graph->GetParent(b), a);
+    EXPECT_EQ(graph->GetParent(c), b);
+    EXPECT_EQ(graph->GetParent(d), c);
 }
 
 // Test self-linking prevention

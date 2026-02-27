@@ -49,12 +49,14 @@ namespace Astra
                 m_recycledIDs.pop_back();
                 return {entry.id, entry.nextVersion};
             }
-            
-            if (m_nextID > Entity::ID_MASK)
+
+            // Use >= to reserve max ID (Entity::ID_MASK) which would collide
+            // with INVALID when combined with max version
+            if (m_nextID >= Entity::ID_MASK)
             {
                 return {INVALID_ID, NULL_VERSION};
             }
-            
+
             return {m_nextID++, INITIAL_VERSION};
         }
         
@@ -74,8 +76,9 @@ namespace Astra
             }
             
             // Then allocate fresh IDs
+            // Reserve max ID (Entity::ID_MASK) to prevent collision with INVALID
             size_t remaining = count - fromRecycled;
-            size_t availableFresh = (Entity::ID_MASK + 1) - m_nextID;
+            size_t availableFresh = (m_nextID >= Entity::ID_MASK) ? 0 : (Entity::ID_MASK - m_nextID);
             size_t toAllocate = std::min(remaining, availableFresh);
             
             IDType startID = m_nextID;
@@ -120,7 +123,8 @@ namespace Astra
         
         ASTRA_NODISCARD bool HasAvailable() const noexcept
         {
-            return !m_recycledIDs.empty() || m_nextID <= Entity::ID_MASK;
+            // Use < (not <=) because max ID is reserved to prevent collision with INVALID
+            return !m_recycledIDs.empty() || m_nextID < Entity::ID_MASK;
         }
         
         void Reserve(size_t capacity)

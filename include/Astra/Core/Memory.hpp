@@ -36,16 +36,16 @@ namespace Astra
     inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = std::hardware_constructive_interference_size;
 #else
     // Platform-specific fallbacks when C++17 hardware_interference_size is not available
-#if defined(ASTRA_ARCH_X64) || defined(ASTRA_ARCH_X86)
-    inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 64;
-    inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
-#elif defined(ASTRA_ARCH_ARM64)
-    inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 128;
-    inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
-#else
-    inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 64;
-    inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
-#endif
+    #if defined(ASTRA_ARCH_X64) || defined(ASTRA_ARCH_X86)
+        inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 64;
+        inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
+    #elif defined(ASTRA_ARCH_ARM64)
+        inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 128;
+        inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
+    #else
+        inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 64;
+        inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
+    #endif
 #endif
 
     // Cache line size - typically used for alignment
@@ -56,13 +56,13 @@ namespace Astra
 
     // Default page size for memory allocation
     inline constexpr std::size_t DEFAULT_PAGE_SIZE = 4096; // 4KB
-    inline constexpr size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;  // 2MB on Windows
+    inline constexpr std::size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;  // 2MB on Windows
 
     enum class AllocFlags : uint32_t
     {
         None = 0,
-        HugePages = 1 << 0,  // Use 2MB/1GB huge pages if available
-        ZeroMem = 1 << 1,  // Zero-initialize allocated memory
+        HugePages = 1 << 0, // Use 2MB/1GB huge pages if available
+        ZeroMem = 1 << 1,   // Zero-initialize allocated memory
     };
     
     ASTRA_FORCEINLINE constexpr AllocFlags operator|(AllocFlags a, AllocFlags b) noexcept

@@ -279,8 +279,12 @@ namespace Astra
             {
                 ComponentID id = TypeID<T>::Value();
                 const auto& info = m_componentArrays[id];
-                
+
                 if (!info.isValid)
+                    return;
+
+                // Safety check: ensure base pointer is valid for non-empty components
+                if (info.base == nullptr && info.stride > 0) ASTRA_UNLIKELY
                     return;
                 
                 // Debug validation
@@ -664,8 +668,8 @@ namespace Astra
                 return;
             }
             
-            // Track block usage
-            m_blocks[node->blockIndex].usedChunks--;
+            // Track block usage (atomic decrement for thread safety)
+            m_blocks[node->blockIndex].usedChunks.fetch_sub(1, std::memory_order_relaxed);
             
             // Mark for lazy clearing instead of clearing now
             node->needsClear = true;
@@ -712,13 +716,14 @@ namespace Astra
             std::vector<size_t> emptyBlockIndices;
             for (size_t i = 0; i < m_blocks.size(); ++i)
             {
-                if (m_blocks[i].usedChunks == 0)
+                size_t used = m_blocks[i].usedChunks.load(std::memory_order_acquire);
+                if (used == 0)
                 {
                     emptyBlockIndices.push_back(i);
                 }
                 else
                 {
-                    result.chunksInUse += m_blocks[i].usedChunks;
+                    result.chunksInUse += used;
                 }
             }
             
@@ -795,11 +800,12 @@ namespace Astra
                 size_t idx = emptyBlockIndices[i];
                 auto& block = m_blocks[idx];
                 
-                // Double-check that block is truly empty
-                ASTRA_ASSERT(block.usedChunks == 0, "Attempting to release non-empty block");
-                if (block.usedChunks != 0) ASTRA_UNLIKELY
+                // Double-check that block is truly empty (use acquire to synchronize with Release operations)
+                size_t blockUsed = block.usedChunks.load(std::memory_order_acquire);
+                ASTRA_ASSERT(blockUsed == 0, "Attempting to release non-empty block");
+                if (blockUsed != 0) ASTRA_UNLIKELY
                 {
-                    // Skip this block if it's not actually empty
+                    // Skip this block if it's not actually empty - a chunk was acquired after our initial check
                     continue;
                 }
                 
@@ -873,7 +879,42 @@ namespace Astra
             size_t chunkCount = 0;
             bool usedHugePages = false;
             std::unique_ptr<ChunkNode[]> nodes;  // Heap-allocated nodes for stable addresses
-            size_t usedChunks = 0;         // Number of chunks currently in use
+            std::atomic<size_t> usedChunks{0};   // Number of chunks currently in use (atomic for thread safety)
+
+            // Need explicit move operations because atomic is not moveable
+            BlockInfo() = default;
+            BlockInfo(BlockInfo&& other) noexcept
+                : memory(other.memory)
+                , size(other.size)
+                , chunkCount(other.chunkCount)
+                , usedHugePages(other.usedHugePages)
+                , nodes(std::move(other.nodes))
+                , usedChunks(other.usedChunks.load(std::memory_order_relaxed))
+            {
+                other.memory = nullptr;
+                other.size = 0;
+                other.chunkCount = 0;
+                other.usedHugePages = false;
+            }
+            BlockInfo& operator=(BlockInfo&& other) noexcept
+            {
+                if (this != &other)
+                {
+                    memory = other.memory;
+                    size = other.size;
+                    chunkCount = other.chunkCount;
+                    usedHugePages = other.usedHugePages;
+                    nodes = std::move(other.nodes);
+                    usedChunks.store(other.usedChunks.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                    other.memory = nullptr;
+                    other.size = 0;
+                    other.chunkCount = 0;
+                    other.usedHugePages = false;
+                }
+                return *this;
+            }
+            BlockInfo(const BlockInfo&) = delete;
+            BlockInfo& operator=(const BlockInfo&) = delete;
         };
 
         void* AcquireMemory()
@@ -891,8 +932,8 @@ namespace Astra
                     node->needsClear = false;
                 }
                 
-                // Track block usage
-                m_blocks[node->blockIndex].usedChunks++;
+                // Track block usage (atomic increment for thread safety)
+                m_blocks[node->blockIndex].usedChunks.fetch_add(1, std::memory_order_relaxed);
                 
                 void* memory = node->memory;
                 node->next = nullptr;  // Clear the link

@@ -8,7 +8,6 @@
 
 namespace Astra
 {
-
     template<typename T, typename E>
     class Result
     {

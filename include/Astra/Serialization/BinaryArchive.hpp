@@ -6,6 +6,7 @@
 #include <concepts>
 #include <vector>
 #include <span>
+#include <bit>  // C++20 std::endian
 
 #include "../Core/Base.hpp"
 #include "../Core/Result.hpp"
@@ -124,10 +125,10 @@ namespace Astra
         }
         
     private:
-        [[nodiscard]] static bool IsLittleEndian() noexcept
+        [[nodiscard]] static constexpr bool IsLittleEndian() noexcept
         {
-            uint32_t test = 1;
-            return *reinterpret_cast<uint8_t*>(&test) == 1;
+            // C++20 compliant endianness detection - no UB
+            return std::endian::native == std::endian::little;
         }
     };
     ASTRA_PACK_END

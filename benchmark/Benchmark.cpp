@@ -442,7 +442,7 @@ static void BM_IterateFiveComponents(benchmark::State& state)
 {
     const size_t count = state.range(0);
     Astra::Registry registry;
-    
+
     for (size_t i = 0; i < count; ++i)
     {
         auto entity = registry.CreateEntity();
@@ -452,9 +452,9 @@ static void BM_IterateFiveComponents(benchmark::State& state)
         registry.EmplaceComponent<Comp<1>>(entity);
         registry.EmplaceComponent<Comp<2>>(entity);
     }
-    
+
     auto view = registry.CreateView<Position, Velocity, Comp<0>, Comp<1>, Comp<2>>();
-    
+
     for (auto _ : state)
     {
         view.ForEach([](Astra::Entity, Position& pos, Velocity& vel, Comp<0>& c0, Comp<1>& c1, Comp<2>& c2)
@@ -469,7 +469,162 @@ static void BM_IterateFiveComponents(benchmark::State& state)
             benchmark::DoNotOptimize(c2.data[2] = 0);
         });
     }
-    
+
+    state.SetItemsProcessed(state.iterations() * count);
+}
+
+// ============================================================================
+// Range-based for loop iterator benchmarks (compare against ForEach above)
+// ============================================================================
+
+// Tests range-based for loop iteration with a single component
+static void BM_RangeForSingleComponent(benchmark::State& state)
+{
+    const size_t count = state.range(0);
+    Astra::Registry registry;
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        auto entity = registry.CreateEntity();
+        registry.EmplaceComponent<Position>(entity);
+    }
+
+    auto view = registry.CreateView<Position>();
+
+    for (auto _ : state)
+    {
+        for (auto [entity, pos] : view)
+        {
+            benchmark::DoNotOptimize(pos.x = 0);
+        }
+    }
+
+    state.SetItemsProcessed(state.iterations() * count);
+}
+
+// Tests range-based for loop iteration with two components
+static void BM_RangeForTwoComponents(benchmark::State& state)
+{
+    const size_t count = state.range(0);
+    Astra::Registry registry;
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        auto entity = registry.CreateEntity();
+        registry.EmplaceComponent<Position>(entity);
+        registry.EmplaceComponent<Velocity>(entity);
+    }
+
+    auto view = registry.CreateView<Position, Velocity>();
+
+    for (auto _ : state)
+    {
+        for (auto [entity, pos, vel] : view)
+        {
+            benchmark::DoNotOptimize(pos.x = 0);
+            benchmark::DoNotOptimize(vel.x = 0);
+        }
+    }
+
+    state.SetItemsProcessed(state.iterations() * count);
+}
+
+// Tests range-based for loop iteration when only half match
+static void BM_RangeForTwoComponentsHalf(benchmark::State& state)
+{
+    const size_t count = state.range(0);
+    Astra::Registry registry;
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        auto entity = registry.CreateEntity();
+        registry.EmplaceComponent<Velocity>(entity);
+
+        if (i % 2)
+        {
+            registry.EmplaceComponent<Position>(entity);
+        }
+    }
+
+    auto view = registry.CreateView<Position, Velocity>();
+
+    size_t matched = 0;
+    for (auto _ : state)
+    {
+        matched = 0;
+        for (auto [entity, pos, vel] : view)
+        {
+            benchmark::DoNotOptimize(pos.x = 0);
+            benchmark::DoNotOptimize(vel.x = 0);
+            ++matched;
+        }
+    }
+
+    state.SetItemsProcessed(state.iterations() * matched);
+}
+
+// Tests range-based for loop iteration with three components
+static void BM_RangeForThreeComponents(benchmark::State& state)
+{
+    const size_t count = state.range(0);
+    Astra::Registry registry;
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        auto entity = registry.CreateEntity();
+        registry.EmplaceComponent<Position>(entity);
+        registry.EmplaceComponent<Velocity>(entity);
+        registry.EmplaceComponent<Comp<0>>(entity);
+    }
+
+    auto view = registry.CreateView<Position, Velocity, Comp<0>>();
+
+    for (auto _ : state)
+    {
+        for (auto [entity, pos, vel, c] : view)
+        {
+            benchmark::DoNotOptimize(pos.x = 0);
+            benchmark::DoNotOptimize(vel.x = 0);
+            benchmark::DoNotOptimize(c.data[0] = 0);
+        }
+    }
+
+    state.SetItemsProcessed(state.iterations() * count);
+}
+
+// Tests range-based for loop iteration with five components
+static void BM_RangeForFiveComponents(benchmark::State& state)
+{
+    const size_t count = state.range(0);
+    Astra::Registry registry;
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        auto entity = registry.CreateEntity();
+        registry.EmplaceComponent<Position>(entity);
+        registry.EmplaceComponent<Velocity>(entity);
+        registry.EmplaceComponent<Comp<0>>(entity);
+        registry.EmplaceComponent<Comp<1>>(entity);
+        registry.EmplaceComponent<Comp<2>>(entity);
+    }
+
+    auto view = registry.CreateView<Position, Velocity, Comp<0>, Comp<1>, Comp<2>>();
+
+    for (auto _ : state)
+    {
+        for (auto [entity, pos, vel, c0, c1, c2] : view)
+        {
+            benchmark::DoNotOptimize(pos.x = 0);
+            benchmark::DoNotOptimize(vel.x = 0);
+            benchmark::DoNotOptimize(c0.data[0] = 0);
+            benchmark::DoNotOptimize(c1.data[0] = 0);
+            benchmark::DoNotOptimize(c1.data[1] = 0);
+            benchmark::DoNotOptimize(c2.data[0] = 0);
+            benchmark::DoNotOptimize(c2.data[1] = 0);
+            benchmark::DoNotOptimize(c2.data[2] = 0);
+        }
+    }
+
     state.SetItemsProcessed(state.iterations() * count);
 }
 
@@ -1136,14 +1291,20 @@ BENCHMARK(BM_RemoveComponents)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 BENCHMARK(BM_AddComponentsBatch)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 BENCHMARK(BM_RemoveComponentsBatch)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 
-// Most important iteration benchmarks
+// Most important iteration benchmarks (ForEach)
 BENCHMARK(BM_IterateSingleComponent)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 BENCHMARK(BM_IterateTwoComponents)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 BENCHMARK(BM_IterateTwoComponentsHalf)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 BENCHMARK(BM_IterateTwoComponentsOne)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 BENCHMARK(BM_IterateThreeComponents)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 BENCHMARK(BM_IterateFiveComponents)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
-// BENCHMARK(BM_IteratePathological);  // Temporarily disabled - causes crash
+
+// Range-based for loop iteration benchmarks (compare against ForEach above)
+BENCHMARK(BM_RangeForSingleComponent)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
+BENCHMARK(BM_RangeForTwoComponents)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
+BENCHMARK(BM_RangeForTwoComponentsHalf)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
+BENCHMARK(BM_RangeForThreeComponents)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
+BENCHMARK(BM_RangeForFiveComponents)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
 
 // Parallel iteration benchmarks
 BENCHMARK(BM_ParallelIterateSingleComponent)->Arg(10'000)->Arg(100'000)->Arg(1'000'000);
