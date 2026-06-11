@@ -74,10 +74,10 @@ namespace Astra
         
         // Move constructor
         EntityTable(EntityTable&& other) noexcept :
-            m_config(std::move(other.m_config)),
             m_segments(std::move(other.m_segments)),
             m_segmentIndex(std::move(other.m_segmentIndex)),
             m_segmentPool(std::move(other.m_segmentPool)),
+            m_config(std::move(other.m_config)),
             m_totalAlive(other.m_totalAlive),
             m_hugePageMemory(other.m_hugePageMemory),
             m_usingHugePages(other.m_usingHugePages),

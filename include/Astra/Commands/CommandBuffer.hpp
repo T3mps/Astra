@@ -1075,6 +1075,11 @@ namespace Astra
         /**
          * Get the command buffer for the current thread.
          * Creates a new buffer if one doesn't exist for this thread.
+         *
+         * Relies on stable OS-thread identity (thread_local cache): callers
+         * running on fiber-based job systems must pin the fiber to its thread
+         * while recording commands, or the buffer of a different thread may
+         * be written concurrently.
          */
         CommandBuffer& GetThreadBuffer() const
         {

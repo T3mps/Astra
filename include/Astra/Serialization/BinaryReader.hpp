@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstring>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -532,7 +533,7 @@ namespace Astra
          */
         uint64_t ReadComponentHash()
         {
-            uint64_t hash;
+            uint64_t hash = 0;
             (*this)(hash);
             return hash;
         }

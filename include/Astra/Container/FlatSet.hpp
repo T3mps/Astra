@@ -300,8 +300,8 @@ namespace Astra
             , m_slots(other.m_slots)
             , m_capacity(other.m_capacity)
             , m_size(other.m_size)
-            , m_tombstoneCount(other.m_tombstoneCount)
             , m_numGroups(other.m_numGroups)
+            , m_tombstoneCount(other.m_tombstoneCount)
             , m_hasher(std::move(other.m_hasher))
             , m_equal(std::move(other.m_equal))
             , m_alloc(std::move(other.m_alloc))
@@ -444,6 +444,9 @@ namespace Astra
             auto [h1, h2] = SplitHash(m_hasher(*temp));
             SizeType index = SwissTable::H1(h1, m_capacity);
             SizeType probes = 0;
+            // First empty-or-deleted slot seen on the probe path; the actual
+            // insert is deferred until the duplicate scan has terminated.
+            SizeType insertIdx = m_capacity;
             
             while (probes++ < m_capacity) ASTRA_LIKELY
             {
@@ -490,74 +493,74 @@ namespace Astra
                     }
                 }
                 
-                // Now look for empty or deleted slots to insert
-                std::uint16_t emptyOrDeleted = m_groups[groupIdx].MatchEmptyOrDeleted();
-                
-                // Phase 1: Check for empty/deleted slots from start_slot to end
-                std::uint16_t phase1Empty = emptyOrDeleted >> startSlot;
-                
-                if (phase1Empty) ASTRA_LIKELY
+                // Remember the first empty-or-deleted slot on the probe path,
+                // but do NOT insert yet: tombstones do not terminate the probe
+                // chain, so the value may still exist in a later group. Inserting
+                // at the first tombstone before the duplicate scan reaches an
+                // EMPTY slot would double-insert the value.
+                if (insertIdx == m_capacity)
                 {
-                    SizeType offset = Simd::Ops::CountTrailingZeros(phase1Empty);
-                    SizeType slotIdx = startSlot + offset;
-                    SizeType globalIdx = groupIdx * GROUP_SIZE + slotIdx;
-                    
-                    // Move the value into place
-                    std::allocator_traits<AllocatorType>::construct(
-                        m_alloc,
-                        m_slots[globalIdx].GetValue(),
-                        std::move(*temp)
-                    );
-                    
-                    cleanup.dismissed = true; // Prevent cleanup since we moved the value
-                    
-                    m_groups[groupIdx].Set(slotIdx, h2);
-                    ++m_size;
-                    
-                    return {iterator(this, globalIdx), true};
-                }
-                
-                // Phase 2: Check for empty/deleted slots from beginning to start_slot
-                if (startSlot > 0) ASTRA_LIKELY
-                {
-                    std::uint16_t phase2Mask = (1u << startSlot) - 1;
-                    std::uint16_t phase2Empty = emptyOrDeleted & phase2Mask;
-                    
-                    if (phase2Empty) ASTRA_LIKELY
+                    std::uint16_t emptyOrDeleted = m_groups[groupIdx].MatchEmptyOrDeleted();
+                    std::uint16_t phase1Empty = emptyOrDeleted >> startSlot;
+                    if (phase1Empty)
                     {
-                        SizeType slotIdx = Simd::Ops::CountTrailingZeros(phase2Empty);
-                        SizeType globalIdx = groupIdx * GROUP_SIZE + slotIdx;
-                        
-                        // Move the value into place
-                        std::allocator_traits<AllocatorType>::construct(
-                            m_alloc,
-                            m_slots[globalIdx].GetValue(),
-                            std::move(*temp)
-                        );
-                        
-                        cleanup.dismissed = true; // Prevent cleanup since we moved the value
-                        
-                        m_groups[groupIdx].Set(slotIdx, h2);
-                        ++m_size;
-                        
-                        return {iterator(this, globalIdx), true};
+                        insertIdx = groupIdx * GROUP_SIZE + startSlot + Simd::Ops::CountTrailingZeros(phase1Empty);
+                    }
+                    else if (startSlot > 0)
+                    {
+                        std::uint16_t phase2Mask = static_cast<std::uint16_t>((1u << startSlot) - 1);
+                        std::uint16_t phase2Empty = emptyOrDeleted & phase2Mask;
+                        if (phase2Empty)
+                        {
+                            insertIdx = groupIdx * GROUP_SIZE + Simd::Ops::CountTrailingZeros(phase2Empty);
+                        }
                     }
                 }
-                
-                // No space in this group, move to next
+
+                // An EMPTY slot terminates the probe chain: the value cannot live
+                // beyond this group, so it is safe to insert now.
+                if (m_groups[groupIdx].MatchEmpty() != 0) ASTRA_LIKELY
+                {
+                    break;
+                }
+
+                // No empty slot in this group, move to next
                 groupIdx = (groupIdx + 1) % m_numGroups;
                 index = groupIdx * GROUP_SIZE;
-                
+
                 // Prefetch next group
-                if (groupIdx < m_numGroups) ASTRA_LIKELY
-                {
-                    Simd::Ops::PrefetchT0(&m_groups[groupIdx]);
-                }
+                Simd::Ops::PrefetchT0(&m_groups[groupIdx]);
             }
-            
-            // Should never reach here if ReserveForInsert() works correctly
-            ASTRA_ASSERT(false, "FlatSet::Emplace failed to find insertion slot");
-            return {end(), false};
+
+            // Should never trigger if ReserveForInsert() works correctly
+            ASTRA_ASSERT(insertIdx < m_capacity, "FlatSet::Emplace failed to find insertion slot");
+            if (insertIdx >= m_capacity) ASTRA_UNLIKELY
+            {
+                return {end(), false};
+            }
+
+            SizeType insertGroup = insertIdx / GROUP_SIZE;
+            SizeType insertSlot = insertIdx % GROUP_SIZE;
+
+            // Reusing a tombstone slot reduces the tombstone count
+            if (m_groups[insertGroup].Get(insertSlot) == TOMBSTONE) ASTRA_UNLIKELY
+            {
+                --m_tombstoneCount;
+            }
+
+            // Move the value into place
+            std::allocator_traits<AllocatorType>::construct(
+                m_alloc,
+                m_slots[insertIdx].GetValue(),
+                std::move(*temp)
+            );
+
+            cleanup.dismissed = true; // Prevent cleanup since we moved the value
+
+            m_groups[insertGroup].Set(insertSlot, h2);
+            ++m_size;
+
+            return {iterator(this, insertIdx), true};
         }
         
         template<typename K>

@@ -243,7 +243,7 @@ TEST_F(RelationsTest, DescendantsTraversal)
 {
     // Create hierarchy:
     //     root
-    //    /    \
+    //    /    \.
     //  child1  child2
     //   |       |
     // grand1  grand2
@@ -303,7 +303,7 @@ TEST_F(RelationsTest, FilteredDescendants)
     auto relations = registry->GetRelations<Position>(root);
     
     size_t count = 0;
-    relations.ForEachDescendant([&](Entity entity, size_t, Position&) {
+    relations.ForEachDescendant([&](Entity, size_t, Position&) {
         count++;
         // Position is automatically provided as parameter when filtering
     });

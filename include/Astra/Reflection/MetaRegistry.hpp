@@ -6,26 +6,34 @@
 
 #include "../Component/Component.hpp"
 #include "../Container/FlatMap.hpp"
+#include "../Core/TypeContext.hpp"
 #include "../Core/TypeID.hpp"
 #include "TypeMeta.hpp"
 
 namespace Astra
 {
     /**
-     * Global registry for type metadata.
+     * Registry for type metadata, owned by a TypeContext.
      * Provides thread-safe registration and lookup of TypeMeta instances.
-     * This is a singleton that persists for the lifetime of the application.
+     * Instance() resolves through the active TypeContext, so all modules
+     * sharing one context see the same metadata.
      */
     class MetaRegistry
     {
     public:
+        MetaRegistry() = default;
+        ~MetaRegistry() = default;
+
         /**
-         * Gets the singleton instance.
+         * Gets the registry of the active TypeContext.
+         * Drains any pending static registrations first, so reflection
+         * registered during static initialization is visible here.
          */
         static MetaRegistry& Instance()
         {
-            static MetaRegistry instance;
-            return instance;
+            TypeContext* ctx = GetTypeContext();
+            Detail::DrainPendingMeta(*ctx);
+            return ctx->Meta();
         }
 
         // Deleted copy/move
@@ -262,14 +270,23 @@ namespace Astra
         }
 
     private:
-        MetaRegistry() = default;
-        ~MetaRegistry() = default;
-
         mutable std::shared_mutex m_mutex;
         FlatMap<uint64_t, std::unique_ptr<TypeMeta>> m_types;
         FlatMap<uint64_t, ComponentID> m_typeToComponentId;
         FlatMap<ComponentID, uint64_t> m_componentIdToType;
     };
+
+    // Declared in TypeContext.hpp (where MetaRegistry is forward-declared);
+    // defined here, where MetaRegistry is complete.
+    inline MetaRegistry& TypeContext::Meta()
+    {
+        std::lock_guard lock(m_metaMutex);
+        if (!m_meta)
+        {
+            m_meta = std::make_shared<MetaRegistry>();
+        }
+        return *m_meta;
+    }
 
     // ============================================================================
     // Convenience functions
@@ -332,6 +349,12 @@ namespace Astra
         /**
          * Helper struct for static registration of types.
          * Used by ASTRA_REFLECT_TYPE macro.
+         *
+         * Runs at static initialization, BEFORE a host can install a shared
+         * TypeContext, so it builds the metadata eagerly but DEFERS the
+         * registration onto the module-local pending queue. The queue drains
+         * into the installed context on SetTypeContext(), or into the
+         * module-default context on first MetaRegistry::Instance() access.
          */
         template<typename T>
         struct StaticTypeRegistrar
@@ -341,7 +364,13 @@ namespace Astra
             {
                 TypeMetaBuilder<T> builder;
                 builderFunc(builder);
-                MetaRegistry::Instance().Register(builder.Build());
+                // TypeMeta is move-only; hold it via shared_ptr so the
+                // deferred registration stays copyable for std::function.
+                auto meta = std::make_shared<TypeMeta>(builder.Build());
+                EnqueuePendingMeta([meta](TypeContext& ctx)
+                {
+                    ctx.Meta().Register(std::move(*meta));
+                });
             }
         };
     }

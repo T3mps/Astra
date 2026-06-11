@@ -289,8 +289,7 @@ TEST_F(ComponentLifecycleTest, ArchetypeTransitionLifecycle)
     Entity entity = registry->CreateEntity();
     
     registry->EmplaceComponent<LifecycleComponent>(entity, 100);
-    int initialConstructed = LifecycleComponent::stats.TotalConstructed();
-    
+
     // Causes archetype transition
     registry->EmplaceComponent<Position>(entity, 1.0f, 2.0f, 3.0f);
     
@@ -328,7 +327,7 @@ TEST_F(ComponentLifecycleTest, BatchOperationLifecycle)
             );
         });
     
-    EXPECT_EQ(LifecycleComponent::stats.valueConstructed, batchSize);
+    EXPECT_EQ(LifecycleComponent::stats.valueConstructed, static_cast<int>(batchSize));
     
     registry->DestroyEntities(entities);
     

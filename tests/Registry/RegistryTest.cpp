@@ -206,7 +206,7 @@ TEST_F(RegistryTest, ViewCreationAndIteration)
     auto posView = registry->CreateView<Position>();
     
     size_t posCount = 0;
-    posView.ForEach([&](Astra::Entity e, Position& pos) {
+    posView.ForEach([&](Astra::Entity, Position& pos) {
         posCount++;
         EXPECT_GE(pos.x, 0.0f);
         EXPECT_LT(pos.x, 10.0f);
@@ -217,7 +217,7 @@ TEST_F(RegistryTest, ViewCreationAndIteration)
     auto posVelView = registry->CreateView<Position, Velocity>();
     
     size_t posVelCount = 0;
-    posVelView.ForEach([&](Astra::Entity e, Position& pos, Velocity& vel) {
+    posVelView.ForEach([&](Astra::Entity, Position& pos, Velocity&) {
         posVelCount++;
         EXPECT_EQ(int(pos.x) % 2, 0); // Only even indices have both
     });
@@ -383,12 +383,12 @@ TEST_F(RegistryTest, SignalSystem)
     
     auto* signals = registry->GetSignalManager();
     
-    auto entityHandler = signals->On<Astra::Events::EntityCreated>().Register([&](const Astra::Events::EntityCreated& e)
+    auto entityHandler = signals->On<Astra::Events::EntityCreated>().Register([&](const Astra::Events::EntityCreated&)
     {
         entityCreatedCount++;
     });
     
-    auto componentHandler = signals->On<Astra::Events::ComponentAdded>().Register([&](const Astra::Events::ComponentAdded& e)
+    auto componentHandler = signals->On<Astra::Events::ComponentAdded>().Register([&](const Astra::Events::ComponentAdded&)
     {
         componentAddedCount++;
     });
@@ -555,14 +555,12 @@ TEST_F(RegistryTest, BatchOperationsPerformance)
     std::vector<Astra::Entity> entities(batchSize);
     
     // Test batch entity creation
-    auto start = std::chrono::high_resolution_clock::now();
-    registry->CreateEntitiesWith<Position, Velocity>(batchSize, entities, 
+    registry->CreateEntitiesWith<Position, Velocity>(batchSize, entities,
         [](size_t i)
         {
             return std::make_tuple(Position{float(i), float(i * 2), float(i * 3)}, Velocity{float(i * 10), 0.0f, 0.0f});
         });
-    auto end = std::chrono::high_resolution_clock::now();
-    
+
     // Verify all entities were created
     EXPECT_EQ(registry->Size(), batchSize);
     
@@ -605,7 +603,8 @@ TEST_F(RegistryTest, SingleEntitySerialization)
         Position{1.0f, 2.0f, 3.0f},
         Velocity{4.0f, 5.0f, 6.0f}
     );
-    
+    (void)entity;
+
     // Save to memory
     auto saveResult = registry->Save();
     ASSERT_TRUE(saveResult.IsOk());
@@ -626,7 +625,7 @@ TEST_F(RegistryTest, SingleEntitySerialization)
     // Get entities from loaded registry
     auto view = loadedRegistry->CreateView<Position, Velocity>();
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos, Velocity& vel)
+    view.ForEach([&count](Astra::Entity, Position& pos, Velocity& vel)
     {
         count++;
         EXPECT_FLOAT_EQ(pos.x, 1.0f);
@@ -693,7 +692,7 @@ TEST_F(RegistryTest, MultipleEntitiesSerialization)
     // Verify entities with Position only
     auto posOnlyView = loadedRegistry->CreateView<Position, Astra::Not<Velocity>>();
     size_t posOnlyCount = 0;
-    posOnlyView.ForEach([&posOnlyCount](Astra::Entity e, Position& pos)
+    posOnlyView.ForEach([&posOnlyCount](Astra::Entity, Position& pos)
     {
         posOnlyCount++;
         int i = int(pos.x);
@@ -706,7 +705,7 @@ TEST_F(RegistryTest, MultipleEntitiesSerialization)
     // Verify entities with Position and Velocity but not Health
     auto posVelView = loadedRegistry->CreateView<Position, Velocity, Astra::Not<Health>>();
     size_t posVelCount = 0;
-    posVelView.ForEach([&posVelCount](Astra::Entity e, Position& pos, Velocity& vel)
+    posVelView.ForEach([&posVelCount](Astra::Entity, Position& pos, Velocity& vel)
     {
         posVelCount++;
         int i = int(pos.x) - 10;
@@ -719,7 +718,7 @@ TEST_F(RegistryTest, MultipleEntitiesSerialization)
     // Verify entities with all three components
     auto allView = loadedRegistry->CreateView<Position, Velocity, Health>();
     size_t allCount = 0;
-    allView.ForEach([&allCount](Astra::Entity e, Position& pos, Velocity& vel, Health& health)
+    allView.ForEach([&allCount](Astra::Entity, Position& pos, Velocity& vel, Health& health)
     {
         allCount++;
         int i = int(pos.x) - 20;
@@ -769,7 +768,8 @@ TEST_F(RegistryTest, RelationshipSerialization)
     // But we can verify that the relationship graph was deserialized
     // and contains the right number of relationships
     const auto& graph = loadedRegistry->GetRelationshipGraph();
-    
+    (void)graph;
+
     // Check that we have parent-child relationships
     // Note: We'd need to iterate through entities to find the actual relationships
     // since entity IDs are not preserved across serialization

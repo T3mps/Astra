@@ -470,7 +470,6 @@ TEST_F(ReflectionTest, DefaultConstruct)
     bool success = meta->Construct(storage);
     EXPECT_TRUE(success);
 
-    Position* pos = reinterpret_cast<Position*>(storage);
     // Default constructed - values should be initialized
     // (C++ default initialization for float is indeterminate, but we use value-init)
 

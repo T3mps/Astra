@@ -357,11 +357,12 @@ TEST_F(EntityTest, ConstexprOperations)
     constexpr auto id = e2.GetID();
     constexpr auto version = e2.GetVersion();
     constexpr auto value = e2.GetValue();
-    
+
     static_assert(!e1.IsValid());
     static_assert(e2.IsValid());
     static_assert(id == 100);
     static_assert(version == 5);
+    (void)valid; (void)value;
     
     constexpr bool equal = (e2 == e2);
     constexpr bool notEqual = (e2 != e3);

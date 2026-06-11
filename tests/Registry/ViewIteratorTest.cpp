@@ -195,7 +195,7 @@ TEST_F(ViewIteratorTest, CompareWithForEach)
 
     // Both should have the same entities (though possibly in different order)
     EXPECT_EQ(iteratorEntities.size(), forEachEntities.size());
-    EXPECT_EQ(iteratorEntities.size(), NUM_ENTITIES);
+    EXPECT_EQ(iteratorEntities.size(), static_cast<size_t>(NUM_ENTITIES));
 
     // Sort and compare
     std::sort(iteratorEntities.begin(), iteratorEntities.end());

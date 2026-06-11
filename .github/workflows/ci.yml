@@ -1,0 +1,55 @@
+name: CI
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  PREMAKE_VERSION: 5.0.0-beta6
+
+jobs:
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download premake
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/premake/premake-core/releases/download/v${env:PREMAKE_VERSION}/premake-${env:PREMAKE_VERSION}-windows.zip" -OutFile premake.zip
+          Expand-Archive premake.zip -DestinationPath .
+      - name: Generate
+        run: .\premake5.exe vs2022
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Build (Release)
+        run: msbuild Astra.sln /p:Configuration=Release /m /v:minimal
+      - name: Test
+        run: .\bin\Release-windows-x86_64\AstraTest\AstraTest.exe --gtest_brief=1
+
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: g++
+            cc: gcc
+            packages: g++
+          - compiler: clang++
+            cc: clang
+            packages: clang
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }}
+      - name: Download premake
+        run: |
+          curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
+      - name: Generate
+        run: ./premake5 gmake2
+      - name: Build (Release, tests)
+        run: make config=release AstraTest -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.compiler }}
+      - name: Test
+        run: ./bin/Release-linux-x86_64/AstraTest/AstraTest --gtest_brief=1

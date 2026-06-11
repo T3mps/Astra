@@ -1,6 +1,6 @@
 #pragma once
 
-#define ASTRA_VERSION_MAJOR 2
+#define ASTRA_VERSION_MAJOR 3
 #define ASTRA_VERSION_MINOR 1
 #define ASTRA_VERSION_PATCH 0
 

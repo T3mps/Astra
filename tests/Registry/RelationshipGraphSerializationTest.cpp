@@ -415,7 +415,7 @@ TEST_F(RelationshipGraphSerializationTest, LargeGraph)
         EXPECT_FALSE(newGraph.HasParent(entities[0]));
         
         // Verify root has correct number of children
-        EXPECT_EQ(newGraph.GetChildren(entities[0]).size(), childrenPerNode);
+        EXPECT_EQ(newGraph.GetChildren(entities[0]).size(), static_cast<size_t>(childrenPerNode));
         
         // Spot check some relationships
         // First level children

@@ -148,10 +148,9 @@ namespace Astra::Compression::Detail
             const uint8_t* src = compressed;
 
             // Check magic number (legacy or modern)
-            bool isLegacy = false;
             if (src[0] == 0x02 && src[1] == 0x21 && src[2] == 0x4C && src[3] == 0x18)
             {
-                isLegacy = true;
+                // Legacy format - magic only
                 src += 4;
             }
             else if (src[0] == 0x04 && src[1] == 0x22 && src[2] == 0x4D && src[3] == 0x18)

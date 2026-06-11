@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <type_traits>
 #include "../Container/Bitmap.hpp"

@@ -425,6 +425,25 @@ namespace Astra
     namespace Detail
     {
         /**
+         * Yields F C::* for class types. For non-class types (e.g. reflected
+         * enums) it degrades to a plain pointer type so that member-template
+         * declarations of TypeMetaBuilder<T> remain well-formed: gcc/clang
+         * instantiate those declarations eagerly when the class template is
+         * instantiated, and "FieldType T::*" is ill-formed for non-class T.
+         */
+        template<typename C, typename F, bool = std::is_class_v<C>>
+        struct MemberPointer
+        {
+            using type = F C::*;
+        };
+
+        template<typename C, typename F>
+        struct MemberPointer<C, F, false>
+        {
+            using type = F*;
+        };
+
+        /**
          * Builder class for constructing TypeMeta.
          * Used internally by the registration macros.
          */
@@ -491,7 +510,7 @@ namespace Astra
              * @param name Field name
              * @return Reference to this builder for chaining
              */
-            template<typename FieldType, FieldType T::*FieldPtr>
+            template<typename FieldType, typename MemberPointer<T, FieldType>::type FieldPtr>
             TypeMetaBuilder& Field(std::string_view name)
             {
                 FieldInfo field = MakeFieldInfo<T, FieldType, FieldPtr>(name);

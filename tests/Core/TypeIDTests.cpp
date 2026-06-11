@@ -160,7 +160,7 @@ TEST_F(TypeIDTests, XXHashProducesExpectedValues)
     
     // Known string
     constexpr uint64_t helloHash = XXHash64("Hello", 5, 0);
-    EXPECT_NE(helloHash, 0); // Just verify it produces something
+    EXPECT_NE(helloHash, 0u); // Just verify it produces something
     
     // With different seeds
     constexpr uint64_t seed1 = XXHash64("test", 4, 1);

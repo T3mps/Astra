@@ -28,7 +28,11 @@ namespace Astra
             int indentSpaces = 2;                // Number of spaces for indentation
         };
 
-        explicit JsonSchemaGenerator(const Options& options = {})
+        // Delegating overload instead of a default argument: gcc/clang reject a
+        // default argument that needs Options' NSDMIs before the enclosing class is complete.
+        JsonSchemaGenerator() : JsonSchemaGenerator(Options{}) {}
+
+        explicit JsonSchemaGenerator(const Options& options)
             : m_options(options) {}
 
         /**

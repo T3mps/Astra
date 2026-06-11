@@ -2,16 +2,15 @@
 
 #include <algorithm>
 #include <atomic>
-#include <future>
 #include <memory>
 #include <optional>
-#include <thread>
 #include <tuple>
 #include <vector>
 
 #include "../Archetype/Archetype.hpp"
 #include "../Archetype/ArchetypeManager.hpp"
 #include "../Component/Component.hpp"
+#include "../Core/WorkScheduler.hpp"
 #include "../Entity/Entity.hpp"
 #include "Query.hpp"
 #include "ViewIterator.hpp"
@@ -26,7 +25,7 @@ namespace Astra
         // Query type extraction - must be declared early for Iterator type
         using RequiredTypes = typename Detail::QueryClassifier<QueryArgs...>::RequiredComponents;
         using OptionalTypes = typename Detail::QueryClassifier<QueryArgs...>::OptionalComponents;
-        using QueryBuilder = QueryBuilder<QueryArgs...>;
+        using QueryBuilder = Astra::QueryBuilder<QueryArgs...>;  // qualified to avoid -Wchanges-meaning
 
         // Parallel execution thresholds - based on empirical testing
         static constexpr size_t AVG_ENTITIES_PER_CHUNK = 256;                           // Typical for 16KB chunks with ~50 byte entities
@@ -38,8 +37,10 @@ namespace Astra
         static constexpr size_t MIN_ENTITIES_FOR_PARALLEL = MIN_CHUNKS_FOR_PARALLEL * AVG_ENTITIES_PER_CHUNK / 2;  // ~4 chunks worth
 
     public:
-        explicit View(std::shared_ptr<ArchetypeManager> manager) :
+        explicit View(std::shared_ptr<ArchetypeManager> manager,
+                      std::shared_ptr<IWorkScheduler> scheduler = nullptr) :
             m_archetypeManager(manager),
+            m_scheduler(std::move(scheduler)),   // null => sequential fallback
             m_lastRefreshCounter(0),
             m_lastGeneration(0)
         {
@@ -91,12 +92,16 @@ namespace Astra
             {
                 quickCount += archetype->GetEntityCount();
             }
-            
+
             if (quickCount < MIN_ENTITIES_QUICK_CHECK)
             {
                 return ForEach(std::forward<Func>(func));
             }
-            
+
+            // No scheduler injected: Astra spawns no threads — run sequentially inline.
+            if (!m_scheduler)
+                return ForEach(std::forward<Func>(func));
+
             std::vector<std::pair<Archetype*, size_t>> chunkWork;
             // Better estimation based on typical entities per 16KB chunk
             size_t estimatedChunks = (quickCount / AVG_ENTITIES_PER_CHUNK) + m_archetypes.size();
@@ -122,34 +127,16 @@ namespace Astra
             {
                 return ForEach(std::forward<Func>(func));
             }
-            
-            // Determine optimal thread count ensuring each thread gets meaningful work
-            const size_t hardwareConcurrency = std::thread::hardware_concurrency();
-            const size_t maxThreadsByWork = chunkWork.size() / MIN_CHUNKS_PER_THREAD;
-            const size_t numWorkers = std::min(hardwareConcurrency, std::max(size_t(1), maxThreadsByWork));
-            
-            std::atomic<size_t> nextChunkIndex{0};
-            std::vector<std::future<void>> futures;
-            futures.reserve(numWorkers);
-            
-            for (size_t t = 0; t < numWorkers; ++t)
-            {
-                futures.push_back(std::async(std::launch::async,
-                    [this, &func, &chunkWork, &nextChunkIndex]()
+
+            m_scheduler->ParallelFor(chunkWork.size(), MIN_CHUNKS_PER_THREAD,
+                [&](size_t begin, size_t end)
+                {
+                    for (size_t w = begin; w < end; ++w)
                     {
-                        size_t chunkIdx;
-                        while ((chunkIdx = nextChunkIndex.fetch_add(1, std::memory_order_relaxed)) < chunkWork.size())
-                        {
-                            auto [archetype, chunkIndex] = chunkWork[chunkIdx];
-                            ParallelForEachChunkImpl(archetype, chunkIndex, func, RequiredTypes{}, OptionalTypes{});
-                        }
-                    }));
-            }
-            
-            for (auto& future : futures)
-            {
-                future.wait();
-            }
+                        auto [archetype, chunkIndex] = chunkWork[w];
+                        ParallelForEachChunkImpl(archetype, chunkIndex, func, RequiredTypes{}, OptionalTypes{});
+                    }
+                });
         }
         
         ASTRA_NODISCARD size_t Size() const noexcept
@@ -373,7 +360,8 @@ namespace Astra
 
         std::vector<Archetype*> m_archetypes;
         std::shared_ptr<ArchetypeManager> m_archetypeManager;
-        
+        std::shared_ptr<IWorkScheduler> m_scheduler;  // null = sequential inline fallback
+
         uint32_t m_lastRefreshCounter = 0;
         uint32_t m_lastGeneration = 0;
     };

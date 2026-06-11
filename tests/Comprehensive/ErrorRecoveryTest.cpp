@@ -153,7 +153,7 @@ TEST_F(ErrorRecoveryTest, EntityDestructionDuringIteration)
     // Collect entities to destroy during iteration (safe pattern)
     std::vector<Entity> toDestroy;
     size_t count = 0;
-    view.ForEach([&count, &toDestroy](Entity e, Position& pos, Health& health) {
+    view.ForEach([&count, &toDestroy](Entity e, Position& pos, Health&) {
         count++;
         
         if (int(pos.x) % 10 == 0)

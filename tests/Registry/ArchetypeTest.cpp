@@ -582,7 +582,7 @@ TEST_F(ArchetypeTest, ChunkCoalescing)
     
     // Verify all remaining entities are still accessible
     size_t remainingCount = 0;
-    archetype.ForEach<Position>([&](Astra::Entity e, Position& pos) {
+    archetype.ForEach<Position>([&](Astra::Entity, Position&) {
         remainingCount++;
     });
     
@@ -736,7 +736,7 @@ TEST_F(ArchetypeTest, ComponentAccessPatterns)
     
     // 3. Partial component iteration (only Position and Velocity, not Health)
     size_t iterCount = 0;
-    archetype.ForEach<Position, Velocity>([&](Astra::Entity e, Position& pos, Velocity& vel) {
+    archetype.ForEach<Position, Velocity>([&](Astra::Entity, Position& pos, Velocity& vel) {
         vel.dx = pos.x * 2.0f;
         iterCount++;
     });

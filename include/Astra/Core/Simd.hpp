@@ -129,6 +129,7 @@ namespace Astra
                     const __m128i eq = _mm_cmpeq_epi8(group, match);
                     return static_cast<uint16_t>(_mm_movemask_epi8(eq));
 #else
+                    (void)data; (void)value;
                     return 0; // Should not reach here
 #endif
                 }
@@ -152,6 +153,7 @@ namespace Astra
                     uint8_t high_mask = vaddv_u8(high);
                     return (static_cast<uint16_t>(high_mask) << 8) | low_mask;
 #else
+                    (void)data; (void)value;
                     return 0; // Should not reach here
 #endif
                 }
@@ -181,6 +183,7 @@ namespace Astra
                     const __m128i combined = _mm_or_si128(eq1, eq2);
                     return static_cast<uint16_t>(_mm_movemask_epi8(combined));
 #else
+                    (void)data; (void)val1; (void)val2;
                     return 0;
 #endif
                 }
@@ -207,6 +210,7 @@ namespace Astra
                     uint8_t high_mask = vaddv_u8(high);
                     return (static_cast<uint16_t>(high_mask) << 8) | low_mask;
 #else
+                    (void)data; (void)val1; (void)val2;
                     return 0;
 #endif
                 }
@@ -241,6 +245,7 @@ namespace Astra
                     const __m256i eq = _mm256_cmpeq_epi8(group, match);
                     return static_cast<uint32_t>(_mm256_movemask_epi8(eq));
 #else
+                    (void)data; (void)value;
                     return 0;
 #endif
                 }
@@ -288,6 +293,7 @@ namespace Astra
                     const __m256i combined = _mm256_or_si256(eq1, eq2);
                     return static_cast<uint32_t>(_mm256_movemask_epi8(combined));
 #else
+                    (void)data; (void)val1; (void)val2;
                     return 0;
 #endif
                 }

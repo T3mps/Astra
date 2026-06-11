@@ -1,10 +1,8 @@
 #pragma once
 
 #include <atomic>
-#include <future>
 #include <memory>
 #include <queue>
-#include <thread>
 #include <type_traits>
 
 #include "../Archetype/ArchetypeManager.hpp"
@@ -12,6 +10,7 @@
 #include "../Container/SmallVector.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/Simd.hpp"
+#include "../Core/WorkScheduler.hpp"
 #include "../Entity/Entity.hpp"
 #include "Query.hpp"
 #include "RelationshipGraph.hpp"
@@ -27,9 +26,8 @@ namespace Astra
         
         static constexpr bool HAS_FILTERING = sizeof...(QueryArgs) > 0;
         
-        // Parallel execution thresholds (same as View)
+        // Parallel execution threshold: below this, sequential inline is used.
         static constexpr size_t MIN_ENTITIES_FOR_PARALLEL = 1024;
-        static constexpr size_t MIN_ENTITIES_PER_THREAD = 256;
         
         // Extract query information only if filtering
         using Classifier = std::conditional_t<HAS_FILTERING,
@@ -41,10 +39,13 @@ namespace Astra
         using OneOfGroups = typename Classifier::OneOfGroups;
         
     public:
-        Relations(std::shared_ptr<ArchetypeManager> manager, Entity entity, std::shared_ptr<const RelationshipGraph> graph) :
+        Relations(std::shared_ptr<ArchetypeManager> manager, Entity entity,
+                  std::shared_ptr<const RelationshipGraph> graph,
+                  std::shared_ptr<IWorkScheduler> scheduler = nullptr) :
             m_archetypeManager(manager),
             m_rootEntity(entity),
-            m_relationsGraph(graph)
+            m_relationsGraph(graph),
+            m_scheduler(std::move(scheduler))
         {}
         
         /**
@@ -198,73 +199,45 @@ namespace Astra
         {
             if (!m_relationsGraph) ASTRA_UNLIKELY
                 return;  // Registry destroyed
-            
+
             const auto& cache = m_relationsGraph->GetDescendantsCached(m_rootEntity);
             const size_t count = cache.entries.size();
-            
-            // Fall back to sequential for small counts
+
+            // Astra creates no threads — parallelism requires an injected scheduler.
+            if (!m_scheduler)
+            {
+                return ForEachDescendant(std::forward<Func>(func));
+            }
+
             if (count < MIN_ENTITIES_FOR_PARALLEL) ASTRA_LIKELY
             {
                 return ForEachDescendant(std::forward<Func>(func));
             }
-            
-            // Determine optimal thread count
-            const size_t hardwareConcurrency = std::thread::hardware_concurrency();
-            const size_t maxThreadsByWork = count / MIN_ENTITIES_PER_THREAD;
-            const size_t numWorkers = std::min(hardwareConcurrency, std::max(size_t(1), maxThreadsByWork));
-            
-            // Work stealing queue
-            std::atomic<size_t> nextIndex{0};
-            std::vector<std::future<void>> futures;
-            futures.reserve(numWorkers);
-            
-            // Launch worker threads
-            for (size_t t = 0; t < numWorkers; ++t)
+
+            constexpr size_t kBatchSize = 64;
+            m_scheduler->ParallelFor(count, kBatchSize, [&](size_t begin, size_t end)
             {
-                futures.push_back(std::async(std::launch::async,
-                    [this, &func, &cache, &nextIndex, count]()
+                for (size_t i = begin; i < end; ++i)
+                {
+                    const auto& entry = cache.entries[i];
+                    Entity entity = entry.entity;
+                    size_t depth = entry.depth;
+
+                    if (PassesFilter(entity))
                     {
-                        constexpr size_t BATCH_SIZE = 64; // Larger batches for parallel
-                        size_t idx;
-                        
-                        while ((idx = nextIndex.fetch_add(BATCH_SIZE, std::memory_order_relaxed)) < count)
+                        // Empty RequiredTuple covers the unfiltered case too
+                        // (no QueryArgs => no required components).
+                        if constexpr (std::tuple_size_v<RequiredTuple> == 0)
                         {
-                            const size_t end = std::min(idx + BATCH_SIZE, count);
-                            
-                            // Process batch
-                            for (size_t i = idx; i < end; ++i)
-                            {
-                                const auto& entry = cache.entries[i];
-                                Entity entity = entry.entity;
-                                size_t depth = entry.depth;
-                                
-                                if (PassesFilter(entity))
-                                {
-                                    // Inline the invocation for parallel execution
-                                    if constexpr (!HAS_FILTERING)
-                                    {
-                                        func(entity, depth);
-                                    }
-                                    else if constexpr (std::tuple_size_v<RequiredTuple> == 0)
-                                    {
-                                        func(entity, depth);
-                                    }
-                                    else
-                                    {
-                                        // Need to expand components inline for parallel
-                                        InvokeParallelWithDepth(entity, depth, func, RequiredTuple{});
-                                    }
-                                }
-                            }
+                            func(entity, depth);
                         }
-                    }));
-            }
-            
-            // Wait for all threads
-            for (auto& future : futures)
-            {
-                future.wait();
-            }
+                        else
+                        {
+                            InvokeParallelWithDepth(entity, depth, func, RequiredTuple{});
+                        }
+                    }
+                }
+            });
         }
         
     private:
@@ -500,5 +473,6 @@ namespace Astra
         std::shared_ptr<ArchetypeManager> m_archetypeManager;
         Entity m_rootEntity;
         std::shared_ptr<const RelationshipGraph> m_relationsGraph;
+        std::shared_ptr<IWorkScheduler> m_scheduler;
     };
 }

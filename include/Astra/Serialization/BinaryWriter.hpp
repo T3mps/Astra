@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstring>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -194,10 +195,7 @@ namespace Astra
             if (m_error != SerializationError::None) return;
             
             m_header.dataChecksum = m_runningChecksum;
-            
-            // Save current position
-            size_t currentPos = m_totalBytesWritten;
-            
+
             if (m_file.is_open())
             {
                 // Flush any buffered data first

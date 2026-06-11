@@ -64,7 +64,7 @@ public:
   }
 
   /// version string
-  static const char* const getVersion()
+  static const char* getVersion()
   {
     return "1.5";
   }

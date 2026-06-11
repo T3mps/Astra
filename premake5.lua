@@ -79,23 +79,21 @@ workspace "Astra"
                 
             filter "system:linux"
                 links { "pthread" }
-                buildoptions { 
-                    "-Wall", 
-                    "-Wextra", 
+                buildoptions {
+                    "-Wall",
+                    "-Wextra",
                     "-Wpedantic",
                     "-fdiagnostics-color=always",
-                    "-ftemplate-backtrace-limit=0",
-                    "-fopenmp"              -- Enable OpenMP SIMD support
+                    "-mavx"                 -- Enable AVX paths in Core/Simd.hpp (parity with /arch:AVX on MSVC)
                 }
-                
+
             filter "system:macosx"
-                buildoptions { 
-                    "-Wall", 
-                    "-Wextra", 
+                buildoptions {
+                    "-Wall",
+                    "-Wextra",
                     "-Wpedantic",
                     "-fdiagnostics-color=always",
-                    "-ftemplate-backtrace-limit=0",
-                    "-fopenmp"              -- Enable OpenMP SIMD support (requires libomp)
+                    "-mavx"                 -- Enable AVX paths in Core/Simd.hpp (parity with /arch:AVX on MSVC)
                 }
             
             filter "configurations:Debug"
@@ -142,7 +140,8 @@ workspace "Astra"
             {
                 "%{IncludeDir.Astra}",
                 "%{IncludeDir.GoogleBenchmark}",
-                "benchmark"  -- For local includes
+                "benchmark",  -- For local includes
+                "tests"       -- Reference pool reuse in benchmark tasks
             }
             
             links
@@ -174,12 +173,13 @@ workspace "Astra"
                 
             filter "system:linux"
                 links { "pthread" }
-                buildoptions { 
-                    "-Wall", 
-                    "-Wextra", 
+                -- NOTE: -march=native below is intentionally non-portable; benchmarks are
+                -- local-machine-only and are not built in CI cross-compiler jobs.
+                buildoptions {
+                    "-Wall",
+                    "-Wextra",
                     "-Wpedantic",
                     "-fdiagnostics-color=always",
-                    "-ftemplate-backtrace-limit=0",
                     "-march=native",        -- Use native CPU features
                     "-msse2",               -- Enable SSE2
                     "-msse4.2",             -- Enable SSE4.2 (includes CRC32)
@@ -191,12 +191,13 @@ workspace "Astra"
                 }
                 
             filter "system:macosx"
-                buildoptions { 
-                    "-Wall", 
-                    "-Wextra", 
+                -- NOTE: -march=native below is intentionally non-portable; benchmarks are
+                -- local-machine-only and are not built in CI cross-compiler jobs.
+                buildoptions {
+                    "-Wall",
+                    "-Wextra",
                     "-Wpedantic",
                     "-fdiagnostics-color=always",
-                    "-ftemplate-backtrace-limit=0",
                     "-march=native",        -- Use native CPU features
                     "-msse2",               -- Enable SSE2
                     "-msse4.2",             -- Enable SSE4.2

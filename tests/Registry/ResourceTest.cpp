@@ -489,7 +489,7 @@ TEST_F(ResourceTest, AlignedResourceStorage)
     ASSERT_NE(aligned, nullptr);
     
     // Check alignment (should be 32-byte aligned)
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(aligned) % 32, 0);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(aligned) % 32, 0u);
     
     // Verify data access
     for (int i = 0; i < 8; ++i)

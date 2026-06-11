@@ -80,8 +80,8 @@ namespace Astra
                 m_memory(std::exchange(other.m_memory, nullptr)),
                 m_capacity(other.m_capacity),
                 m_count(other.m_count),
-                m_componentDescriptors(std::move(other.m_componentDescriptors)),
                 m_entities(std::move(other.m_entities)),
+                m_componentDescriptors(std::move(other.m_componentDescriptors)),
                 m_componentArrays(std::move(other.m_componentArrays)),
                 m_chunkSize(other.m_chunkSize)
             {}
@@ -290,6 +290,7 @@ namespace Astra
                 // Debug validation
                 for (size_t idx : indices)
                 {
+                    (void)idx; // only used by the assert below in debug builds
                     ASTRA_ASSERT(idx < m_capacity, "BatchConstructComponent: index out of capacity");
                     // Note: We allow idx >= m_count because entities might be in the process of being added
                     // ASTRA_ASSERT(idx < m_count, "BatchConstructComponent: index out of current count");
@@ -462,7 +463,7 @@ namespace Astra
             ASTRA_NODISCARD size_t GetCapacity() const noexcept { return m_capacity; }
             ASTRA_NODISCARD Entity GetEntity(size_t index) const { ASTRA_ASSERT(index < m_count, "Index out of count"); return m_entities[index]; }
             ASTRA_NODISCARD const std::vector<Entity>& GetEntities() const { return m_entities; }
-            ASTRA_FORCEINLINE ASTRA_NODISCARD std::vector<Entity>& GetEntities() { return m_entities; }
+            ASTRA_NODISCARD ASTRA_FORCEINLINE std::vector<Entity>& GetEntities() { return m_entities; }
             
             // Optimized component array info for O(1) lookups
             struct ComponentArrayInfo
@@ -552,7 +553,11 @@ namespace Astra
             friend class ArchetypeChunkPool;
         };
         
-        explicit ArchetypeChunkPool(const Config& config = {}) : m_config(config), m_freeList(nullptr)
+        // Delegating overload instead of a default argument: gcc/clang reject a
+        // default argument that needs Config's NSDMIs before the enclosing class is complete.
+        ArchetypeChunkPool() : ArchetypeChunkPool(Config{}) {}
+
+        explicit ArchetypeChunkPool(const Config& config) : m_config(config), m_freeList(nullptr)
         {
             ASTRA_ASSERT(m_config.chunkSize >= MIN_CHUNK_SIZE && m_config.chunkSize <= MAX_CHUNK_SIZE, "Chunk size must be between 4KB and 1MB");
             ASTRA_ASSERT((m_config.chunkSize & (m_config.chunkSize - 1)) == 0, "Chunk size must be a power of 2");
@@ -594,8 +599,8 @@ namespace Astra
         ArchetypeChunkPool(ArchetypeChunkPool&& other) noexcept :
             m_config(other.m_config),
             m_blocks(std::move(other.m_blocks)),
-            m_memoryToNode(std::move(other.m_memoryToNode)),
             m_freeList(other.m_freeList),
+            m_memoryToNode(std::move(other.m_memoryToNode)),
             m_totalChunks(other.m_totalChunks.load()),
             m_freeChunks(other.m_freeChunks.load()),
             m_acquireCount(other.m_acquireCount.load()),
@@ -749,21 +754,19 @@ namespace Astra
             // Remove nodes from free list for blocks we're releasing
             ChunkNode* newFreeList = nullptr;
             ChunkNode* newFreeListTail = nullptr;
-            size_t removedNodes = 0;
-            
+
             // Build new free list without nodes from blocks being released
             ChunkNode* current = m_freeList;
             while (current)
             {
                 bool shouldKeep = true;
-                
+
                 // Check if this node belongs to a block being released
                 for (size_t i = 0; i < blocksToRelease; ++i)
                 {
                     if (current->blockIndex == emptyBlockIndices[i])
                     {
                         shouldKeep = false;
-                        removedNodes++;
                         break;
                     }
                 }

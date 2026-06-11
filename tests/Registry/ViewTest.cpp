@@ -91,7 +91,7 @@ TEST_F(ViewTest, BasicViewIteration)
     
     // Count entities with ForEach
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos) {
+    view.ForEach([&count](Astra::Entity, Position& pos) {
         count++;
         EXPECT_GE(pos.x, 0.0f);
         EXPECT_LT(pos.x, 100.0f);
@@ -111,7 +111,7 @@ TEST_F(ViewTest, MultipleRequiredComponents)
     auto view = registry->CreateView<Position, Velocity>();
     
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos, Velocity& vel) {
+    view.ForEach([&count](Astra::Entity, Position& pos, Velocity&) {
         count++;
         // Only even indices should have both
         EXPECT_EQ(int(pos.x) % 2, 0);
@@ -131,7 +131,7 @@ TEST_F(ViewTest, NotModifier)
     auto view = registry->CreateView<Position, Astra::Not<Static>>();
     
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos) {
+    view.ForEach([&count](Astra::Entity, Position& pos) {
         count++;
         // Should not be divisible by 5 (Static entities)
         EXPECT_NE(int(pos.x) % 5, 0);
@@ -153,7 +153,7 @@ TEST_F(ViewTest, OptionalModifier)
     size_t totalCount = 0;
     size_t withHealthCount = 0;
     
-    view.ForEach([&](Astra::Entity e, Position& pos, Health* health) {
+    view.ForEach([&](Astra::Entity, Position& pos, Health* health) {
         totalCount++;
         if (health != nullptr)
         {
@@ -179,7 +179,7 @@ TEST_F(ViewTest, AnyModifier)
     auto view = registry->CreateView<Position, Astra::Any<Player, Enemy>>();
     
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos) {
+    view.ForEach([&count](Astra::Entity, Position& pos) {
         count++;
         // Should be either < 10 (Player) or >= 90 (Enemy)
         EXPECT_TRUE(pos.x < 10.0f || pos.x >= 90.0f);
@@ -204,7 +204,7 @@ TEST_F(ViewTest, CombinedModifiers)
     size_t count = 0;
     size_t withVelocityCount = 0;
     
-    view.ForEach([&](Astra::Entity e, Position& pos, Velocity* vel) {
+    view.ForEach([&](Astra::Entity, Position& pos, Velocity* vel) {
         count++;
         
         // Must be Player or Enemy
@@ -233,7 +233,7 @@ TEST_F(ViewTest, EmptyView)
     auto view = registry->CreateView<Position>();
     
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos)
+    view.ForEach([&count](Astra::Entity, Position&)
     {
         count++;
     });
@@ -254,7 +254,7 @@ TEST_F(ViewTest, ViewInvalidation)
     
     // Initially should have 1 entity (e2)
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos, Velocity& vel) {
+    view.ForEach([&count](Astra::Entity, Position&, Velocity&) {
         count++;
     });
     EXPECT_EQ(count, 1u);
@@ -264,7 +264,7 @@ TEST_F(ViewTest, ViewInvalidation)
     
     // View should now see 2 entities
     count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos, Velocity& vel) {
+    view.ForEach([&count](Astra::Entity, Position&, Velocity&) {
         count++;
     });
     EXPECT_EQ(count, 2u);
@@ -274,7 +274,7 @@ TEST_F(ViewTest, ViewInvalidation)
     
     // Back to 1 entity
     count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos, Velocity& vel) {
+    view.ForEach([&count](Astra::Entity, Position&, Velocity&) {
         count++;
     });
     EXPECT_EQ(count, 1u);
@@ -302,7 +302,7 @@ TEST_F(ViewTest, PerformanceCharacteristics)
     
     // Test ForEach performance
     size_t forEachCount = 0;
-    view.ForEach([&forEachCount](Astra::Entity e, Position& pos, Velocity& vel) {
+    view.ForEach([&forEachCount](Astra::Entity, Position& pos, Velocity& vel) {
         forEachCount++;
         pos.x += vel.dx; // Simple operation
     });
@@ -322,7 +322,7 @@ TEST_F(ViewTest, NoMatchingEntities)
     auto view = registry->CreateView<Position, Player, Enemy>();
     
     size_t count = 0;
-    view.ForEach([&count](Astra::Entity e, Position& pos, Player& p, Enemy& en) {
+    view.ForEach([&count](Astra::Entity, Position&, Player&, Enemy&) {
         count++;
     });
     
@@ -344,7 +344,7 @@ TEST_F(ViewTest, ViewSizeEstimation)
     
     auto countEntities = [](auto& view) {
         size_t count = 0;
-        view.ForEach([&count](auto... args) { count++; });
+        view.ForEach([&count](auto...) { count++; });
         return count;
     };
     
@@ -369,7 +369,7 @@ TEST_F(ViewTest, ModificationDuringIteration)
     auto view = registry->CreateView<Position>();
     
     // Modify components during iteration
-    view.ForEach([](Astra::Entity e, Position& pos) {
+    view.ForEach([](Astra::Entity, Position& pos) {
         pos.x *= 2.0f;
     });
     

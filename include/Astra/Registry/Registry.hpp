@@ -18,6 +18,7 @@
 #include "../Core/Result.hpp"
 #include "../Core/Signal.hpp"
 #include "../Core/TypeID.hpp"
+#include "../Core/WorkScheduler.hpp"
 #include "../Entity/Entity.hpp"
 #include "../Entity/EntityManager.hpp"
 #include "../Serialization/BinaryReader.hpp"
@@ -38,6 +39,11 @@ namespace Astra
             EntityManager::Config entityManagerConfig;
             ArchetypeChunkPool::Config chunkPoolConfig;
             ResourceStorage::Config resourceStorageConfig;
+            // Scheduler used by parallel iteration/execution. Astra creates no threads:
+            // null (the default) means every Parallel* API runs sequentially inline.
+            // Hosts inject one shared instance (e.g. an enkiTS adapter) -- and in
+            // multi-module (DLL) setups, the SAME instance into every module.
+            std::shared_ptr<IWorkScheduler> workScheduler;
         };
         
         explicit Registry(const Config& config = {}) :
@@ -45,7 +51,8 @@ namespace Astra
             m_componentRegistry(std::make_shared<ComponentRegistry>()),
             m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
-            m_resourceStorage(m_componentRegistry, config.resourceStorageConfig)
+            m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
+            m_workScheduler(config.workScheduler)
         {}
         
         Registry(const EntityManager::Config& entityConfig, const ArchetypeChunkPool::Config& chunkConfig) :
@@ -53,23 +60,26 @@ namespace Astra
             m_componentRegistry(std::make_shared<ComponentRegistry>()),
             m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, chunkConfig)),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
-            m_resourceStorage(m_componentRegistry)
+            m_resourceStorage(m_componentRegistry),
+            m_workScheduler(nullptr)
         {}
         
         Registry(std::shared_ptr<ComponentRegistry> componentRegistry, const Config& config = {}) :
             m_entityManager(config.entityManagerConfig),
             m_componentRegistry(std::move(componentRegistry)),
             m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
+            m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
-            m_relationshipGraph(std::make_shared<RelationshipGraph>())
+            m_workScheduler(config.workScheduler)
         {}
         
         explicit Registry(const Registry& other, const Config& config = {}) :
             m_entityManager(config.entityManagerConfig),
             m_componentRegistry(other.m_componentRegistry),
             m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
+            m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
-            m_relationshipGraph(std::make_shared<RelationshipGraph>())
+            m_workScheduler(config.workScheduler)
         {}
 
         ~Registry() = default;
@@ -970,7 +980,7 @@ namespace Astra
         template<ValidQueryArg... QueryArgs>
         ASTRA_NODISCARD auto CreateView()
         {
-            return View<QueryArgs...>(m_archetypeManager);
+            return View<QueryArgs...>(m_archetypeManager, m_workScheduler);
         }
         
         void Clear()
@@ -1071,7 +1081,11 @@ namespace Astra
             }
         };
         
-        DefragmentationResult Defragment(const DefragmentationOptions& options = {})
+        // Overload instead of a default argument: gcc/clang reject a default argument
+        // that needs DefragmentationOptions' NSDMIs before the enclosing class is complete.
+        DefragmentationResult Defragment() { return Defragment(DefragmentationOptions{}); }
+
+        DefragmentationResult Defragment(const DefragmentationOptions& options)
         {
             DefragmentationResult result;
             
@@ -1193,7 +1207,7 @@ namespace Astra
         template<typename... QueryArgs>
         ASTRA_NODISCARD Relations<QueryArgs...> GetRelations(Entity entity) const
         {
-            return Relations<QueryArgs...>(m_archetypeManager, entity, m_relationshipGraph);
+            return Relations<QueryArgs...>(m_archetypeManager, entity, m_relationshipGraph, m_workScheduler);
         }
         
         void SetParent(Entity child, Entity parent)
@@ -1378,7 +1392,11 @@ namespace Astra
             size_t compressionThreshold = 1024; // Only compress blocks larger than this
         };
         
-        Result<void, SerializationError> Save(const std::filesystem::path& path, const SaveConfig& config = SaveConfig{}) const
+        // Overload instead of a default argument: gcc/clang reject a default argument
+        // that needs SaveConfig's NSDMIs before the enclosing class is complete.
+        Result<void, SerializationError> Save(const std::filesystem::path& path) const { return Save(path, SaveConfig{}); }
+
+        Result<void, SerializationError> Save(const std::filesystem::path& path, const SaveConfig& config) const
         {
             BinaryWriter::Config writerConfig;
             writerConfig.compressionMode = config.compressionMode;
@@ -1411,7 +1429,9 @@ namespace Astra
                 Result<void, SerializationError>::Ok();
         }
         
-        Result<std::vector<std::byte>, SerializationError> Save(const SaveConfig& config = SaveConfig{}) const
+        Result<std::vector<std::byte>, SerializationError> Save() const { return Save(SaveConfig{}); }
+
+        Result<std::vector<std::byte>, SerializationError> Save(const SaveConfig& config) const
         {
             std::vector<std::byte> buffer;
             
@@ -1516,5 +1536,6 @@ namespace Astra
         std::shared_ptr<RelationshipGraph> m_relationshipGraph;
         SignalManager m_signalManager;
         ResourceStorage m_resourceStorage;
+        std::shared_ptr<IWorkScheduler> m_workScheduler;  // null = sequential inline fallback
     };
 }

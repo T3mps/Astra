@@ -126,7 +126,7 @@ TEST_F(FlatMapTest, EraseOperations)
     // Erase by iterator
     auto it = map.Find(3);
     EXPECT_NE(it, map.end());
-    auto next_it = map.Erase(it);
+    map.Erase(it);
     EXPECT_EQ(map.Size(), 8u);
     EXPECT_EQ(map.Find(3), map.end());
     
@@ -295,7 +295,7 @@ TEST_F(FlatMapTest, LargeScaleOperations)
         map[i] = i * i;
     }
     
-    EXPECT_EQ(map.Size(), N);
+    EXPECT_EQ(map.Size(), static_cast<size_t>(N));
     
     // Verify all elements
     for (int i = 0; i < N; ++i)
@@ -311,7 +311,7 @@ TEST_F(FlatMapTest, LargeScaleOperations)
         map.Erase(i);
     }
     
-    EXPECT_EQ(map.Size(), N / 2);
+    EXPECT_EQ(map.Size(), static_cast<size_t>(N / 2));
     
     // Verify remaining
     for (int i = 0; i < N; ++i)
@@ -543,6 +543,7 @@ TEST_F(FlatMapTest, ConstCorrectness)
     size_t count = 0;
     for (const auto& [key, value] : constMap)
     {
+        (void)key; (void)value;
         ++count;
     }
     EXPECT_EQ(count, 2u);

@@ -34,7 +34,7 @@ TEST_F(CommandBufferTest, CreateEntityWithComponents)
     // Verify entity was created and has components
     auto view = registry->CreateView<Position, Velocity>();
     int count = 0;
-    view.ForEach([&count](Entity e, const Position& pos, const Velocity& vel) {
+    view.ForEach([&count](Entity, const Position& pos, const Velocity& vel) {
         count++;
         EXPECT_EQ(pos.x, 1.0f);
         EXPECT_EQ(pos.y, 2.0f);
@@ -77,7 +77,7 @@ TEST_F(CommandBufferTest, BatchOperations)
     // Verify all entities have the component
     auto view = registry->CreateView<Position>();
     int count = 0;
-    view.ForEach([&count](Entity e, const Position& pos) {
+    view.ForEach([&count](Entity, const Position& pos) {
         count++;
         EXPECT_EQ(pos.x, 10.0f);
         EXPECT_EQ(pos.y, 20.0f);
@@ -127,7 +127,7 @@ TEST_F(CommandBufferTest, Relationships)
         realEntities.push_back(e);
     });
     
-    EXPECT_EQ(realEntities.size(), 3);
+    EXPECT_EQ(realEntities.size(), 3u);
     
     // Check parent-child relationships
     for (size_t i = 1; i < realEntities.size(); ++i)
@@ -154,7 +154,7 @@ TEST_F(CommandBufferTest, MixedCommands)
     // Verify everything worked
     auto view = registry->CreateView<>();
     int entityCount = 0;
-    view.ForEach([&entityCount](Entity e) {
+    view.ForEach([&entityCount](Entity) {
         entityCount++;
     });
     EXPECT_EQ(entityCount, 2);
@@ -168,7 +168,7 @@ TEST_F(CommandBufferTest, ClearAndReuse)
     cmdBuffer->Execute();
     
     // Verify first batch
-    EXPECT_EQ(registry->Size(), 1);
+    EXPECT_EQ(registry->Size(), 1u);
     
     // Second batch (buffer should be cleared after Execute)
     Entity temp2 = cmdBuffer->CreateEntity();
@@ -176,15 +176,16 @@ TEST_F(CommandBufferTest, ClearAndReuse)
     cmdBuffer->Execute();
     
     // Verify second batch
-    EXPECT_EQ(registry->Size(), 2);
+    EXPECT_EQ(registry->Size(), 2u);
     
     // Manual clear and reuse
     cmdBuffer->Clear();
     EXPECT_TRUE(cmdBuffer->IsEmpty());
     
     Entity temp3 = cmdBuffer->CreateEntity();
+    (void)temp3;
     cmdBuffer->Execute();
-    EXPECT_EQ(registry->Size(), 3);
+    EXPECT_EQ(registry->Size(), 3u);
 }
 
 TEST_F(CommandBufferTest, ParallelCommandBuffer)
@@ -204,12 +205,12 @@ TEST_F(CommandBufferTest, ParallelCommandBuffer)
     parallelBuffer.Execute();
     
     // Verify entities were created
-    EXPECT_EQ(registry->Size(), 2);
+    EXPECT_EQ(registry->Size(), 2u);
     
     auto posView = registry->CreateView<Position>();
     auto velView = registry->CreateView<Velocity>();
-    EXPECT_EQ(posView.Size(), 1);
-    EXPECT_EQ(velView.Size(), 1);
+    EXPECT_EQ(posView.Size(), 1u);
+    EXPECT_EQ(velView.Size(), 1u);
 }
 
 TEST_F(CommandBufferTest, EmplaceComponent)
@@ -225,7 +226,7 @@ TEST_F(CommandBufferTest, EmplaceComponent)
     // Verify components were emplaced
     auto view = registry->CreateView<Position, Velocity>();
     int count = 0;
-    view.ForEach([&count](Entity e, const Position& pos, const Velocity& vel) {
+    view.ForEach([&count](Entity, const Position& pos, const Velocity& vel) {
         count++;
         EXPECT_EQ(pos.x, 10.0f);
         EXPECT_EQ(pos.y, 20.0f);
@@ -254,7 +255,7 @@ TEST_F(CommandBufferTest, EmplaceComponents)
     // Verify all entities have the emplaced component
     auto view = registry->CreateView<Position>();
     int count = 0;
-    view.ForEach([&count](Entity e, const Position& pos) {
+    view.ForEach([&count](Entity, const Position& pos) {
         count++;
         EXPECT_EQ(pos.x, 100.0f);
         EXPECT_EQ(pos.y, 200.0f);
@@ -325,12 +326,12 @@ TEST_F(CommandBufferTest, ExtendedRelationshipCommands)
     view.ForEach([&realEntities](Entity e) {
         realEntities.push_back(e);
     });
-    ASSERT_EQ(realEntities.size(), 4);
+    ASSERT_EQ(realEntities.size(), 4u);
     
     // Verify parent-child relationships
     Entity realParent = realEntities[0];
     auto children = registry->GetChildren(realParent);
-    EXPECT_EQ(children.size(), 3);
+    EXPECT_EQ(children.size(), 3u);
     
     // Remove a specific child
     cmdBuffer->RemoveChild(realParent, children[0]);
@@ -338,7 +339,7 @@ TEST_F(CommandBufferTest, ExtendedRelationshipCommands)
     
     // Verify child was removed
     auto remainingChildren = registry->GetChildren(realParent);
-    EXPECT_EQ(remainingChildren.size(), 2);
+    EXPECT_EQ(remainingChildren.size(), 2u);
     
     // Remove all remaining children
     cmdBuffer->RemoveAllChildren(realParent);
@@ -346,5 +347,5 @@ TEST_F(CommandBufferTest, ExtendedRelationshipCommands)
     
     // Verify all children removed
     auto finalChildren = registry->GetChildren(realParent);
-    EXPECT_EQ(finalChildren.size(), 0);
+    EXPECT_EQ(finalChildren.size(), 0u);
 }

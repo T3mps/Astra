@@ -39,8 +39,12 @@ namespace Astra
         // Hash splitting functions
         inline uint8_t H2(size_t hash) noexcept
         {
-            // Use top 7 bits for metadata
-            return static_cast<uint8_t>(hash >> 57) & 0x7F;
+            // Use top 7 bits for metadata. Group::Match assumes the probe byte
+            // is in [1, 127], but degenerate hashers can produce all-zero high
+            // bits, so fold 0 to 1 here. This guarantees the valid range
+            // centrally for every hasher (collisions on 1 are legal).
+            uint8_t h2 = static_cast<uint8_t>(hash >> 57) & 0x7F;
+            return h2 == 0 ? static_cast<uint8_t>(1) : h2;
         }
         
         inline size_t H1(size_t hash, size_t capacity) noexcept

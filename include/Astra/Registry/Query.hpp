@@ -13,10 +13,6 @@
 
 namespace Astra
 {
-    // Forward declaration of MakeComponentMask from Archetype.hpp
-    template<Component... Components>
-    ASTRA_NODISCARD constexpr ComponentMask MakeComponentMask() noexcept;
-    
     // Forward declarations
     template<typename T> struct Optional;
     template<typename T> struct Not;
@@ -178,15 +174,14 @@ namespace Astra
             };
             
             // Get required components (non-modified)
+            // Primary template handles the empty pack; explicit specialization in
+            // class scope is ill-formed for gcc/clang (MSVC permits it).
             template<typename... Args>
-            struct GetRequired;
-            
-            template<>
-            struct GetRequired<>
+            struct GetRequired
             {
                 using type = std::tuple<>;
             };
-            
+
             template<typename T, typename... Rest>
             struct GetRequired<T, Rest...>
             {

@@ -102,7 +102,7 @@ namespace Astra
     };
     
     template<Component... Components>
-    ASTRA_NODISCARD constexpr ComponentMask MakeComponentMask() noexcept
+    ASTRA_NODISCARD ComponentMask MakeComponentMask() noexcept
     {
         ComponentMask mask{};
         ((mask.Set(TypeID<Components>::Value())), ...);
@@ -444,8 +444,6 @@ namespace Astra
 
             ASTRA_ASSERT(dstChunkIndex < m_chunks.size(), "Destination chunk index out of bounds");
             ASTRA_ASSERT(srcChunkIndex < srcArchetype.m_chunks.size(), "Source chunk index out of bounds");
-
-            Entity srcEntity = srcArchetype.m_chunks[srcChunkIndex]->GetEntity(srcEntityIndex);
 
             auto& dstChunk = m_chunks[dstChunkIndex];
             auto& srcChunk = srcArchetype.m_chunks[srcChunkIndex];
@@ -1207,6 +1205,7 @@ namespace Astra
         ASTRA_FORCEINLINE void ForEachImpl(ArchetypeChunk* chunk, size_t count, Func&& func, std::index_sequence<Is...>)
         {
             auto arrays = std::tuple{chunk->GetComponentArray<Components>()...};
+            (void)arrays; // silence -Wunused-but-set-variable when Components is empty
             const auto& entities = chunk->GetEntities();
 
             for (size_t i = 0; i < count; ++i)

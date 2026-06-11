@@ -75,7 +75,7 @@ namespace Astra
 
             template<typename T>
             ASTRA_NODISCARD constexpr explicit operator T() const noexcept
-                requires std::convertible_to<StorageType, T> && !std::same_as<T, bool>
+                requires std::convertible_to<StorageType, T> && (!std::same_as<T, bool>)
             { 
                 return static_cast<T>(m_entity);
             }
@@ -158,6 +158,8 @@ namespace Astra
             // Swiss table H2 extracts high 7 bits: (hash >> 57) & 0x7F
             // H2 must be in range [1, 127] for proper match operations
             // Check if high 7 bits are zero and fix them
+            // Note: SwissTable::H2 (Container/Swiss.hpp) now guarantees this
+            // centrally for every hasher; this fixup is kept as redundant hardening.
             if (((hash >> 57) & 0x7F) == 0)
             {
                 // Set bit 57 to ensure H2 != 0

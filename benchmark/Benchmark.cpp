@@ -1,10 +1,23 @@
 #include <Astra/Astra.hpp>
+#include <Support/TestWorkerPool.hpp>  // reference pool via the "tests" includedir
 #include <benchmark/benchmark.h>
 #include <cstdint>
+#include <memory>
 #include <queue>
 #include <random>
 #include <thread>
 #include <vector>
+
+namespace
+{
+    // Shared pool for all parallel benchmarks. Astra itself creates no
+    // threads; benchmarks inject the test-support reference scheduler.
+    std::shared_ptr<Astra::IWorkScheduler> BenchPool()
+    {
+        static auto s_pool = std::make_shared<Astra::Testing::TestWorkerPool>();
+        return s_pool;
+    }
+}
 
 struct Position
 {
@@ -632,8 +645,10 @@ static void BM_RangeForFiveComponents(benchmark::State& state)
 static void BM_ParallelIterateSingleComponent(benchmark::State& state)
 {
     const size_t count = state.range(0);
-    Astra::Registry registry;
-    
+    Astra::Registry::Config config;
+    config.workScheduler = BenchPool();
+    Astra::Registry registry(config);
+
     for (size_t i = 0; i < count; ++i)
     {
         auto entity = registry.CreateEntity();
@@ -657,8 +672,10 @@ static void BM_ParallelIterateSingleComponent(benchmark::State& state)
 static void BM_ParallelIterateTwoComponents(benchmark::State& state)
 {
     const size_t count = state.range(0);
-    Astra::Registry registry;
-    
+    Astra::Registry::Config config;
+    config.workScheduler = BenchPool();
+    Astra::Registry registry(config);
+
     for (size_t i = 0; i < count; ++i)
     {
         auto entity = registry.CreateEntity();
@@ -684,13 +701,15 @@ static void BM_ParallelIterateTwoComponents(benchmark::State& state)
 static void BM_ParallelIterateTwoComponentsHalf(benchmark::State& state)
 {
     const size_t count = state.range(0);
-    Astra::Registry registry;
-    
+    Astra::Registry::Config config;
+    config.workScheduler = BenchPool();
+    Astra::Registry registry(config);
+
     for (size_t i = 0; i < count; ++i)
     {
         auto entity = registry.CreateEntity();
         registry.EmplaceComponent<Velocity>(entity);
-        
+
         if (i % 2)
         {
             registry.EmplaceComponent<Position>(entity);
@@ -716,13 +735,15 @@ static void BM_ParallelIterateTwoComponentsHalf(benchmark::State& state)
 static void BM_ParallelIterateTwoComponentsOne(benchmark::State& state)
 {
     const size_t count = state.range(0);
-    Astra::Registry registry;
-    
+    Astra::Registry::Config config;
+    config.workScheduler = BenchPool();
+    Astra::Registry registry(config);
+
     for (size_t i = 0; i < count; ++i)
     {
         auto entity = registry.CreateEntity();
         registry.EmplaceComponent<Velocity>(entity);
-        
+
         if (i == count / 2)
         {
             registry.EmplaceComponent<Position>(entity);
@@ -747,8 +768,10 @@ static void BM_ParallelIterateTwoComponentsOne(benchmark::State& state)
 static void BM_ParallelIterateThreeComponents(benchmark::State& state)
 {
     const size_t count = state.range(0);
-    Astra::Registry registry;
-    
+    Astra::Registry::Config config;
+    config.workScheduler = BenchPool();
+    Astra::Registry registry(config);
+
     for (size_t i = 0; i < count; ++i)
     {
         auto entity = registry.CreateEntity();
@@ -776,8 +799,10 @@ static void BM_ParallelIterateThreeComponents(benchmark::State& state)
 static void BM_ParallelIterateFiveComponents(benchmark::State& state)
 {
     const size_t count = state.range(0);
-    Astra::Registry registry;
-    
+    Astra::Registry::Config config;
+    config.workScheduler = BenchPool();
+    Astra::Registry registry(config);
+
     for (size_t i = 0; i < count; ++i)
     {
         auto entity = registry.CreateEntity();
@@ -1051,20 +1076,22 @@ static void BM_ParallelForEachDescendant(benchmark::State& state)
         branching = 6;
     }
     
-    Astra::Registry registry;
+    Astra::Registry::Config config;
+    config.workScheduler = BenchPool();
+    Astra::Registry registry(config);
     std::vector<Astra::Entity> allEntities;
-    
+
     std::queue<std::pair<Astra::Entity, size_t>> toProcess;
     auto root = registry.CreateEntity();
     registry.EmplaceComponent<Position>(root);
     allEntities.push_back(root);
     toProcess.push({root, 0});
-    
+
     while (!toProcess.empty() && allEntities.size() < targetCount)
     {
         auto [parent, currentDepth] = toProcess.front();
         toProcess.pop();
-        
+
         if (currentDepth < depth)
         {
             for (size_t i = 0; i < branching && allEntities.size() < targetCount; ++i) {
@@ -1076,7 +1103,7 @@ static void BM_ParallelForEachDescendant(benchmark::State& state)
             }
         }
     }
-    
+
     for (auto _ : state)
     {
         auto relations = registry.GetRelations<Position>(root);
@@ -1086,7 +1113,7 @@ static void BM_ParallelForEachDescendant(benchmark::State& state)
             benchmark::DoNotOptimize(count.fetch_add(1));
         });
     }
-    
+
     state.SetItemsProcessed(state.iterations() * allEntities.size());
 }
 
@@ -1186,9 +1213,11 @@ static void BM_SystemScheduler_Parallel(benchmark::State& state)
     // This system depends on Position from Physics
     scheduler.AddSystem<BoundsCheckSystem>();     // Auto-detects: Reads<Position>, Writes<Position>
 
+    Astra::ParallelExecutor executor(BenchPool());
+
     for (auto _ : state)
     {
-        scheduler.Execute(registry);
+        scheduler.Execute(registry, &executor);
     }
 
     state.SetItemsProcessed(state.iterations() * count * 4);  // 4 systems

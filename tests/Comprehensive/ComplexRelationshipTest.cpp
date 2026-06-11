@@ -176,7 +176,7 @@ TEST_F(ComplexRelationshipTest, VeryWideHierarchy)
 TEST_F(ComplexRelationshipTest, DiamondHierarchy)
 {
     //     root
-    //    /    \
+    //    /    \.
     //   A      B
     //    \    /
     //     child
@@ -203,6 +203,7 @@ TEST_F(ComplexRelationshipTest, DiamondHierarchy)
     size_t aChildCount = 0;
     for (Entity c : aRelations.GetChildren())
     {
+        (void)c;
         aChildCount++;
     }
     EXPECT_EQ(aChildCount, 0u);

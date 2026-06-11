@@ -502,8 +502,6 @@ namespace Astra
         template<Component T>
         ASTRA_NODISCARD T* GetComponent(Entity entity)
         {
-            ComponentID componentId = TypeID<T>::Value();
-            
             auto it = m_entityMap.find(entity);
             if (it == m_entityMap.end()) ASTRA_UNLIKELY return nullptr;
             
@@ -585,7 +583,11 @@ namespace Astra
         };
         
         // Public defragmentation API - orchestrates archetype-level defragmentation
-        DefragmentResult Defragment(const DefragmentOptions& options = {})
+        // Overload instead of a default argument: gcc/clang reject a default argument
+        // that needs DefragmentOptions' NSDMIs before the enclosing class is complete.
+        DefragmentResult Defragment() { return Defragment(DefragmentOptions{}); }
+
+        DefragmentResult Defragment(const DefragmentOptions& options)
         {
             DefragmentResult result;
             result.totalArchetypes = m_archetypes.size();
@@ -814,7 +816,7 @@ namespace Astra
         struct ArchetypeEntry
         {
             std::unique_ptr<Archetype> archetype;
-            uint32_t creationGeneration;  // Generation when this archetype was created
+            uint32_t creationGeneration = 0;  // Generation when this archetype was created
         };
 
         template<Component... Components>

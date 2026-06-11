@@ -32,8 +32,17 @@ namespace Astra
 {
     // Cache line size constants for proper alignment
 #ifdef __cpp_lib_hardware_interference_size
+    // gcc warns that this value can vary with -mtune; it is only used for
+    // intra-build alignment, never serialized, so the variance is acceptable.
+    #if defined(__GNUC__) && !defined(__clang__)
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Winterference-size"
+    #endif
     inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = std::hardware_destructive_interference_size;
     inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = std::hardware_constructive_interference_size;
+    #if defined(__GNUC__) && !defined(__clang__)
+        #pragma GCC diagnostic pop
+    #endif
 #else
     // Platform-specific fallbacks when C++17 hardware_interference_size is not available
     #if defined(ASTRA_ARCH_X64) || defined(ASTRA_ARCH_X86)
@@ -175,6 +184,7 @@ namespace Astra
                 
                 // Try different huge page sizes
                 #ifdef MAP_HUGE_2MB
+                {
                     void* ptr = mmap(nullptr, hugePagesSize, prot,
                         flags_mmap | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
                     if (ptr != MAP_FAILED)
@@ -182,20 +192,21 @@ namespace Astra
                         result.ptr = ptr;
                         result.size = hugePagesSize;
                         result.usedHugePages = true;
-                        
+
                         // Advise kernel about huge pages if not already using them
                         #ifdef MADV_HUGEPAGE
                             madvise(ptr, hugePagesSize, MADV_HUGEPAGE);
                         #endif
-                        
+
                         if (zeroMemory)
                         {
                             std::memset(ptr, 0, hugePagesSize);
                         }
                         return result;
                     }
+                }
                 #endif
-                
+
                 // Try generic huge pages
                 void* ptr = mmap(nullptr, hugePagesSize, prot,
                     flags_mmap | MAP_HUGETLB, -1, 0);
@@ -204,7 +215,7 @@ namespace Astra
                     result.ptr = ptr;
                     result.size = hugePagesSize;
                     result.usedHugePages = true;
-                    
+
                     if (zeroMemory)
                     {
                         std::memset(ptr, 0, hugePagesSize);

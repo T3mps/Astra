@@ -626,3 +626,50 @@ TEST_F(ComponentRegistryTest, ComponentEnumeration)
     EXPECT_TRUE(allComponents.Contains(Astra::TypeID<Velocity>::Value()));
     EXPECT_TRUE(allComponents.Contains(Astra::TypeID<Health>::Value()));
 }
+
+// Probe types at namespace scope to avoid MSVC concept/name issues with local structs
+namespace Astra_Test_ReReg
+{
+    struct ReRegProbe { int v; };
+    struct IdemProbe  { int v; };
+    struct FreshProbe { int v; };
+}
+
+TEST(ComponentRegistryReRegister, ReRegisterOverwritesDescriptor)
+{
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponent<Astra_Test_ReReg::ReRegProbe>();
+    const auto* before = registry.GetComponentDescriptor(Astra::TypeID<Astra_Test_ReReg::ReRegProbe>::Value());
+    ASSERT_NE(before, nullptr);
+    const auto id   = before->id;
+    const auto hash = before->hash;
+
+    // Re-registration must keep the same id (hash-stable via TypeContext)
+    // and rebuild the descriptor (in a real reload, the function pointers
+    // move into the newly loaded module).
+    registry.ReRegisterComponent<Astra_Test_ReReg::ReRegProbe>();
+    const auto* after = registry.GetComponentDescriptor(id);
+    ASSERT_NE(after, nullptr);
+    EXPECT_EQ(after->id, id);
+    EXPECT_EQ(after->hash, hash);
+    EXPECT_NE(after->defaultConstruct, nullptr);
+    EXPECT_NE(after->destruct, nullptr);
+}
+
+TEST(ComponentRegistryReRegister, RegisterRemainsIdempotent)
+{
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponent<Astra_Test_ReReg::IdemProbe>();
+    const size_t count = registry.Size();
+    registry.RegisterComponent<Astra_Test_ReReg::IdemProbe>();
+    EXPECT_EQ(registry.Size(), count);
+}
+
+TEST(ComponentRegistryReRegister, ReRegisterOnUnregisteredActsAsRegister)
+{
+    Astra::ComponentRegistry registry;
+    registry.ReRegisterComponent<Astra_Test_ReReg::FreshProbe>();
+    const auto* desc = registry.GetComponentDescriptor(Astra::TypeID<Astra_Test_ReReg::FreshProbe>::Value());
+    ASSERT_NE(desc, nullptr);
+    EXPECT_EQ(registry.Size(), 1u);
+}

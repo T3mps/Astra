@@ -242,7 +242,7 @@ TEST_F(ResourceExhaustionTest, RapidArchetypeTransitions)
     
     // Memory usage should be reasonable
     auto memUsage = registry->GetArchetypeMemoryUsage();
-    EXPECT_LT(memUsage, 1024 * 1024); // Less than 1MB for this simple test
+    EXPECT_LT(memUsage, 1024u * 1024u); // Less than 1MB for this simple test
 }
 
 // Simple test to isolate the crash
@@ -430,7 +430,7 @@ TEST_F(ResourceExhaustionTest, MaxEntityViewIteration)
     auto view = registry->CreateView<Position>();
     
     size_t count = 0;
-    view.ForEach([&count](Entity e, Position& pos) {
+    view.ForEach([&count](Entity, Position& pos) {
         count++;
         pos.x += 1.0f; // Simple operation
     });

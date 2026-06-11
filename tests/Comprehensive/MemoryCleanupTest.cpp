@@ -237,8 +237,7 @@ TEST_F(MemoryCleanupTest, ArchetypeFragmentation)
     }
     
     size_t fullMemory = GetCurrentMemoryUsage();
-    size_t fullArchetypes = GetArchetypeCount();
-    
+
     for (auto& group : archetypeGroups)
     {
         for (size_t i = 0; i < group.size(); i += 2)
@@ -294,8 +293,6 @@ TEST_F(MemoryCleanupTest, ClearMemoryCleanup)
     registry->Clear();
     
     EXPECT_EQ(registry->Size(), 0u) << "All entities should be gone";
-    
-    size_t afterClear = GetCurrentMemoryUsage();
     
     Registry::DefragmentationOptions options;
     registry->Defragment(options);

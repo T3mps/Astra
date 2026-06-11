@@ -1,14 +1,13 @@
 #pragma once
 
-#include <atomic>
 #include <cstdint>
 #include <string_view>
 #include <type_traits>
-#include <array>
 
 #include "../Component/Component.hpp"
 #include "../Core/Platform.hpp"
 #include "Base.hpp"
+#include "TypeContext.hpp"
 
 namespace Astra
 {
@@ -203,29 +202,19 @@ namespace Astra
             return XXHash::XXHash64(name);
         }
         
-        class TypeIDGenerator
-        {
-        public:
-            ASTRA_NODISCARD static ComponentID Next() noexcept
-            {
-                // We only need atomicity, not ordering. Each type's ID is
-                // generated once during static initialization and cached.
-                // The C++11 magic statics guarantee thread-safe initialization
-                // of the static variable in TypeIDStorage::Value().
-                return s_nextId.fetch_add(1, std::memory_order_relaxed);
-            }
-
-        private:
-            inline static std::atomic<ComponentID> s_nextId{0};
-        };
-
         template<typename T>
         class TypeIDStorage
         {
         public:
-            ASTRA_NODISCARD static ComponentID Value() noexcept
+            // IDs are assigned by the active TypeContext, keyed by the STABLE
+            // type-name hash, so every module sharing one context agrees on
+            // the ID. The result is cached in a per-module magic static --
+            // C++11 magic statics guarantee thread-safe one-time resolution.
+            // Not noexcept: first resolution may allocate in the context.
+            ASTRA_NODISCARD static ComponentID Value()
             {
-                static const ComponentID s_id = TypeIDGenerator::Next();
+                static const ComponentID s_id =
+                    GetTypeContext()->GetOrAssignComponentID(TypeHash<T>(), TypeNameInternal<T>());
                 return s_id;
             }
         };
@@ -236,8 +225,9 @@ namespace Astra
     {
         using Type = std::decay_t<T>;
 
-        // Runtime-assigned unique ID for this type (fast, but not stable across runs)
-        ASTRA_NODISCARD static ComponentID Value() noexcept
+        // Runtime-assigned unique ID for this type (fast, but not stable across runs).
+        // Assigned by the active TypeContext; not noexcept (first use may allocate).
+        ASTRA_NODISCARD static ComponentID Value()
         {
             return Detail::TypeIDStorage<Type>::Value();
         }
@@ -261,7 +251,4 @@ namespace Astra
             return Hash() == hash;
         }
     };
-
-    template<typename T>
-    inline const ComponentID TypeID_v = TypeID<T>::Value();
 }

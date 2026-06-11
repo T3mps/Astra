@@ -16,7 +16,9 @@ A high-performance, archetype-based Entity Component System (ECS) library for mo
 ```cpp
 #include <Astra/Astra.hpp>
 
-// Components must be trivially copyable
+// Components must be nothrow-move-constructible and nothrow-destructible.
+// Trivially copyable components get memcpy fast paths; non-trivial types
+// are fully supported via type-erased descriptors.
 struct Position {
     float x, y, z;
 };
@@ -29,11 +31,11 @@ int main() {
     // Create registry
     Astra::Registry registry;
     
-    // Create entity with components
-    auto entity = registry.CreateEntity<Position, Velocity>(
-        Position{0, 0, 0},
-        Velocity{1, 0, 0}
-    );
+    // Default-construct components
+    auto entity = registry.CreateEntity<Position, Velocity>();
+    
+    // Or supply values directly
+    auto other = registry.CreateEntityWith(Position{0, 0, 0}, Velocity{1, 0, 0});
     
     // Query and iterate - 1.05ns per entity at 10K scale
     auto view = registry.CreateView<Position, Velocity>();
@@ -52,21 +54,24 @@ int main() {
 ### Requirements
 
 - C++20 compatible compiler:
-  - MSVC 2019+ (Windows)
-  - GCC 9+ (Linux)
-  - Clang 10+ (macOS/Linux)
-- CMake 3.16+ or Premake5
+  - MSVC 2022+ (Windows)
+  - GCC 11+ (Linux)
+  - Clang 13+ (macOS/Linux)
+- Premake 5.0.0-beta6 or newer
 
 ### Build Instructions
 
 #### Windows (Visual Studio)
 ```bash
-# Generate Visual Studio 2022 solution
+# Generate Visual Studio 2022 (or later) solution
 scripts/generate_vs2022.bat
 
 # Open generated solution
 Astra.sln
 ```
+
+CI downloads premake 5.0.0-beta6 automatically. For local builds the premake5
+binary must be on PATH or the scripts directory.
 
 ### Build Configurations
 
@@ -143,10 +148,12 @@ registry.AddLink(entity1, entity2);
 
 ### Components
 
-Components are simple data structures that hold entity data:
+Components are data structures attached to entities. The `Component` concept
+requires nothrow-move-constructible and nothrow-destructible. Trivially copyable
+types get memcpy fast paths automatically; non-trivial types are fully supported
+via type-erased descriptors.
 
 ```cpp
-// Components must be trivially copyable
 struct Transform
 {
     float x, y, z;
@@ -170,8 +177,11 @@ componentRegistry->RegisterComponent<Transform>();
 Entities are lightweight IDs that reference component data:
 
 ```cpp
-// Create entity with components
-auto player = registry.CreateEntity<Transform, Health>(
+// Default-construct components
+auto player = registry.CreateEntity<Transform, Health>();
+
+// Or supply values
+auto player = registry.CreateEntityWith(
     Transform{100, 0, 50, 0, 1},
     Health{100, 100}
 );
@@ -209,11 +219,11 @@ view.ForEach([](Astra::Entity e, Position& pos, Velocity& vel) {
     pos.x += vel.dx;
 });
 
-// Or use range-based for loop
+// Or use range-based for loop - dereference yields references, not pointers
 for (auto [entity, pos, vel] : view)
 {
     // Range-based - Clean syntax (~3-4ns/entity)
-    pos->x += vel->dx;
+    pos.x += vel.dx;
 }
 ```
 
@@ -259,12 +269,15 @@ for (Astra::Entity linked : relations.GetLinks()) {
 Optimize entity creation and destruction:
 
 ```cpp
-// Batch create entities
+// Default-construct 1000 entities (Position + Velocity zeroed)
 std::vector<Astra::Entity> enemies(1000);
-registry.CreateEntities<Position, Velocity>(1000, enemies,
+registry.CreateEntities<Position, Velocity>(1000, enemies);
+
+// Or supply per-entity values via a generator
+registry.CreateEntitiesWith<Position, Velocity>(1000, enemies,
     [](size_t i) {
         return std::make_tuple(
-            Position{i * 10.0f, 0, 0},
+            Position{static_cast<float>(i) * 10.0f, 0, 0},
             Velocity{-1, 0, 0}
         );
     });
@@ -275,28 +288,79 @@ registry.DestroyEntities(enemies);
 
 ## Advanced Features
 
-### Thread Safety
+### Threading Model
 
-Enable thread-safe operations:
+Astra creates no threads. Registries are single-threaded by design: structural
+changes (create/destroy/add/remove) must not race. The job system is an open
+seam: inject an `IWorkScheduler` (e.g. an enkiTS adapter) via
+`Registry::Config::workScheduler` and `ParallelForEach` /
+`ParallelForEachDescendant` / `ParallelExecutor` will use it -- with no
+scheduler injected they run sequentially inline. Structural changes from worker
+threads are deferred via `CommandBuffer` (thread-safe). `RelationshipGraph`
+traversal caches and `MetaRegistry` are internally synchronized so concurrent
+reads through an injected scheduler stay safe.
 
 ```cpp
+// No scheduler -- all Parallel* APIs run sequentially inline (the default)
+Astra::Registry registry;
+
+// With a scheduler -- parallel iteration uses the injected implementation
+auto scheduler = std::make_shared<MyEnkiTSAdapter>();
 Astra::Registry::Config config;
-config.threadSafe = true;
-config.initialArchetypeCapacity = 256;
+config.workScheduler = scheduler;
 Astra::Registry registry(config);
 ```
 
 ### Memory Configuration
 
-Configure memory allocation:
+Configure memory allocation via `ArchetypeChunkPool::Config`:
 
 ```cpp
 Astra::Registry::Config config;
-config.useHugePages = true;  // Use 2MB pages if available
-config.chunkSize = 16384;    // 16KB chunks (default)
-config.initialChunkCount = 100;
+config.chunkPoolConfig.chunkSize     = 16384;  // bytes per chunk (default 16KB)
+config.chunkPoolConfig.chunksPerBlock = 128;   // chunks per allocator block
+config.chunkPoolConfig.maxChunks     = 4096;   // hard cap
+config.chunkPoolConfig.initialBlocks = 0;      // pre-warm blocks at startup
+config.chunkPoolConfig.useHugePages  = true;   // 2MB huge pages when available
 Astra::Registry registry(config);
 ```
+
+### Multi-module (DLL) Usage
+
+By default every module gets its own `DefaultTypeContext`, which assigns
+component IDs independently. If a host EXE and a plugin DLL must share one
+`Registry`, they must agree on IDs. The host creates a shared context and hands
+it to each plugin before any ECS use:
+
+```cpp
+// Host EXE
+auto ctx = std::make_unique<Astra::TypeContext>();
+Astra::SetTypeContext(ctx.get());   // install in this module
+LoadPlugin("myplugin.dll", ctx.get());
+
+// Plugin DLL -- called by the host immediately after LoadLibrary
+extern "C" void PluginInit(Astra::TypeContext* ctx)
+{
+    // Must run before any TypeID<T>::Value() or Registry use in this module.
+    // Do NOT call TypeID<T>::Value() from your own static initializers --
+    // IDs are cached in per-module statics on first access, which happens
+    // before this call when triggered by a static initializer.
+    Astra::SetTypeContext(ctx);
+}
+```
+
+`SetTypeContext` also drains any pending static meta-registrations into the
+context. The pending queue is module-local; registrations enqueued before
+`SetTypeContext` is called (e.g. from `ASTRA_REFLECT` macros in static
+initializers) are flushed when the context is installed.
+
+**Hot-reload sequence:** serialize world -> unload DLL -> load new DLL ->
+`SetTypeContext` -> `componentRegistry->ReRegisterComponent<T>()` for each type
+whose descriptor may have changed -> deserialize. `ReRegisterComponent`
+unconditionally rebuilds the descriptor (move/copy/serialize function pointers)
+so they target the newly loaded module code. Type IDs are stable across reloads
+because `TypeID` resolves by XXHash64 of the type name through the shared
+`TypeContext`.
 
 ### SIMD Configuration
 

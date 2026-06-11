@@ -350,7 +350,7 @@ namespace Astra
             
             // Conservative: if either system has no hints, assume conflict
             // This ensures safety when users don't provide Read/Write information
-            if ((sysA.reads.None() && sysA.writes.None()) || sysB.reads.None() && sysB.writes.None())
+            if ((sysA.reads.None() && sysA.writes.None()) || (sysB.reads.None() && sysB.writes.None()))
                 return true;
             
             // Check for write-write conflicts

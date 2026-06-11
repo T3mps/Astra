@@ -120,7 +120,7 @@ TEST_F(FlatSetTest, EraseOperations)
     // Erase by iterator
     auto it = set.Find(3);
     EXPECT_NE(it, set.end());
-    auto next_it = set.Erase(it);
+    set.Erase(it);
     EXPECT_EQ(set.Size(), 8u);
     EXPECT_FALSE(set.Contains(3));
     
@@ -286,7 +286,7 @@ TEST_F(FlatSetTest, LargeDataset)
         EXPECT_TRUE(inserted);
     }
     
-    EXPECT_EQ(set.Size(), N);
+    EXPECT_EQ(set.Size(), static_cast<size_t>(N));
     
     // Verify all elements are present
     for (int i = 0; i < N; ++i)
@@ -300,7 +300,7 @@ TEST_F(FlatSetTest, LargeDataset)
         EXPECT_EQ(set.Erase(i), 1u);
     }
     
-    EXPECT_EQ(set.Size(), N / 2);
+    EXPECT_EQ(set.Size(), static_cast<size_t>(N / 2));
     
     // Verify correct elements remain
     for (int i = 0; i < N; ++i)
