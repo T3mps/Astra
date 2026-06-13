@@ -9,6 +9,7 @@
 #include "../Core/Result.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Reflection/MetaRegistry.hpp"
+#include "../Reflection/FieldVisitor.hpp"
 #include "../Serialization/BinaryArchive.hpp"
 #include "../Serialization/BinaryReader.hpp"
 #include "../Serialization/BinaryWriter.hpp"
@@ -162,6 +163,9 @@ namespace Astra
             // Link to reflection metadata if type is registered with MetaRegistry
             desc.meta = MetaRegistry::Instance().Get<T>();
 
+            // Reflection-driven visitor slot: null unless the type is reflected.
+            desc.visitFields = desc.meta ? &VisitFields<T> : nullptr;
+
             // Also link MetaRegistry to ComponentID for reverse lookup
             if (desc.meta)
             {
@@ -243,6 +247,18 @@ namespace Astra
             T* component = static_cast<T*>(ptr);
             auto result = reader.ReadVersionedComponent(*component);
             return result.IsOk();
+        }
+
+        template<typename T>
+        static void VisitFields(void* instance, IFieldVisitor& visitor)
+        {
+            const TypeMeta* meta = MetaRegistry::Instance().Get<T>();
+            if (!meta) return;
+            for (const FieldInfo& field : meta->fields)
+            {
+                if (!field.IsSerializable()) continue;  // honors Serializable(false)
+                visitor.Visit(field, instance);
+            }
         }
 
         FlatMap<ComponentID, ComponentDescriptor> m_components;
