@@ -120,3 +120,25 @@ TEST(FieldVisitor, UnreflectedComponentHasNullSlot)
     ASSERT_NE(desc, nullptr);
     EXPECT_EQ(desc->visitFields, nullptr);
 }
+
+namespace { struct Renamed { float value = 0.0f; }; }
+
+ASTRA_REFLECT_TYPE(Renamed)
+    ASTRA_REFLECT_FIELD(Renamed, value)
+        ASTRA_REFLECT_ATTR(AliasName, "amount")
+ASTRA_END_REFLECT_TYPE()
+
+TEST(FieldVisitor, AliasNameAttributeIsQueryable)
+{
+    const Astra::TypeMeta* meta = Astra::GetMeta<Renamed>();
+    ASSERT_NE(meta, nullptr);
+    const Astra::FieldInfo* field = meta->GetField("value");
+    ASSERT_NE(field, nullptr);
+
+    std::vector<std::string> aliases;
+    field->ForEachAttribute<Astra::AliasName>(
+        [&](const Astra::AliasName& a) { aliases.emplace_back(a.name); });
+
+    ASSERT_EQ(aliases.size(), 1u);
+    EXPECT_EQ(aliases[0], "amount");
+}

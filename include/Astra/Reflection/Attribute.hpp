@@ -234,6 +234,20 @@ namespace Astra
     };
 
     /**
+     * Records a former serialized name for a field so name-keyed format loaders
+     * can find a value written under the old name after a rename. Multiple
+     * AliasName attributes may be attached (a field renamed more than once).
+     * The built-in binary path is unaffected (it uses SerializationTraits Version).
+     */
+    struct AliasName : AttributeBase<AliasName>
+    {
+        std::string_view name;
+
+        constexpr explicit AliasName(std::string_view formerName) noexcept
+            : name(formerName) {}
+    };
+
+    /**
      * Specifies display precision for floating point fields.
      */
     struct Precision : AttributeBase<Precision>
