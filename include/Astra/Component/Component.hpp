@@ -29,7 +29,8 @@ namespace Astra
 
     class BinaryWriter;
     class BinaryReader;
-    class TypeMeta;  // Forward declaration for reflection integration
+    class TypeMeta;          // Forward declaration for reflection integration
+    class IFieldVisitor;     // Forward declaration for format-agnostic visitor seam
 
     struct ComponentDescriptor
     {
@@ -45,6 +46,7 @@ namespace Astra
         using DeserializeFn = void(BinaryReader&, void*);
         using SerializeVersionedFn = void(BinaryWriter&, void*);     // Non-const for unified Serialize method
         using DeserializeVersionedFn = bool(BinaryReader&, void*);  // Returns false on error
+        using VisitFieldsFn = void(void* instance, IFieldVisitor& visitor);  // reflection-driven, format-agnostic
 
         ComponentID id;
         size_t size;
@@ -72,6 +74,11 @@ namespace Astra
 
         // Reflection integration - linked at registration time if type is reflected
         const TypeMeta* meta = nullptr;
+
+        // Reflection-driven, format-agnostic serialization seam. Populated from
+        // TypeMeta at registration; null when the type is not reflected. The
+        // binary path (serialize/deserialize above) is unaffected.
+        VisitFieldsFn* visitFields = nullptr;
 
         inline void DefaultConstruct(void* ptr) const
         {
