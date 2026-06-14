@@ -40,13 +40,16 @@ TEST(RegistryLoadConfig, RestoredRegistryKeepsWorkScheduler)
     Astra::Registry& r = **restored.GetValue();
 
     std::atomic<int> visited{0};
-    r.CreateView<Tally>().ParallelForEach([&](Astra::Entity, Tally&) {
+    std::atomic<long long> sum{0};
+    r.CreateView<Tally>().ParallelForEach([&](Astra::Entity, Tally& t) {
         visited.fetch_add(1, std::memory_order_relaxed);
+        sum.fetch_add(t.value, std::memory_order_relaxed);
     });
     EXPECT_EQ(visited.load(), kN);          // every entity visited exactly once
+    EXPECT_EQ(sum.load(), static_cast<long long>(kN) * (kN - 1) / 2);   // 0+1+...+(kN-1): data survived
 }
 
-TEST(RegistryLoadConfig, TwoArgLoadStaysSequential)
+TEST(RegistryLoadConfig, TwoArgLoadWorksWithDefaultConfig)
 {
     auto pool = std::make_shared<Astra::Testing::TestWorkerPool>(4);
     Astra::Registry::Config cfg;

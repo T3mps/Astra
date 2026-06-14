@@ -1493,6 +1493,7 @@ namespace Astra
             return LoadInternal(reader, std::move(componentRegistry), config);
         }
 
+        // In-memory data form of the 3.3 Config overload above.
         static Result<std::unique_ptr<Registry>, SerializationError> Load(
             std::span<const std::byte> data,
             std::shared_ptr<ComponentRegistry> componentRegistry,
@@ -1522,8 +1523,10 @@ namespace Astra
                 return Result<std::unique_ptr<Registry>, SerializationError>::Err(*managerResult.GetError());
             }
 
-            // Construct with the caller's Config so workScheduler (and pool/chunk configs)
-            // survive Load. (Was: make_unique<Registry>(componentRegistry).)
+            // Construct with the caller's Config so its runtime policy (workScheduler,
+            // resource storage) is honoured. Note: entityManagerConfig / chunkPoolConfig
+            // are superseded below by the deserialized entity manager + archetypes (the
+            // saved shape wins); only workScheduler-class fields survive Load.
             auto registry = std::make_unique<Registry>(componentRegistry, config);
 
             // Move the entity manager from unique_ptr
