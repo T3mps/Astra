@@ -1469,21 +1469,45 @@ namespace Astra
             {
                 return Result<std::unique_ptr<Registry>, SerializationError>::Err(SerializationError::IOError);
             }
-            
-            return LoadInternal(reader, std::move(componentRegistry));
+
+            return LoadInternal(reader, std::move(componentRegistry), Config{});
         }
 
         static Result<std::unique_ptr<Registry>, SerializationError> Load(std::span<const std::byte> data, std::shared_ptr<ComponentRegistry> componentRegistry)
         {
             BinaryReader reader(data);
-            return LoadInternal(reader, std::move(componentRegistry));
+            return LoadInternal(reader, std::move(componentRegistry), Config{});
         }
-        
+
+        // 3.3: thread a Config (hence workScheduler) into the restored registry, so a
+        // hot-reload restore keeps parallel iteration. Additive; the two-arg forms above
+        // delegate with a default Config and are byte-for-byte unchanged.
+        static Result<std::unique_ptr<Registry>, SerializationError> Load(
+            const std::filesystem::path& path,
+            std::shared_ptr<ComponentRegistry> componentRegistry,
+            const Config& config)
+        {
+            BinaryReader reader(path);
+            if (reader.HasError())
+                return Result<std::unique_ptr<Registry>, SerializationError>::Err(SerializationError::IOError);
+            return LoadInternal(reader, std::move(componentRegistry), config);
+        }
+
+        // In-memory data form of the 3.3 Config overload above.
+        static Result<std::unique_ptr<Registry>, SerializationError> Load(
+            std::span<const std::byte> data,
+            std::shared_ptr<ComponentRegistry> componentRegistry,
+            const Config& config)
+        {
+            BinaryReader reader(data);
+            return LoadInternal(reader, std::move(componentRegistry), config);
+        }
+
     private:
         /**
          * Internal helper to load registry from reader
          */
-        static Result<std::unique_ptr<Registry>, SerializationError> LoadInternal(BinaryReader& reader, std::shared_ptr<ComponentRegistry> componentRegistry)
+        static Result<std::unique_ptr<Registry>, SerializationError> LoadInternal(BinaryReader& reader, std::shared_ptr<ComponentRegistry> componentRegistry, const Config& config)
         {
             // Read and validate header
             auto headerResult = reader.ReadHeader();
@@ -1491,18 +1515,21 @@ namespace Astra
             {
                 return Result<std::unique_ptr<Registry>, SerializationError>::Err(*headerResult.GetError());
             }
-            
+
             // Deserialize EntityManager
             auto managerResult = EntityManager::Deserialize(reader);
             if (managerResult.IsErr())
             {
                 return Result<std::unique_ptr<Registry>, SerializationError>::Err(*managerResult.GetError());
             }
-            
-            // Create new registry instance with the provided component registry
-            auto registry = std::make_unique<Registry>(componentRegistry);
-            
-            // Move the entity manager from unique_ptr  
+
+            // Construct with the caller's Config so its runtime policy (workScheduler,
+            // resource storage) is honoured. Note: entityManagerConfig / chunkPoolConfig
+            // are superseded below by the deserialized entity manager + archetypes (the
+            // saved shape wins); only workScheduler-class fields survive Load.
+            auto registry = std::make_unique<Registry>(componentRegistry, config);
+
+            // Move the entity manager from unique_ptr
             registry->m_entityManager = std::move(*(*managerResult.GetValue()));
             
             // Create new ArchetypeManager with the component registry and deserialize into it
