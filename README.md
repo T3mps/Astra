@@ -7,9 +7,7 @@ A high-performance, archetype-based Entity Component System (ECS) library for mo
 - **Archetype-based storage** - Entities with identical component sets grouped in contiguous 16KB chunks
 - **SIMD acceleration** - Hardware-optimized operations (SSE2/SSE4.2/AVX2/NEON)
 - **Relationship graphs** - Hierarchical parent-child and bidirectional entity links
-- **Advanced queries** - Compile-time optimized queries with Optional, Not, Any, OneOf modifiers
-- **Memory optimized** - Custom chunk allocator with huge page support (2MB pages)
-- **Modern C++20** - Concepts, ranges, fold expressions, if constexpr
+- **Advanced queries** - Compile-time optimized queries with Optional, Not, Any, OneOf modifiers\
 
 ## Quick Start
 
