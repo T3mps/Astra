@@ -405,15 +405,6 @@ void UpdateWorldTransforms(Astra::Registry& registry, Astra::Entity root) {
 
 Run the included benchmarks!
 
-## Contributing
-
-Contributions are welcome! Please ensure:
-
-1. Code follows existing style conventions
-2. All tests pass
-3. Benchmarks show no performance regression
-4. New features include tests
-
 ## License
 
 Astra is available under the MIT License. See LICENSE file for details.
