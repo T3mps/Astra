@@ -59,6 +59,7 @@ namespace Astra
         bool is_copy_constructible;
         bool is_nothrow_move_constructible;
         bool is_nothrow_default_constructible;
+        bool is_trivially_default_constructible;
         bool is_empty;
         ConstructFn* defaultConstruct;
         DestructFn* destruct;
@@ -82,15 +83,21 @@ namespace Astra
 
         inline void DefaultConstruct(void* ptr) const
         {
-            if (is_trivially_copyable && is_nothrow_default_constructible)
+            if (size == 0)
             {
-#ifdef ASTRA_BUILD_DEBUG
+                return;  // empty (tag) component: nothing to construct
+            }
+            if (is_trivially_default_constructible)
+            {
+                // Value-initialization of a trivially-default-constructible
+                // type is zero-initialization; memset is the fast equivalent.
+                // This must run in ALL configs: a chunk slot vacated by
+                // swap-and-pop still holds the previous entity's bytes.
                 std::memset(ptr, 0, size);
-#endif
             }
             else
             {
-                defaultConstruct(ptr);
+                defaultConstruct(ptr);  // applies NSDMIs / user default ctor
             }
         }
         
@@ -114,11 +121,11 @@ namespace Astra
         
         inline void BatchDefaultConstruct(void* ptr, size_t count) const
         {
-            if (is_empty)
+            if (size == 0)
             {
+                return;
             }
-            
-            if (is_trivially_copyable && is_nothrow_default_constructible)
+            if (is_trivially_default_constructible)
             {
                 std::memset(ptr, 0, count * size);
             }
