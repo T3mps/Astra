@@ -50,7 +50,12 @@ namespace Astra
     {
     public:
         static constexpr size_t DEFAULT_INITIAL_CAPACITY = 4096;
-        static constexpr size_t ALIGNMENT = 8;
+        // Every command start is aligned to 16. std::vector<std::byte>'s
+        // allocation is aligned to __STDCPP_DEFAULT_NEW_ALIGNMENT__ (16 on all
+        // supported targets), so for payload alignment A <= 16 the reader's
+        // absolute-address alignment and the writer's command-relative offset
+        // computation are guaranteed to agree.
+        static constexpr size_t ALIGNMENT = 16;
 
         explicit CommandByteBuffer(size_t initialCapacity = DEFAULT_INITIAL_CAPACITY)
         {
@@ -256,6 +261,9 @@ namespace Astra
         void AddComponent(Entity entity, T&& component)
         {
             using DecayedT = std::decay_t<T>;
+            static_assert(alignof(DecayedT) <= CommandByteBuffer::ALIGNMENT,
+                "CommandBuffer supports component alignment up to 16 bytes; "
+                "add over-aligned components directly via Registry::AddComponent");
 
             // Register component type
             m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
@@ -329,6 +337,9 @@ namespace Astra
                 return;
 
             using DecayedT = std::decay_t<T>;
+            static_assert(alignof(DecayedT) <= CommandByteBuffer::ALIGNMENT,
+                "CommandBuffer supports component alignment up to 16 bytes; "
+                "add over-aligned components directly via Registry::AddComponent");
 
             // Register component type
             m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
@@ -521,6 +532,9 @@ namespace Astra
         void SetResource(T&& resource)
         {
             using DecayedT = std::decay_t<T>;
+            static_assert(alignof(DecayedT) <= CommandByteBuffer::ALIGNMENT,
+                "CommandBuffer supports component alignment up to 16 bytes; "
+                "add over-aligned resources directly via Registry::SetResource");
 
             // Register component type
             m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
@@ -622,6 +636,8 @@ namespace Astra
             }
 
             std::byte* ptr = m_buffer.Data();
+            ASTRA_ASSERT((reinterpret_cast<uintptr_t>(ptr) % CommandByteBuffer::ALIGNMENT) == 0,
+                         "Command buffer base must be 16-aligned");
             std::byte* end = ptr + m_buffer.Size();
             m_lastExecutedCount = 0;
 
