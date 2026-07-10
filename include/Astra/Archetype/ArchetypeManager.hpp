@@ -681,7 +681,15 @@ namespace Astra
                     [](const ArchetypeEntry& entry) { return !entry.archetype; }),
                 m_archetypes.end()
             );
-            
+
+            if (removed > 0)
+            {
+                // Views cache raw Archetype*: signal both "something changed"
+                // and "pointers may be stale" so they rebuild from scratch.
+                m_structuralChangeCounter.fetch_add(1, std::memory_order_release);
+                m_archetypeRemovalCounter.fetch_add(1, std::memory_order_release);
+            }
+
             return removed;
         }
         
@@ -1323,6 +1331,7 @@ namespace Astra
         Archetype* m_rootArchetype = nullptr;
         
         std::atomic<uint32_t> m_structuralChangeCounter{0};  // Fast path check
+        std::atomic<uint32_t> m_archetypeRemovalCounter{0};  // Bumped when archetypes are deleted; views must fully re-collect
         uint32_t m_generation = 1;  // Generation counter for new archetypes
 
         template<typename... QueryArgs>

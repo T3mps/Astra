@@ -47,6 +47,7 @@ namespace Astra
             CollectArchetypes();
             m_lastRefreshCounter = m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
             m_lastGeneration = m_archetypeManager->m_generation;
+            m_lastRemovalCounter = m_archetypeManager->m_archetypeRemovalCounter.load(std::memory_order_acquire);
         }
         
         /**
@@ -151,7 +152,7 @@ namespace Astra
 
         ASTRA_NODISCARD bool Empty() const noexcept
         {
-            return m_archetypes.empty();
+            return Size() == 0;
         }
 
         // ============= Range-based for loop support =============
@@ -196,55 +197,57 @@ namespace Astra
         {
             if (!m_archetypeManager) ASTRA_UNLIKELY
                 return;  // Registry destroyed
-            
+
             uint32_t currentCounter = m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
             if (m_lastRefreshCounter == currentCounter)
             {
                 return;
             }
-            
-            if (m_lastGeneration == 0)
+
+            uint32_t removalCounter = m_archetypeManager->m_archetypeRemovalCounter.load(std::memory_order_acquire);
+            if (m_lastGeneration == 0 || removalCounter != m_lastRemovalCounter)
             {
+                // Archetypes were removed (or first refresh): cached pointers
+                // may be stale — rebuild the whole list.
                 CollectArchetypes();
+                m_lastRemovalCounter = removalCounter;
             }
             else
             {
                 auto newArchetypes = m_archetypeManager->GetArchetypesSince(m_lastGeneration);
                 for (Archetype* arch : newArchetypes)
                 {
-                    if (arch->GetEntityCount() == 0) ASTRA_UNLIKELY
-                    {
-                        continue;
-                    }
                     if (QueryBuilder::Matches(arch->GetMask()))
                     {
                         m_archetypes.push_back(arch);
                     }
                 }
-                
                 std::sort(m_archetypes.begin(), m_archetypes.end(), ArchetypeEntityCountComparator{});
             }
-            
+
             m_lastRefreshCounter = currentCounter;
             m_lastGeneration = m_archetypeManager->m_generation;
         }
-        
+
         void CollectArchetypes()
         {
+            m_archetypes.clear();
             if (!m_archetypeManager) ASTRA_UNLIKELY
             {
-                m_archetypes.clear();
                 return;  // Registry destroyed
             }
-            
+
             auto archetypes = m_archetypeManager->GetArchetypes();
             const size_t queryComponentCount = QueryBuilder::GetRequiredMask().Count();
-            
+
             m_archetypes.reserve(archetypes.size());
-            
+
             for (Archetype* archetype : archetypes)
             {
-                if (archetype->GetEntityCount() == 0 || archetype->GetComponentCount() < queryComponentCount) ASTRA_UNLIKELY
+                // NOTE: empty archetypes are deliberately KEPT — they may gain
+                // entities later without any archetype-creation event, and
+                // iterating an empty archetype is free (zero-count chunks).
+                if (archetype->GetComponentCount() < queryComponentCount) ASTRA_UNLIKELY
                 {
                     continue;
                 }
@@ -253,7 +256,7 @@ namespace Astra
                     m_archetypes.push_back(archetype);
                 }
             }
-            
+
             std::sort(m_archetypes.begin(), m_archetypes.end(), ArchetypeEntityCountComparator{});
         }
 
@@ -364,5 +367,6 @@ namespace Astra
 
         uint32_t m_lastRefreshCounter = 0;
         uint32_t m_lastGeneration = 0;
+        uint32_t m_lastRemovalCounter = 0;
     };
 } // namespace Astra
