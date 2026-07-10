@@ -400,6 +400,10 @@ TEST_F(CompressionTest, PerformanceBenchmark)
     
     // smallz4 uses optimal parsing which is slower but achieves better compression
     // Adjusted expectations for optimal parsing mode:
+#ifdef NDEBUG
+    // Throughput thresholds are meaningless in unoptimized builds
+    // (Debug LZ4 measures ~2 MB/s); only enforce them in optimized configs.
     EXPECT_GT(compressMBps, 10.0f);    // Expect > 10 MB/s compression (optimal is slower)
     EXPECT_GT(decompressMBps, 100.0f); // Expect > 100 MB/s decompression (still fast)
+#endif
 }

@@ -146,16 +146,14 @@ namespace Astra
 
         void SetParent(Entity child, Entity parent)
         {
-            ASTRA_ASSERT(child != parent, "Entity cannot be its own parent");
-            ASTRA_ASSERT(child.IsValid() && parent.IsValid(), "Invalid entity in relationship");
-
-            // Silently ignore invalid operations in release builds
+            // Caller-recoverable inputs: rejected gracefully in ALL configs.
+            // (Asserting here made the Debug suite abort on tests that verify
+            // the rejection contract; asserts are reserved for internal invariants.)
             if (!child.IsValid() || !parent.IsValid() || child == parent)
                 return;
 
-            // Check for circular hierarchy: if child is an ancestor of parent,
-            // setting parent as child's parent would create a cycle
-            ASTRA_ASSERT(!IsAncestorOf(child, parent), "Circular hierarchy detected: child is an ancestor of parent");
+            // Rejecting a cycle: if child is an ancestor of parent, setting
+            // parent as child's parent would create a cycle.
             if (IsAncestorOf(child, parent))
                 return;
 
@@ -227,10 +225,7 @@ namespace Astra
         
         void AddLink(Entity a, Entity b)
         {
-            ASTRA_ASSERT(a != b, "Entity cannot link to itself");
-            ASTRA_ASSERT(a.IsValid() && b.IsValid(), "Invalid entity in link");
-            
-            // Silently ignore invalid operations in release builds
+            // Caller-recoverable inputs: rejected gracefully in ALL configs.
             if (!a.IsValid() || !b.IsValid() || a == b)
                 return;
             
