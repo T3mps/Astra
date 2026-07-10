@@ -1,8 +1,4 @@
-#include <algorithm>
 #include <gtest/gtest.h>
-#include <numeric>
-#include <random>
-#include <unordered_set>
 #include <vector>
 #include "../TestComponents.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
@@ -20,9 +16,12 @@ protected:
         // Create component registry first
         componentRegistry = std::make_shared<Astra::ComponentRegistry>();
         
-        // Register test components
+        // Register test components (only the ones actually used by this
+        // file's tests - Transform/Name/Physics/Player/Enemy were registered
+        // but never exercised by any TEST_F here; trimmed in the 2026-07-10
+        // test-suite audit).
         using namespace Astra::Test;
-        componentRegistry->RegisterComponents<Position, Velocity, Health, Transform, Name, Physics, Player, Enemy>();
+        componentRegistry->RegisterComponents<Position, Velocity, Health>();
         
         // Create manager with the component registry
         manager = std::make_unique<Astra::ArchetypeManager>(componentRegistry);

@@ -455,7 +455,7 @@ TEST_F(ComplexRelationshipTest, RapidRelationshipChanges)
     for (Entity e : entities)
     {
         auto relations = registry->GetRelations(e);
-        
+
         // Count children
         size_t childCount = 0;
         for (Entity child : relations.GetChildren())
@@ -463,13 +463,32 @@ TEST_F(ComplexRelationshipTest, RapidRelationshipChanges)
             childCount++;
             EXPECT_TRUE(registry->IsValid(child));
         }
-        
+
         // Count links
         size_t linkCount = 0;
         for (Entity linked : relations.GetLinks())
         {
             linkCount++;
             EXPECT_TRUE(registry->IsValid(linked));
+        }
+    }
+
+    // Strengthened observable-state check: 1000 random SetParent calls above
+    // repeatedly exercised the cycle-rejection path (Task 1 made rejection
+    // silent instead of asserting). "No crash" alone doesn't prove rejection
+    // actually held - walk every entity's ancestor chain and confirm it
+    // terminates at a root within entities.size() steps. If a cycle ever
+    // slipped through, this chain would never terminate.
+    for (Entity e : entities)
+    {
+        Entity current = e;
+        size_t steps = 0;
+        while (registry->GetParent(current).IsValid())
+        {
+            current = registry->GetParent(current);
+            ++steps;
+            ASSERT_LE(steps, entities.size())
+                << "Cycle detected in ancestor chain starting at entity " << e.GetID();
         }
     }
 }

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
-#include "TestComponents.hpp"
+#include "../TestComponents.hpp"
 
 using namespace Astra;
 using namespace Astra::Test;

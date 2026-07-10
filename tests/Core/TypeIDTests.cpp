@@ -181,6 +181,4 @@ TEST_F(TypeIDTests, CompileTimeConstexpr)
     static_assert(hash != 0);
     static_assert(hasHash);
     static_assert(!name.empty());
-    
-    EXPECT_TRUE(true); // Test passes if it compiles
 }

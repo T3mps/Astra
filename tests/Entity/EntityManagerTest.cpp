@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <unordered_set>
 #include <vector>
-#include <thread>
-#include <chrono>
 
 class EntityManagerTest : public ::testing::Test
 {
