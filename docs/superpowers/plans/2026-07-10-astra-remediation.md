@@ -795,7 +795,7 @@ Three confirmed holes: (a) `ArchetypeManager::AddEntity` accepts `Entity::Invali
 - Consumes: `Entity::IsValid()`, `EntityManager::IsValid(Entity)`.
 - Produces: `template<typename OutputIt> std::size_t EntityManager::CreateBatch(std::size_t count, OutputIt out) noexcept` — **returns the number actually created** (source-compatible: previous return was void). Contract: invalid entities never reach archetype storage; unfulfilled batch slots are set to `Entity::Invalid()`; unknown/dead handles passed to component APIs are skipped.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/Registry/EntityValidityTest.cpp`:
 
@@ -851,11 +851,11 @@ TEST(EntityValidity, CreateBatchReportsCount)
 }
 ```
 
-- [ ] **Step 2: Regenerate solution, build Release, verify failure**
+- [x] **Step 2: Regenerate solution, build Release, verify failure**
 
 `--gtest_filter=EntityValidity.*` — Expected: `ArchetypeManagerRejectsInvalidEntity` FAILS (record non-null, seen=1), `BatchAddComponentsIgnoresDeadHandles` FAILS (seen=1), `CreateBatchReportsCount` FAILS TO COMPILE? No — void return means `created` assignment fails compilation. **Comment out that test for this step**, confirm the other two fail, then restore it.
 
-- [ ] **Step 3: Make `EntityManager::CreateBatch` return the created count**
+- [x] **Step 3: Make `EntityManager::CreateBatch` return the created count**
 
 Replace the method in `EntityManager.hpp`:
 
@@ -900,7 +900,7 @@ Replace the method in `EntityManager.hpp`:
         }
 ```
 
-- [ ] **Step 4: Reject invalid entities in ArchetypeManager**
+- [x] **Step 4: Reject invalid entities in ArchetypeManager**
 
 (a) `AddEntity` — insert as the first statement (graceful rejection, NO assert — callers may legitimately probe after exhaustion):
 ```cpp
@@ -964,7 +964,7 @@ Replace the method in `EntityManager.hpp`:
         }
 ```
 
-- [ ] **Step 5: Guard the Registry creation paths**
+- [x] **Step 5: Guard the Registry creation paths**
 
 (a) `CreateEntity` — after `Entity entity = m_entityManager.Create();`:
 ```cpp
@@ -1026,7 +1026,7 @@ and change both signal loops from `i < count` to `i < created`.
         }
 ```
 
-- [ ] **Step 6: Fix `CommandBuffer::CreateEntities`**
+- [x] **Step 6: Fix `CommandBuffer::CreateEntities`**
 
 Replace the allocation part of the method:
 ```cpp
@@ -1058,9 +1058,9 @@ Replace the allocation part of the method:
             m_commandCount++;
 ```
 
-- [ ] **Step 7: Restore the commented test; build Release; run `--gtest_filter=EntityValidity.*` — expect PASS. Full suite Debug + Release — expect 511/511.**
+- [x] **Step 7: Restore the commented test; build Release; run `--gtest_filter=EntityValidity.*` — expect PASS. Full suite Debug + Release — expect 511/511.**
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add tests/Registry/EntityValidityTest.cpp include/Astra/Entity/EntityManager.hpp include/Astra/Archetype/ArchetypeManager.hpp include/Astra/Registry/Registry.hpp include/Astra/Commands/CommandBuffer.hpp ide/

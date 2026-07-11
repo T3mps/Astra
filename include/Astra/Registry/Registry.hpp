@@ -88,6 +88,8 @@ namespace Astra
         Entity CreateEntity()
         {
             Entity entity = m_entityManager.Create();
+            if (!entity.IsValid()) ASTRA_UNLIKELY
+                return Entity::Invalid();
             
             // Use AddEntity for default-constructed components
             m_archetypeManager->AddEntity<Components...>(entity);
@@ -114,6 +116,8 @@ namespace Astra
         Entity CreateEntityWith(Components&&... components)
         {
             Entity entity = m_entityManager.Create();
+            if (!entity.IsValid()) ASTRA_UNLIKELY
+                return Entity::Invalid();
             
             // Use AddEntityWith for components with values
             m_archetypeManager->AddEntityWith(entity, std::forward<Components>(components)...);
@@ -139,14 +143,20 @@ namespace Astra
             if (count == 0 || outEntities.size() < count)
                 return;
             
-            m_entityManager.CreateBatch(count, outEntities.begin());
+            size_t created = m_entityManager.CreateBatch(count, outEntities.begin());
+            for (size_t i = created; i < count; ++i)
+            {
+                outEntities[i] = Entity::Invalid();
+            }
+            if (created == 0) ASTRA_UNLIKELY
+                return;
             
             // Use unified batch AddEntities - handles archetype selection internally
-            m_archetypeManager->AddEntities<Components...>(outEntities.subspan(0, count));
+            m_archetypeManager->AddEntities<Components...>(outEntities.subspan(0, created));
             
             if (m_signalManager.IsSignalEnabled(Signal::EntityCreated))
             {
-                for (size_t i = 0; i < count; ++i)
+                for (size_t i = 0; i < created; ++i)
                 {
                     m_signalManager.Emit<Events::EntityCreated>(outEntities[i]);
                 }
@@ -156,7 +166,7 @@ namespace Astra
             {
                 if (m_signalManager.IsSignalEnabled(Signal::ComponentAdded))
                 {
-                    for (size_t i = 0; i < count; ++i)
+                    for (size_t i = 0; i < created; ++i)
                     {
                         ((m_signalManager.Emit<Events::ComponentAdded>(outEntities[i], TypeID<Components>::Value(), nullptr)), ...);
                     }
@@ -170,12 +180,19 @@ namespace Astra
             if (count == 0 || outEntities.size() < count)
                 return;
             
-            m_entityManager.CreateBatch(count, outEntities.begin());
-            m_archetypeManager->AddEntitiesWith<Components...>(outEntities.subspan(0, count), std::forward<Generator>(generator));
+            size_t created = m_entityManager.CreateBatch(count, outEntities.begin());
+            for (size_t i = created; i < count; ++i)
+            {
+                outEntities[i] = Entity::Invalid();
+            }
+            if (created == 0) ASTRA_UNLIKELY
+                return;
+
+            m_archetypeManager->AddEntitiesWith<Components...>(outEntities.subspan(0, created), std::forward<Generator>(generator));
             
             if (m_signalManager.IsSignalEnabled(Signal::EntityCreated))
             {
-                for (size_t i = 0; i < count; ++i)
+                for (size_t i = 0; i < created; ++i)
                 {
                     m_signalManager.Emit<Events::EntityCreated>(outEntities[i]);
                 }
@@ -183,7 +200,7 @@ namespace Astra
             
             if (m_signalManager.IsSignalEnabled(Signal::ComponentAdded))
             {
-                for (size_t i = 0; i < count; ++i)
+                for (size_t i = 0; i < created; ++i)
                 {
                     ((m_signalManager.Emit<Events::ComponentAdded>(outEntities[i], TypeID<Components>::Value(), nullptr)), ...);
                 }
@@ -297,21 +314,33 @@ namespace Astra
         template<Component T>
         void AddComponents(std::span<Entity> entities, const T& component)
         {
-            m_archetypeManager->AddComponents<T>(entities, component);
+            if (entities.empty())
+                return;
+
+            SmallVector<Entity, 256> validEntities;
+            validEntities.reserve(entities.size());
+            for (Entity entity : entities)
+            {
+                if (m_entityManager.IsValid(entity))
+                {
+                    validEntities.push_back(entity);
+                }
+            }
+            if (validEntities.empty())
+                return;
+
+            m_archetypeManager->AddComponents<T>(validEntities, component);
             
             // Emit signals for all entities if enabled
             if (m_signalManager.IsSignalEnabled(Signal::ComponentAdded))
             {
                 ComponentID componentId = TypeID<T>::Value();
-                for (Entity entity : entities)
+                for (Entity entity : validEntities)
                 {
-                    if (m_entityManager.IsValid(entity))
+                    T* comp = m_archetypeManager->GetComponent<T>(entity);
+                    if (comp)
                     {
-                        T* comp = m_archetypeManager->GetComponent<T>(entity);
-                        if (comp)
-                        {
-                            m_signalManager.Emit<Events::ComponentAdded>(entity, componentId, comp);
-                        }
+                        m_signalManager.Emit<Events::ComponentAdded>(entity, componentId, comp);
                     }
                 }
             }

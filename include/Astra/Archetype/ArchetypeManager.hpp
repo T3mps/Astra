@@ -61,6 +61,9 @@ namespace Astra
         template<Component... Components>
         void AddEntity(Entity entity)
         {
+            if (!entity.IsValid()) ASTRA_UNLIKELY
+                return;
+
             Archetype* archetype;
             if constexpr (sizeof...(Components) == 0)
             {
@@ -85,6 +88,9 @@ namespace Astra
         void AddEntityWith(Entity entity, Components&&... components)
         {
             static_assert(sizeof...(Components) > 0, "AddEntityWith requires at least one component");
+
+            if (!entity.IsValid()) ASTRA_UNLIKELY
+                return;
             
             Archetype* archetype = GetOrCreateArchetype<std::decay_t<Components>...>();
             EntityLocation location = archetype->AddEntityWith(entity, std::forward<Components>(components)...);
@@ -103,6 +109,32 @@ namespace Astra
             size_t count = entities.size();
             if (count == 0) ASTRA_UNLIKELY
                 return;
+
+            SmallVector<Entity, 256> validStorage;
+            bool anyInvalid = false;
+            for (Entity e : entities)
+            {
+                if (!e.IsValid())
+                {
+                    anyInvalid = true;
+                    break;
+                }
+            }
+            if (anyInvalid) ASTRA_UNLIKELY
+            {
+                validStorage.reserve(entities.size());
+                for (Entity e : entities)
+                {
+                    if (e.IsValid())
+                    {
+                        validStorage.push_back(e);
+                    }
+                }
+                if (validStorage.empty())
+                    return;
+                entities = std::span<const Entity>(validStorage.data(), validStorage.size());
+                count = entities.size();
+            }
 
             Archetype* archetype;
             if constexpr (sizeof...(Components) == 0)
@@ -250,9 +282,6 @@ namespace Astra
         template<Component T, typename... Args>
         void AddComponents(std::span<Entity> entities, Args&&... args)
         {
-#ifdef ASTRA_BUILD_DEBUG
-            printf("ArchetypeManager::AddComponents called with %zu entities\n", entities.size());
-#endif
             if (entities.empty())
                 return;
 
@@ -262,50 +291,11 @@ namespace Astra
             registry->RegisterComponent<T>();
             ComponentID componentID = TypeID<T>::Value();
 
-            // First, ensure all entities exist in the archetype system
-            // Entities not in the map need to be added to the root archetype
-            SmallVector<Entity, 256> newEntities;
-            for (Entity entity : entities)
-            {
-                auto it = m_entityMap.find(entity);
-                if (it == m_entityMap.end())
-                {
-                    newEntities.push_back(entity);
-#ifdef ASTRA_BUILD_DEBUG
-                    printf("  Entity %u not in map, will add to root\n", entity.GetID());
-#endif
-                }
-                else
-                {
-#ifdef ASTRA_BUILD_DEBUG
-                    printf("  Entity %u already in archetype %p\n", entity.GetID(), it->second.archetype);
-#endif
-                }
-            }
-            
-            // Add new entities to root archetype
-            if (!newEntities.empty())
-            {
-#ifdef ASTRA_BUILD_DEBUG
-                printf("  Adding %zu new entities to root archetype\n", newEntities.size());
-#endif
-                auto locations = m_rootArchetype->AddEntities(newEntities);
-                for (size_t i = 0; i < locations.size(); ++i)
-                {
-                    m_entityMap[newEntities[i]] = EntityRecord{m_rootArchetype, locations[i]};
-                }
-            }
-
-            // Group entities by archetype, including newly added ones
             auto batches = GroupEntitiesByArchetype(entities, 
                 [componentID](Archetype* arch)
                 {
                     return !arch->GetMask().Test(componentID);
                 });
-
-#ifdef ASTRA_BUILD_DEBUG
-            printf("  Grouped into %zu archetype batches\n", batches.Size());
-#endif
 
             // Process each archetype group
             for (auto& [srcArchetype, entityBatch] : batches)

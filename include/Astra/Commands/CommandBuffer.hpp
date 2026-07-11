@@ -206,25 +206,31 @@ namespace Astra
                 return;
 
             auto& manager = m_registry->GetEntityManager();
-            manager.CreateBatch(count, outEntities);
+            size_t created = manager.CreateBatch(count, outEntities);
+            for (size_t i = created; i < count; ++i)
+            {
+                outEntities[i] = Entity::Invalid();
+            }
+            if (created == 0)
+                return;
 
             // Track for potential rollback
-            for (size_t i = 0; i < count; ++i)
+            for (size_t i = 0; i < created; ++i)
             {
                 m_allocatedEntities.push_back(outEntities[i]);
             }
 
             // Calculate total size
-            size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntitiesPayload) + count * sizeof(Entity);
+            size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntitiesPayload) + created * sizeof(Entity);
             std::byte* ptr = m_buffer.Allocate(totalSize);
 
             auto* header = new (ptr) CommandHeader{CommandType::CreateEntities, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntitiesPayload{static_cast<uint32_t>(count)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntitiesPayload{static_cast<uint32_t>(created)};
             (void)header;
 
             // Copy entities after payload
             Entity* entityDst = reinterpret_cast<Entity*>(payload + 1);
-            std::memcpy(entityDst, outEntities, count * sizeof(Entity));
+            std::memcpy(entityDst, outEntities, created * sizeof(Entity));
 
             m_commandCount++;
         }

@@ -64,20 +64,28 @@ namespace Astra
             return Entity(id, version);
         }
 
+        // Creates up to `count` entities; returns how many were actually
+        // created (can be < count when the ID space is exhausted). Only the
+        // first `return-value` slots of the output are written.
         template<typename OutputIt>
-        void CreateBatch(std::size_t count, OutputIt out) noexcept
+        std::size_t CreateBatch(std::size_t count, OutputIt out) noexcept
         {
             if (count == 0)
-                ASTRA_UNLIKELY return;
+                ASTRA_UNLIKELY return 0;
             
             // For small batches, simple loop is fine
             if (count < 32) ASTRA_LIKELY
             {
+                std::size_t created = 0;
                 for (std::size_t i = 0; i < count; ++i)
                 {
-                    *out++ = Create();
+                    Entity e = Create();
+                    if (!e.IsValid()) ASTRA_UNLIKELY
+                        break;
+                    *out++ = e;
+                    ++created;
                 }
-                return;
+                return created;
             }
             
             // Large batch: allocate IDs in batch
@@ -93,6 +101,7 @@ namespace Astra
                 m_table.SetVersion(id, version);
                 *out++ = Entity(id, version);
             }
+            return allocated;
         }
 
         bool Destroy(Entity entity) noexcept
