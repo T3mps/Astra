@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
 
+#include <span>
+#include <vector>
+
 namespace { struct TPos { float x, y, z; }; struct Tag {}; }
 
 TEST(EmptyTag, RangeForBindsTagAtValidAddress)
@@ -31,4 +34,21 @@ TEST(EmptyTag, MigrationAndRemovalPathsAreSafe)
     EXPECT_FALSE(reg.HasComponent<Tag>(b));
     auto* p = reg.GetComponent<TPos>(b);
     ASSERT_NE(p, nullptr);
+}
+
+TEST(EmptyTag, BatchAddTagComponentIsSafe)
+{
+    Astra::Registry reg;
+    std::vector<Astra::Entity> entities(64);
+    reg.CreateEntities<TPos>(64, entities);   // batch of entities carrying a non-empty component
+
+    // Batch-add an empty tag to all of them: exercises
+    // SetComponents<Tag> -> BatchConstructComponent<Tag>, which pre-fix wrote to nullptr.
+    reg.AddComponents<Tag>(std::span<Astra::Entity>(entities.data(), entities.size()), Tag{});
+
+    for (auto e : entities)
+    {
+        EXPECT_TRUE(reg.HasComponent<Tag>(e));
+        EXPECT_TRUE(reg.HasComponent<TPos>(e));
+    }
 }

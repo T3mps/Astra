@@ -283,8 +283,10 @@ namespace Astra
                 if (!info.isValid)
                     return;
 
-                // Safety check: ensure base pointer is valid for non-empty components
-                if (info.base == nullptr && info.stride > 0) ASTRA_UNLIKELY
+                // Empty (tag) components have no storage (base==nullptr, stride==0);
+                // their presence is carried by the archetype mask. Any null base
+                // means there is nothing to construct — never form a pointer from it.
+                if (info.base == nullptr) ASTRA_UNLIKELY
                     return;
                 
                 // Debug validation
