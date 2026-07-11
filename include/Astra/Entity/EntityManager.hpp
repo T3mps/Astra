@@ -302,7 +302,7 @@ namespace Astra
             writer(m_config.tableConfig.entitiesPerSegmentMask);
             writer(m_config.tableConfig.releaseThreshold);
             writer(m_config.tableConfig.autoRelease);
-            writer(m_config.tableConfig.maxEmptySegments);
+            writer(static_cast<uint64_t>(m_config.tableConfig.maxEmptySegments));
             
             // Write ID stack state
             writer(m_idStack.GetNextID());
@@ -339,13 +339,15 @@ namespace Astra
             reader(manager->m_config.tableConfig.entitiesPerSegmentMask);
             reader(manager->m_config.tableConfig.releaseThreshold);
             reader(manager->m_config.tableConfig.autoRelease);
-            reader(manager->m_config.tableConfig.maxEmptySegments);
-            
+            uint64_t maxEmptySegments;
+            reader(maxEmptySegments);
+            manager->m_config.tableConfig.maxEmptySegments = static_cast<size_t>(maxEmptySegments);
+
             if (reader.HasError())
             {
                 return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(reader.GetError());
             }
-            
+
             // Read ID stack state
             IDType nextFreshID;
             reader(nextFreshID);

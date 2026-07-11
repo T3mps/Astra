@@ -703,7 +703,7 @@ namespace Astra
                 
                 // Write metrics
                 // Write entity count for validation
-                writer(entry.archetype->GetEntityCount());
+                writer(static_cast<uint64_t>(entry.archetype->GetEntityCount()));
             }
             
             // Write entity-to-archetype mappings
@@ -774,7 +774,7 @@ namespace Astra
                 
                 // Read metrics
                 // Read entity count for validation
-                size_t entityCount;
+                uint64_t entityCount;
                 reader(entityCount);
                 
                 // Add to storage

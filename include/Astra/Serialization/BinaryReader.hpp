@@ -129,7 +129,9 @@ namespace Astra
             // Update checksum if enabled and we're past the header
             if (m_checksumEnabled && m_position >= m_headerSize && m_headerSize > 0)
             {
-                m_runningChecksum = Checksum::CRC32(data, size, m_runningChecksum);
+                m_runningChecksum = m_usePortableChecksum
+                    ? Checksum::Portable(data, size, m_runningChecksum)
+                    : Checksum::CRC32(data, size, m_runningChecksum);   // v1 archives, same-ISA only
             }
             
             m_position += size;
@@ -167,6 +169,7 @@ namespace Astra
             }
             
             m_version = header.version;
+            m_usePortableChecksum = (m_version >= 2);
             m_headerSize = sizeof(BinaryHeader);
             m_expectedChecksum = header.dataChecksum;
             m_runningChecksum = 0;  // Reset checksum after reading header
@@ -270,17 +273,17 @@ namespace Astra
          */
         BinaryReader& operator()(std::string& str)
         {
-            size_t len;
+            uint64_t len;
             (*this)(len);
-            
+
             if (len > m_size - m_position)
             {
                 m_error = SerializationError::CorruptedData;
                 return *this;
             }
-            
-            str.resize(len);
-            ReadBytes(str.data(), len);
+
+            str.resize(static_cast<size_t>(len));
+            ReadBytes(str.data(), static_cast<size_t>(len));
             return *this;
         }
         
@@ -290,9 +293,9 @@ namespace Astra
         template<typename T>
         BinaryReader& operator()(std::vector<T>& vec)
         {
-            size_t size;
+            uint64_t size;
             (*this)(size);
-            
+
             // Sanity check to prevent huge allocations
             // For POD types, we can check the exact size needed
             // For non-POD types, just check that we have some data left
@@ -308,27 +311,27 @@ namespace Astra
             {
                 // For non-POD types, just check for reasonable size
                 // We can't know the actual serialized size without reading
-                const size_t maxReasonableSize = 1000000; // 1 million elements max
+                const uint64_t maxReasonableSize = 1000000; // 1 million elements max
                 if (size > maxReasonableSize)
                 {
                     m_error = SerializationError::CorruptedData;
                     return *this;
                 }
             }
-            
+
             vec.clear();
-            vec.reserve(size);
-            
+            vec.reserve(static_cast<size_t>(size));
+
             if constexpr (std::is_trivially_copyable_v<T>)
             {
                 // Read all at once for POD types
-                vec.resize(size);
-                ReadBytes(vec.data(), size * sizeof(T));
+                vec.resize(static_cast<size_t>(size));
+                ReadBytes(vec.data(), static_cast<size_t>(size) * sizeof(T));
             }
             else
             {
                 // Read one by one for complex types
-                for (size_t i = 0; i < size; ++i)
+                for (uint64_t i = 0; i < size; ++i)
                 {
                     T item;
                     (*this)(item);
@@ -418,19 +421,19 @@ namespace Astra
         template<typename K, typename V, typename Compare, typename Allocator>
         BinaryReader& operator()(std::map<K, V, Compare, Allocator>& map)
         {
-            size_t size;
+            uint64_t size;
             (*this)(size);
-            
+
             // Sanity check
-            const size_t maxMapSize = 10000000; // 10 million entries max
+            const uint64_t maxMapSize = 10000000; // 10 million entries max
             if (size > maxMapSize)
             {
                 m_error = SerializationError::CorruptedData;
                 return *this;
             }
-            
+
             map.clear();
-            for (size_t i = 0; i < size; ++i)
+            for (uint64_t i = 0; i < size; ++i)
             {
                 K key;
                 V value;
@@ -447,20 +450,20 @@ namespace Astra
         template<typename K, typename V, typename Hash, typename Equal, typename Allocator>
         BinaryReader& operator()(std::unordered_map<K, V, Hash, Equal, Allocator>& map)
         {
-            size_t size;
+            uint64_t size;
             (*this)(size);
-            
+
             // Sanity check
-            const size_t maxMapSize = 10000000; // 10 million entries max
+            const uint64_t maxMapSize = 10000000; // 10 million entries max
             if (size > maxMapSize)
             {
                 m_error = SerializationError::CorruptedData;
                 return *this;
             }
-            
+
             map.clear();
-            map.reserve(size);
-            for (size_t i = 0; i < size; ++i)
+            map.reserve(static_cast<size_t>(size));
+            for (uint64_t i = 0; i < size; ++i)
             {
                 K key;
                 V value;
@@ -477,19 +480,19 @@ namespace Astra
         template<typename T, typename Compare, typename Allocator>
         BinaryReader& operator()(std::set<T, Compare, Allocator>& set)
         {
-            size_t size;
+            uint64_t size;
             (*this)(size);
-            
+
             // Sanity check
-            const size_t maxSetSize = 10000000; // 10 million entries max
+            const uint64_t maxSetSize = 10000000; // 10 million entries max
             if (size > maxSetSize)
             {
                 m_error = SerializationError::CorruptedData;
                 return *this;
             }
-            
+
             set.clear();
-            for (size_t i = 0; i < size; ++i)
+            for (uint64_t i = 0; i < size; ++i)
             {
                 T item;
                 (*this)(item);
@@ -505,20 +508,20 @@ namespace Astra
         template<typename T, typename Hash, typename Equal, typename Allocator>
         BinaryReader& operator()(std::unordered_set<T, Hash, Equal, Allocator>& set)
         {
-            size_t size;
+            uint64_t size;
             (*this)(size);
-            
+
             // Sanity check
-            const size_t maxSetSize = 10000000; // 10 million entries max
+            const uint64_t maxSetSize = 10000000; // 10 million entries max
             if (size > maxSetSize)
             {
                 m_error = SerializationError::CorruptedData;
                 return *this;
             }
-            
+
             set.clear();
-            set.reserve(size);
-            for (size_t i = 0; i < size; ++i)
+            set.reserve(static_cast<size_t>(size));
+            for (uint64_t i = 0; i < size; ++i)
             {
                 T item;
                 (*this)(item);
@@ -741,6 +744,7 @@ namespace Astra
         // Checksum support
         bool m_checksumEnabled;
         uint32_t m_runningChecksum;
+        bool m_usePortableChecksum = true;
         uint32_t m_expectedChecksum;
         size_t m_headerSize;
         

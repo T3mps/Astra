@@ -141,7 +141,7 @@ namespace Astra
             // Update checksum if enabled and we're past the header
             if (m_checksumEnabled && startPosition >= sizeof(BinaryHeader))
             {
-                m_runningChecksum = Checksum::CRC32(data, size, m_runningChecksum);
+                m_runningChecksum = Checksum::Portable(data, size, m_runningChecksum);
             }
             
             if (m_file.is_open())
@@ -282,7 +282,7 @@ namespace Astra
          */
         BinaryWriter& operator()(const std::string& str)
         {
-            size_t len = str.size();
+            uint64_t len = str.size();
             (*this)(len);
             WriteBytes(str.data(), len);
             return *this;
@@ -294,9 +294,9 @@ namespace Astra
         template<typename T>
         BinaryWriter& operator()(const std::vector<T>& vec)
         {
-            size_t size = vec.size();
+            uint64_t size = vec.size();
             (*this)(size);
-            
+
             if constexpr (std::is_trivially_copyable_v<T>)
             {
                 // Write all at once for POD types
@@ -378,7 +378,7 @@ namespace Astra
         template<typename K, typename V, typename Compare, typename Allocator>
         BinaryWriter& operator()(const std::map<K, V, Compare, Allocator>& map)
         {
-            size_t size = map.size();
+            uint64_t size = map.size();
             (*this)(size);
             for (const auto& [key, value] : map)
             {
@@ -393,7 +393,7 @@ namespace Astra
         template<typename K, typename V, typename Hash, typename Equal, typename Allocator>
         BinaryWriter& operator()(const std::unordered_map<K, V, Hash, Equal, Allocator>& map)
         {
-            size_t size = map.size();
+            uint64_t size = map.size();
             (*this)(size);
             for (const auto& [key, value] : map)
             {
@@ -408,7 +408,7 @@ namespace Astra
         template<typename T, typename Compare, typename Allocator>
         BinaryWriter& operator()(const std::set<T, Compare, Allocator>& set)
         {
-            size_t size = set.size();
+            uint64_t size = set.size();
             (*this)(size);
             for (const auto& item : set)
             {
@@ -423,7 +423,7 @@ namespace Astra
         template<typename T, typename Hash, typename Equal, typename Allocator>
         BinaryWriter& operator()(const std::unordered_set<T, Hash, Equal, Allocator>& set)
         {
-            size_t size = set.size();
+            uint64_t size = set.size();
             (*this)(size);
             for (const auto& item : set)
             {

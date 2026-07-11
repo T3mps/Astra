@@ -768,6 +768,20 @@ namespace Astra
 #endif
             }
 
+            // ISA-independent 64-bit mix (MurmurHash3 finalizer). Identical
+            // output on every platform — used by archive-format v2 checksums.
+            // HashCombine above is FASTER but hardware-dependent (CRC32C).
+            ASTRA_FORCEINLINE uint64_t PortableHashCombine(uint64_t seed, uint64_t value) noexcept
+            {
+                uint64_t h = seed ^ value;
+                h ^= h >> 33;
+                h *= 0xff51afd7ed558ccdULL;
+                h ^= h >> 33;
+                h *= 0xc4ceb9fe1a85ec53ULL;
+                h ^= h >> 33;
+                return h;
+            }
+
             // Prefetch operations
             // 
             // Optimal prefetch distance depends on:

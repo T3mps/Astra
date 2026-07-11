@@ -49,13 +49,38 @@ namespace Astra
             
             return static_cast<uint32_t>(result);
         }
+
+        // ISA-independent checksum for archive format v2+. CRC32 above is kept
+        // ONLY to verify v1 archives written by the same ISA.
+        inline uint32_t Portable(const void* data, size_t size, uint32_t crc = 0)
+        {
+            const uint8_t* bytes = static_cast<const uint8_t*>(data);
+            uint64_t result = crc;
+
+            while (size >= 8)
+            {
+                uint64_t value;
+                std::memcpy(&value, bytes, sizeof(uint64_t));
+                result = Simd::Ops::PortableHashCombine(result, value);
+                bytes += 8;
+                size -= 8;
+            }
+            if (size > 0)
+            {
+                uint64_t value = 0;
+                std::memcpy(&value, bytes, size);
+                result = Simd::Ops::PortableHashCombine(result, value);
+            }
+            return static_cast<uint32_t>(result);
+        }
     }
-    
+
     /**
      * Binary format version history:
-     * v1: Initial format with component hashing and compression support
+     * v1: Initial format (ISA-dependent checksum; size_t container sizes)
+     * v2: Portable checksum; explicit uint64 container sizes; resource block
      */
-    inline constexpr uint16_t BINARY_FORMAT_VERSION = 1;
+    inline constexpr uint16_t BINARY_FORMAT_VERSION = 2;
     inline constexpr char BINARY_MAGIC[6] = "ASTRA";
     
     /**

@@ -637,17 +637,17 @@ namespace Astra
             {
                 writer(m_mask.Data()[i]);
             }
-            writer(m_entityCount);
-            writer(m_entitiesPerChunk);
+            writer(static_cast<uint64_t>(m_entityCount));
+            writer(static_cast<uint64_t>(m_entitiesPerChunk));
             writer(static_cast<uint32_t>(m_chunks.size()));
-            
+
             // Write component descriptors
             writer(static_cast<uint32_t>(m_componentDescriptors.size()));
             for (const auto& desc : m_componentDescriptors)
             {
                 writer(desc.hash);  // Write stable hash instead of runtime ID
-                writer(desc.size);
-                writer(desc.alignment);
+                writer(static_cast<uint64_t>(desc.size));
+                writer(static_cast<uint64_t>(desc.alignment));
                 writer(desc.version);
             }
             
@@ -728,8 +728,8 @@ namespace Astra
                 return ResultType::Err(reader.GetError());
             }
 
-            size_t entityCount;
-            size_t entitiesPerChunk;
+            uint64_t entityCount;
+            uint64_t entitiesPerChunk;
             uint32_t chunkCount;
             reader(entityCount);
             reader(entitiesPerChunk);
@@ -749,7 +749,7 @@ namespace Astra
             for (uint32_t i = 0; i < descriptorCount; ++i)
             {
                 uint64_t hash;
-                size_t size, alignment;
+                uint64_t size, alignment;
                 uint32_t version;
                 reader(hash)(size)(alignment)(version);
 
@@ -790,7 +790,7 @@ namespace Astra
                     : 0;
                 size_t poolChunkSize = componentPool ? componentPool->GetChunkSize()
                                                      : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
-                if (entitiesPerChunk * perEntitySize + alignmentOverhead > poolChunkSize)
+                if (static_cast<size_t>(entitiesPerChunk) * perEntitySize + alignmentOverhead > poolChunkSize)
                 {
                     return ResultType::Err(SerializationError::SizeMismatch);
                 }
@@ -822,7 +822,7 @@ namespace Astra
                 }
 
                 // Create new chunk
-                auto chunk = componentPool ? componentPool->CreateChunk(entitiesPerChunk, descriptors) : nullptr;
+                auto chunk = componentPool ? componentPool->CreateChunk(static_cast<size_t>(entitiesPerChunk), descriptors) : nullptr;
                 if (!chunk)
                 {
                     // Out of memory - cannot continue
@@ -901,7 +901,7 @@ namespace Astra
                 archetype->m_chunks.push_back(std::move(chunk));
             }
 
-            archetype->m_entityCount = entityCount;
+            archetype->m_entityCount = static_cast<size_t>(entityCount);
 
             return ResultType::Ok(std::move(archetype));
         }
