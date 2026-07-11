@@ -104,6 +104,9 @@ namespace Astra
             void* component;
         };
         
+        // Emitted immediately BEFORE the component is removed. `component`
+        // points at the live component and is valid ONLY for the duration of
+        // the handler invocation — never retain it.
         struct ComponentRemoved
         {
             static constexpr Signal flag = Signal::ComponentRemoved;

@@ -299,16 +299,16 @@ namespace Astra
         {
             if (!m_entityManager.IsValid(entity))
                 return false;
-            
+
             T* component = m_archetypeManager->GetComponent<T>(entity);
-            bool removed = m_archetypeManager->RemoveComponent<T>(entity);
-            
-            if (removed && component)
-            {
-                m_signalManager.Emit<Events::ComponentRemoved>(entity, TypeID<T>::Value(), component);
-            }
-            
-            return removed;
+            if (!component)
+                return false;
+
+            // Emit BEFORE removal: the pointer is only valid until the entity
+            // migrates. Handlers must not retain it past their invocation.
+            m_signalManager.Emit<Events::ComponentRemoved>(entity, TypeID<T>::Value(), component);
+
+            return m_archetypeManager->RemoveComponent<T>(entity);
         }
         
         template<Component T>
@@ -390,14 +390,12 @@ namespace Astra
             if (entities.empty())
                 return 0;
             
-            // Filter out invalid entities and collect components for signals
+            // Filter out invalid entities
             SmallVector<Entity, 256> validEntities;
-            SmallVector<T*, 256> componentsToRemove;
             validEntities.reserve(entities.size());
-            
+
             if (m_signalManager.IsSignalEnabled(Signal::ComponentRemoved))
             {
-                componentsToRemove.reserve(entities.size());
                 for (Entity entity : entities)
                 {
                     if (m_entityManager.IsValid(entity))
@@ -405,8 +403,9 @@ namespace Astra
                         T* component = m_archetypeManager->GetComponent<T>(entity);
                         if (component)
                         {
+                            // Emit before removal — see RemoveComponent.
+                            m_signalManager.Emit<Events::ComponentRemoved>(entity, TypeID<T>::Value(), component);
                             validEntities.push_back(entity);
-                            componentsToRemove.push_back(component);
                         }
                     }
                 }
@@ -421,23 +420,12 @@ namespace Astra
                     }
                 }
             }
-            
+
             if (validEntities.empty())
                 return 0;
-            
+
             // Batch remove components
-            size_t removedCount = m_archetypeManager->RemoveComponents<T>(validEntities);
-            
-            // Emit signals if enabled
-            if (m_signalManager.IsSignalEnabled(Signal::ComponentRemoved))
-            {
-                for (size_t i = 0; i < removedCount && i < componentsToRemove.size(); ++i)
-                {
-                    m_signalManager.Emit<Events::ComponentRemoved>(validEntities[i], TypeID<T>::Value(), componentsToRemove[i]);
-                }
-            }
-            
-            return removedCount;
+            return m_archetypeManager->RemoveComponents<T>(validEntities);
         }
 
         template<Component T>
@@ -560,16 +548,13 @@ namespace Astra
                 }
             }
 
-            bool result = m_archetypeManager->RemoveComponentByID(entity, componentId);
-
-            if (result && m_signalManager.IsSignalEnabled(Signal::ComponentRemoved))
+            if (componentPtr && m_signalManager.IsSignalEnabled(Signal::ComponentRemoved))
             {
-                // Note: componentPtr points to now-invalid memory after removal,
-                // matching the behavior of the templated RemoveComponent
+                // Emit BEFORE removal so the pointer is still valid.
                 m_signalManager.Emit<Events::ComponentRemoved>(entity, componentId, componentPtr);
             }
 
-            return result;
+            return m_archetypeManager->RemoveComponentByID(entity, componentId);
         }
 
         /**
