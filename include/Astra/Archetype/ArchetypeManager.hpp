@@ -265,7 +265,9 @@ namespace Astra
             
             EntityRecord& oldLoc = it->second;
             ComponentID componentId = TypeID<T>::Value();
-            
+            if (componentId >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return nullptr;   // registration refused (ID-space exhausted): typed-path parity with the ByID guard
+
             if (oldLoc.archetype->GetMask().Test(componentId)) ASTRA_UNLIKELY
                 return nullptr;
                 
@@ -290,8 +292,10 @@ namespace Astra
                 return;
             registry->RegisterComponent<T>();
             ComponentID componentID = TypeID<T>::Value();
+            if (componentID >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return;   // registration refused (ID-space exhausted): typed-path parity with the ByID guard
 
-            auto batches = GroupEntitiesByArchetype(entities, 
+            auto batches = GroupEntitiesByArchetype(entities,
                 [componentID](Archetype* arch)
                 {
                     return !arch->GetMask().Test(componentID);

@@ -531,7 +531,6 @@ namespace Astra
                 slot.id = id;
                 slot.size = static_cast<uint16_t>(desc->size);
                 slot.descriptor = desc;
-                slot.isValid = true;
 
                 // Decide between inline storage and heap allocation
                 if (desc->size <= SBO_SIZE)
@@ -548,6 +547,11 @@ namespace Astra
                     slot.storage.heapPtr = result.ptr;
                     desc->ConstructWith(slot.storage.heapPtr, data);
                 }
+
+                // Only mark the slot valid once its storage is fully established —
+                // a failed heap allocation above must leave the slot invalid so
+                // teardown never frees a garbage pointer. (Mirrors Deserialize.)
+                slot.isValid = true;
             }
             else
             {
