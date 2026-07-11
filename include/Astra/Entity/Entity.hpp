@@ -56,7 +56,9 @@ namespace Astra
 
             constexpr BasicEntity() noexcept : m_entity{Traits::INVALID} {}
             constexpr explicit BasicEntity(StorageType value) noexcept : m_entity{value} {}
-            constexpr BasicEntity(StorageType id, VersionType version) noexcept: m_entity{(static_cast<StorageType>(version) << VERSION_SHIFT) | (id & ID_MASK)} {}
+            constexpr BasicEntity(StorageType id, VersionType version) noexcept :
+                m_entity{static_cast<StorageType>((static_cast<StorageType>(version) << VERSION_SHIFT) | (id & ID_MASK))}
+            {}
 
             ASTRA_NODISCARD constexpr explicit operator bool() const noexcept { return IsValid(); }
 

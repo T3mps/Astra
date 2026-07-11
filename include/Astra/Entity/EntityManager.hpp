@@ -29,7 +29,7 @@ namespace Astra
         {
             EntityTable::Config tableConfig;
             
-            Config(IDType segmentSize = 65536) :
+            Config(IDType segmentSize = EntityTable::Config::DEFAULT_ENTITIES_PER_SEGMENT) :
                 tableConfig(segmentSize)
             {}
         };

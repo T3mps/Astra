@@ -112,8 +112,6 @@ namespace Astra
         ComponentDestructorFn destructor;
         // Followed by: aligned component data of dataSize bytes
 
-        static_assert(sizeof(Entity) == 4, "Entity must be 4 bytes");
-        static_assert(sizeof(ComponentID) == 2, "ComponentID must be 2 bytes");
         static_assert(sizeof(ComponentDestructorFn) == 8, "Function pointer must be 8 bytes");
 
         void* GetDataPtr()

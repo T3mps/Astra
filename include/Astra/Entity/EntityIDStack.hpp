@@ -86,7 +86,7 @@ namespace Astra
             
             for (size_t i = 0; i < toAllocate; ++i)
             {
-                *out++ = VersionedID{startID + static_cast<IDType>(i), INITIAL_VERSION};
+                *out++ = VersionedID{static_cast<IDType>(startID + static_cast<IDType>(i)), INITIAL_VERSION};
                 ++allocated;
             }
             
