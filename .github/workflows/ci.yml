@@ -10,6 +10,10 @@ env:
 jobs:
   windows-msvc:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release, Dist]
     steps:
       - uses: actions/checkout@v4
       - name: Download premake
@@ -21,10 +25,10 @@ jobs:
         run: .\premake5.exe vs2022
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
-      - name: Build (Release)
-        run: msbuild Astra.sln /p:Configuration=Release /m /v:minimal
+      - name: Build (${{ matrix.config }})
+        run: msbuild Astra.sln /p:Configuration=${{ matrix.config }} /m /v:minimal
       - name: Test
-        run: .\bin\Release-windows-x86_64\AstraTest\AstraTest.exe --gtest_brief=1
+        run: .\bin\${{ matrix.config }}-windows-x86_64\AstraTest\AstraTest.exe --gtest_brief=1
 
   linux:
     strategy:
@@ -53,3 +57,7 @@ jobs:
         run: make config=release AstraTest -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.compiler }}
       - name: Test
         run: ./bin/Release-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+      - name: Build (Debug, tests)
+        run: make config=debug AstraTest -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.compiler }}
+      - name: Test (Debug)
+        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
