@@ -683,7 +683,6 @@ namespace Astra
                     slot.id = desc->id;
                     slot.size = static_cast<uint16_t>(desc->size);
                     slot.descriptor = desc;
-                    slot.isValid = true;
 
                     if (desc->size <= SBO_SIZE)
                     {
@@ -698,6 +697,10 @@ namespace Astra
                         slot.storage.heapPtr = result.ptr;
                         dst = result.ptr;
                     }
+                    // Only mark the slot valid once its storage is fully
+                    // established — a failed heap allocation above must leave
+                    // the slot invalid so teardown never frees a garbage pointer.
+                    slot.isValid = true;
                     // …default-construct, then deserialize over it.
                     desc->DefaultConstruct(dst);
                 }
