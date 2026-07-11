@@ -689,14 +689,16 @@ TEST_F(SmallVectorTest, DeductionGuide)
 }
 
 // Insert-fill of a non-trivial type must not move_backward/fill into
-// uninitialized storage. Exercises the count < tail path of insert(pos, count, value).
+// uninitialized storage. Exercises the count >= tail (else) path of
+// insert(pos, count, value).
 TEST_F(SmallVectorTest, InsertFillWithNonTrivialType)
 {
     Astra::SmallVector<std::string, 4> v;
     v.push_back("a");
     v.push_back("b");
     v.push_back("c");
-    // Insert 3 copies in the middle: exercises the uninitialized-tail path.
+    // Insert 3 copies at offset 1: tail = 3 - 1 = 2, count = 3, so
+    // count >= tail — the whole tail lands in raw space beyond the current end.
     v.insert(v.begin() + 1, 3, std::string("X"));
     ASSERT_EQ(v.size(), 6u);
     EXPECT_EQ(v[0], "a");
@@ -705,4 +707,24 @@ TEST_F(SmallVectorTest, InsertFillWithNonTrivialType)
     EXPECT_EQ(v[3], "X");
     EXPECT_EQ(v[4], "b");
     EXPECT_EQ(v[5], "c");
+}
+
+TEST_F(SmallVectorTest, InsertFillCountLessThanTail)
+{
+    // 5 elements, insert 2 at offset 1: tail = 5 - 1 = 4, count = 2, so
+    // count < tail — exercises the std::move_backward path of insert(pos, count, value).
+    Astra::SmallVector<std::string, 4> v;
+    for (const char* s : { "a", "b", "c", "d", "e" }) v.push_back(s);
+    ASSERT_EQ(v.size(), 5u);
+
+    v.insert(v.begin() + 1, 2, std::string("X"));
+
+    ASSERT_EQ(v.size(), 7u);
+    EXPECT_EQ(v[0], "a");
+    EXPECT_EQ(v[1], "X");
+    EXPECT_EQ(v[2], "X");
+    EXPECT_EQ(v[3], "b");
+    EXPECT_EQ(v[4], "c");
+    EXPECT_EQ(v[5], "d");
+    EXPECT_EQ(v[6], "e");
 }
