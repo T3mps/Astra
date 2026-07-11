@@ -55,17 +55,25 @@ TEST_F(BitmapTest, BasicBitOperations)
 TEST_F(BitmapTest, BoundaryConditions)
 {
     Astra::Bitmap<256> bitmap;
-    
+
     // Test setting/testing out of range indices
     bitmap.Set(255);  // Valid - last bit
     EXPECT_TRUE(bitmap.Test(255));
-    
+
+    // Task 11: Set() now asserts loudly on out-of-range indices in Debug
+    // (component ID space overflow guard) instead of silently ignoring them.
+    // Release builds keep the old no-op fallback since ASTRA_ASSERT compiles out.
+#ifdef ASTRA_BUILD_DEBUG
+    EXPECT_DEATH({ bitmap.Set(256); }, "");
+    EXPECT_DEATH({ bitmap.Set(1000); }, "");
+#else
     bitmap.Set(256);  // Invalid - out of range
     EXPECT_FALSE(bitmap.Test(256));
-    
+
     bitmap.Set(1000); // Invalid - way out of range
     EXPECT_FALSE(bitmap.Test(1000));
-    
+#endif
+
     // Test word boundaries (64-bit words)
     bitmap.Set(63);
     bitmap.Set(64);

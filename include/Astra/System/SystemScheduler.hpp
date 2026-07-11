@@ -54,7 +54,7 @@ namespace Astra
             ASTRA_ASSERT(!IsExecuting(), "Cannot add system while scheduler is executing");
             if (IsExecuting()) return;
 
-            size_t typeId = TypeID<T>::Value();
+            uint64_t typeId = TypeID<T>::Hash();
 
             // Check if system type is already registered
             if (m_systemIndices.Contains(typeId))
@@ -62,19 +62,19 @@ namespace Astra
                 ASTRA_ASSERT(false, "System type already registered");
                 return;
             }
-            
+
             size_t index = m_systems.size();
             m_systemIndices[typeId] = index;
-            
+
             // Create system instance with perfect forwarding
             auto* instance = new T(std::forward<Args>(args)...);
-            
+
             // Create initial metadata
             SystemMetadata metadata
             {
                 .reads = ComponentMask{},
                 .writes = ComponentMask{},
-                .typeId = typeId,
+                .typeId = static_cast<size_t>(typeId),
                 .insertionOrder = index
             };
             
@@ -117,7 +117,7 @@ namespace Astra
             ASTRA_ASSERT(!IsExecuting(), "Cannot remove system while scheduler is executing");
             if (IsExecuting()) return;
 
-            size_t typeId = TypeID<T>::Value();
+            uint64_t typeId = TypeID<T>::Hash();
             auto it = m_systemIndices.Find(typeId);
             if (it == m_systemIndices.end())
                 return;
@@ -141,7 +141,7 @@ namespace Astra
         template<System T>
         ASTRA_NODISCARD bool HasSystem() const
         {
-            return m_systemIndices.Contains(TypeID<T>::Value());
+            return m_systemIndices.Contains(TypeID<T>::Hash());
         }
 
         void Execute(Registry& registry)
@@ -387,7 +387,7 @@ namespace Astra
             ASTRA_ASSERT(!IsExecuting(), "Cannot add system while scheduler is executing");
             if (IsExecuting()) return;
 
-            size_t typeId = TypeID<SystemType>::Value();
+            uint64_t typeId = TypeID<SystemType>::Hash();
 
             // Check if system type is already registered
             if (m_systemIndices.Contains(typeId))
@@ -407,7 +407,7 @@ namespace Astra
             {
                 .reads = ComponentMask{},
                 .writes = ComponentMask{},
-                .typeId = typeId,
+                .typeId = static_cast<size_t>(typeId),
                 .insertionOrder = index
             };
 
@@ -432,7 +432,7 @@ namespace Astra
         }
         
         std::vector<SystemEntry> m_systems;                             // All registered systems
-        FlatMap<size_t, size_t> m_systemIndices;                        // TypeID value to index mapping
+        FlatMap<uint64_t, size_t> m_systemIndices;                      // key: TypeID<T>::Hash() — systems must not consume dense ComponentIDs
         mutable std::vector<std::vector<size_t>> m_executionPlan;       // Cached parallel groups
         mutable bool m_needsRebuild = true;                             // Whether execution plan needs rebuild
         mutable std::atomic<bool> m_isExecuting{false};                 // Execution lock to prevent modification during parallel execution

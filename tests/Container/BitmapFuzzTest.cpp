@@ -69,10 +69,19 @@ namespace
 
     TEST(BitmapFuzz, OutOfBoundsIsNoop)
     {
+        // Task 11: Set/Reset now assert loudly on out-of-range indices in Debug
+        // (component ID space overflow guard) instead of silently ignoring them.
+        // Release builds keep the old no-op fallback since ASTRA_ASSERT compiles out.
+#ifdef ASTRA_BUILD_DEBUG
+        Astra::Bitmap<128> b;
+        EXPECT_DEATH({ b.Set(128); }, "");
+        EXPECT_DEATH({ b.Reset(0); b.Set(9999); }, "");
+#else
         Astra::Bitmap<128> b;
         b.Set(128);
         b.Set(9999);
         EXPECT_TRUE(b.None());
         EXPECT_FALSE(b.Test(128));
+#endif
     }
 }

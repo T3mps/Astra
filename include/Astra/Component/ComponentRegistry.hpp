@@ -98,6 +98,16 @@ namespace Astra
         template<Component T>
         void RegisterComponentImpl(ComponentID id)
         {
+            ASTRA_ASSERT(id < MAX_COMPONENTS,
+                         "Component ID space exhausted (MAX_COMPONENTS); raise ASTRA_MAX_COMPONENTS");
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+            {
+                // Refuse registration so failure is observable (descriptor
+                // lookup returns nullptr; Registry::AddComponent returns
+                // nullptr) instead of silently corrupting ComponentMask bits.
+                return;
+            }
+
             ComponentDescriptor desc;
             desc.id = id;
             // Empty components should report size 0 to avoid memory allocation
