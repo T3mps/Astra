@@ -625,6 +625,94 @@ namespace Astra
             return true;
         }
 
+        // ====================== Serialization (archive v2+) ======================
+
+        void Serialize(BinaryWriter& writer) const
+        {
+            uint32_t count = 0;
+            for (const auto& slot : m_resources)
+            {
+                if (slot.isValid && slot.descriptor) ++count;
+            }
+            writer(count);
+
+            for (const auto& slot : m_resources)
+            {
+                if (!slot.isValid || !slot.descriptor) continue;
+                writer(slot.descriptor->hash);
+                void* data = slot.isHeap
+                    ? slot.storage.heapPtr
+                    : const_cast<void*>(static_cast<const void*>(slot.storage.inlineData));
+                slot.descriptor->serializeVersioned(writer, data);
+            }
+        }
+
+        // Restores resources previously written by Serialize. Every stored
+        // type must already be registered in the ComponentRegistry (looked up
+        // by stable hash); returns false on unknown types or stream errors.
+        bool Deserialize(BinaryReader& reader)
+        {
+            uint32_t count = 0;
+            reader(count);
+            if (reader.HasError()) return false;
+
+            auto registry = m_componentRegistry.lock();
+            if (!registry) return false;
+
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                uint64_t hash = 0;
+                reader(hash);
+                if (reader.HasError()) return false;
+
+                const ComponentDescriptor* desc = registry->GetComponentDescriptorByHash(hash);
+                if (!desc || desc->id >= MAX_COMPONENTS)
+                    return false;   // caller maps this to UnknownComponent
+
+                // Allocate a slot (same layout policy as SetByID)…
+                uint16_t index = m_sparse[desc->id];
+                void* dst = nullptr;
+                if (index == INVALID_INDEX)
+                {
+                    index = static_cast<uint16_t>(m_resources.size());
+                    if (index >= INVALID_INDEX) return false;
+                    m_sparse[desc->id] = index;
+                    m_resources.emplace_back();
+
+                    auto& slot = m_resources[index];
+                    slot.id = desc->id;
+                    slot.size = static_cast<uint16_t>(desc->size);
+                    slot.descriptor = desc;
+                    slot.isValid = true;
+
+                    if (desc->size <= SBO_SIZE)
+                    {
+                        slot.isHeap = false;
+                        dst = slot.storage.inlineData;
+                    }
+                    else
+                    {
+                        slot.isHeap = true;
+                        AllocResult result = AllocateMemory(desc->size, desc->alignment);
+                        if (!result.ptr) return false;
+                        slot.storage.heapPtr = result.ptr;
+                        dst = result.ptr;
+                    }
+                    // …default-construct, then deserialize over it.
+                    desc->DefaultConstruct(dst);
+                }
+                else
+                {
+                    auto& slot = m_resources[index];
+                    dst = slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData;
+                }
+
+                if (!desc->deserializeVersioned(reader, dst))
+                    return false;
+            }
+            return !reader.HasError();
+        }
+
     private:
         struct ResourceSlot
         {

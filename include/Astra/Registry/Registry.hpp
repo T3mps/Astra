@@ -1438,7 +1438,8 @@ namespace Astra
             m_entityManager.Serialize(writer);
             m_archetypeManager->Serialize(writer);
             m_relationshipGraph->Serialize(writer);
-            
+            m_resourceStorage.Serialize(writer);   // format v2 resource block
+
             // Finalize with checksum
             writer.FinalizeHeader();
             
@@ -1471,7 +1472,8 @@ namespace Astra
             m_entityManager.Serialize(writer);
             m_archetypeManager->Serialize(writer);
             m_relationshipGraph->Serialize(writer);
-            
+            m_resourceStorage.Serialize(writer);   // format v2 resource block
+
             // Finalize with checksum
             writer.FinalizeHeader();
             
@@ -1564,7 +1566,16 @@ namespace Astra
                 return Result<std::unique_ptr<Registry>, SerializationError>::Err(*graphResult.GetError());
             }
             registry->m_relationshipGraph = std::make_shared<RelationshipGraph>(std::move(*graphResult.GetValue()));
-            
+
+            // Resource block exists from format v2 onward.
+            if (reader.GetVersion() >= 2)
+            {
+                if (!registry->m_resourceStorage.Deserialize(reader))
+                {
+                    return Result<std::unique_ptr<Registry>, SerializationError>::Err(SerializationError::UnknownComponent);
+                }
+            }
+
             // Verify checksum
             auto checksumResult = reader.VerifyChecksum();
             if (checksumResult.IsErr())
