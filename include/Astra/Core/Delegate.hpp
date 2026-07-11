@@ -57,9 +57,12 @@ namespace Astra
             }
             else
             {
-                // Use shared_ptr for large functors to enable safe copying
-                auto* heapFunc = new DecayedFunc(std::forward<Func>(func));
-                *reinterpret_cast<std::shared_ptr<DecayedFunc>*>(m_storage) = std::shared_ptr<DecayedFunc>(heapFunc);
+                // Use shared_ptr for large functors to enable safe copying.
+                // Placement-new: m_storage is raw bytes — assignment would
+                // "release" a garbage control block.
+                static_assert(sizeof(std::shared_ptr<DecayedFunc>) <= SMALL_BUFFER_SIZE,
+                              "shared_ptr must fit the small buffer");
+                new (m_storage) std::shared_ptr<DecayedFunc>(new DecayedFunc(std::forward<Func>(func)));
                 m_invoker = &InvokeLargeFunctor<DecayedFunc>;
                 m_manager = &ManageLargeFunctor<DecayedFunc>;
             }
