@@ -673,10 +673,17 @@ namespace Astra
         requires std::is_trivially_copyable_v<T>
         T Peek()
         {
-            T value;
+            T value{};
             size_t savedPos = m_position;
+            uint32_t savedChecksum = m_runningChecksum;   // Peek must not contaminate the checksum
             (*this)(value);
+            if (m_data.empty() && m_file.is_open())
+            {
+                // File mode: rewind the stream cursor too.
+                m_file.seekg(static_cast<std::streamoff>(savedPos), std::ios::beg);
+            }
             m_position = savedPos;
+            m_runningChecksum = savedChecksum;
             return value;
         }
         

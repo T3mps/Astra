@@ -970,15 +970,18 @@ namespace Astra
             size_t chunksToAllocate = std::min(m_config.chunksPerBlock, remainingCapacity);
             size_t blockSize = chunksToAllocate * m_config.chunkSize;
             
-            // Ensure proper alignment for SIMD operations (32-byte for AVX)
-            constexpr size_t SIMD_ALIGNMENT = 32;
+            // Blocks are cache-line aligned; chunk bases inherit this, so the
+            // strongest alignment a component array can rely on is
+            // CACHE_LINE_SIZE (64). (Windows VirtualAlloc gives 64KB anyway;
+            // this matters on the POSIX posix_memalign fallback.)
+            constexpr size_t BLOCK_ALIGNMENT = CACHE_LINE_SIZE;
             AllocFlags flags = AllocFlags::ZeroMem;
             if (m_config.useHugePages)
             {
                 flags = flags | AllocFlags::HugePages;
             }
-            
-            AllocResult result = AllocateMemory(blockSize, SIMD_ALIGNMENT, flags);
+
+            AllocResult result = AllocateMemory(blockSize, BLOCK_ALIGNMENT, flags);
             if (!result.ptr) ASTRA_UNLIKELY
                 return false;
             

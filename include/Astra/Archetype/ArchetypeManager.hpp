@@ -1122,10 +1122,6 @@ namespace Astra
         template<typename PostMoveOp>
         void BatchMoveEntitiesInternal(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch, PostMoveOp&& postMoveOp)
         {
-#ifdef ASTRA_BUILD_DEBUG
-            printf("BatchMoveEntitiesInternal: Moving %zu entities from archetype %p to %p\n", 
-                   entityBatch.size(), srcArchetype, dstArchetype);
-#endif
             // Check if already sorted (common case for batch-created entities)
             bool needsSort = false;
             for (size_t i = 1; i < entityBatch.size(); ++i)
@@ -1158,20 +1154,12 @@ namespace Astra
             // Use new batch move infrastructure
             std::vector<EntityLocation> newLocations = dstArchetype->BatchMoveEntitiesFrom(
                 entitiesToAdd, *srcArchetype, srcLocations);
-            
-#ifdef ASTRA_BUILD_DEBUG
-            printf("  BatchMoveEntitiesFrom returned %zu locations (expected %zu)\n", 
-                   newLocations.size(), entityBatch.size());
-#endif
-            
+
             // Check if the operation succeeded (non-empty result means success)
             if (newLocations.empty() && !entityBatch.empty())
             {
                 // Failed to allocate chunks - cannot proceed with batch operation
                 // This is a critical failure as we cannot guarantee entity integrity
-#ifdef ASTRA_BUILD_DEBUG
-                printf("  ERROR: Failed to allocate chunks for batch move!\n");
-#endif
                 ASTRA_ASSERT(false, "Failed to allocate chunks for batch move operation");
                 return;
             }

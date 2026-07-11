@@ -336,25 +336,36 @@ namespace Astra
         iterator insert(const_iterator pos, size_type count, const T& value)
         {
             size_type offset = pos - cbegin();
-            
+
             if (count == 0)
                 return begin() + offset;
-                
+
+            // Copy first: `value` may alias an element about to be shifted.
+            T valueCopy(value);
+
             if (m_size + count > capacity())
                 Grow(m_size + count);
-                
+
             iterator it = begin() + offset;
-            
-            // Move existing elements
-            if (it != end())
+            size_type tail = m_size - offset;
+
+            if (count < tail)
             {
-                std::move_backward(it, end(), end() + count);
+                // Move-construct the last `count` elements into raw space,
+                // shift the rest with move-assignment, then assign the gap.
+                std::uninitialized_move(end() - count, end(), end());
+                std::move_backward(it, end() - count, end());
+                std::fill_n(it, count, valueCopy);
             }
-            
-            // Insert new elements
-            std::uninitialized_fill_n(it, count, value);
+            else
+            {
+                // Whole tail lands in raw space beyond the current end.
+                std::uninitialized_move(it, end(), it + count);
+                std::fill_n(it, tail, valueCopy);
+                std::uninitialized_fill_n(it + tail, count - tail, valueCopy);
+            }
+
             m_size += count;
-            
             return it;
         }
         

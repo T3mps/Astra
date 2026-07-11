@@ -189,16 +189,6 @@ namespace Astra::Compression::Detail
 
                 if (isCompressed)
                 {
-                    // For compressed blocks, we need to know uncompressed size
-                    // This is tricky - smallz4 doesn't store it per block
-                    // We'll have to decompress and see
-                    
-                    // Try decompressing with a reasonable max size (e.g., 4MB)
-                    const size_t maxBlockSize = 4 * 1024 * 1024;
-                    auto result = Decompress(src, blockSize, maxBlockSize);
-                    
-                    // Since we don't know exact size, we need a different approach
-                    // Let's decompress to a temporary buffer and stop when input consumed
                     auto blockResult = DecompressBlock(src, blockSize);
                     if (blockResult.IsErr())
                         return blockResult;

@@ -113,6 +113,8 @@ namespace Astra
             // Empty components should report size 0 to avoid memory allocation
             desc.size = std::is_empty_v<T> ? 0 : sizeof(T);
             desc.alignment = std::is_empty_v<T> ? 1 : alignof(T);
+            ASTRA_ASSERT(desc.alignment <= CACHE_LINE_SIZE,
+                         "Component alignment above 64 bytes is not supported by chunk storage");
 
             desc.hash = TypeID<T>::Hash();
 

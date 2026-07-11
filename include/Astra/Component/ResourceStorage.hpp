@@ -91,6 +91,8 @@ namespace Astra
         ASTRA_NODISCARD T* Get() noexcept
         {
             ComponentID id = TypeID<T>::Value();
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return nullptr;
             uint16_t index = m_sparse[id];
             if (index == INVALID_INDEX) [[unlikely]]
                 return nullptr;
@@ -107,6 +109,8 @@ namespace Astra
         ASTRA_NODISCARD const T* Get() const noexcept
         {
             ComponentID id = TypeID<T>::Value();
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return nullptr;
             uint16_t index = m_sparse[id];
             if (index == INVALID_INDEX) [[unlikely]]
                 return nullptr;
@@ -733,6 +737,52 @@ namespace Astra
             bool isValid : 1;   // true if slot contains valid resource
             
             ResourceSlot() : descriptor(nullptr), id(0), size(0), isHeap(false), isValid(false) {}
+
+            ResourceSlot(ResourceSlot&& other) noexcept :
+                descriptor(other.descriptor), id(other.id), size(other.size),
+                isHeap(other.isHeap), isValid(other.isValid)
+            {
+                if (isValid && !isHeap && descriptor)
+                {
+                    descriptor->MoveConstruct(storage.inlineData, other.storage.inlineData);
+                    descriptor->Destruct(other.storage.inlineData);
+                }
+                else
+                {
+                    storage.heapPtr = other.storage.heapPtr;
+                }
+                other.isValid = false;
+                other.storage.heapPtr = nullptr;
+            }
+
+            ResourceSlot& operator=(ResourceSlot&& other) noexcept
+            {
+                if (this != &other)
+                {
+                    if (isValid && descriptor)
+                    {
+                        void* mine = isHeap ? storage.heapPtr : static_cast<void*>(storage.inlineData);
+                        descriptor->Destruct(mine);
+                        if (isHeap) FreeMemory(storage.heapPtr, size);
+                    }
+                    descriptor = other.descriptor; id = other.id; size = other.size;
+                    isHeap = other.isHeap; isValid = other.isValid;
+                    if (isValid && !isHeap && descriptor)
+                    {
+                        descriptor->MoveConstruct(storage.inlineData, other.storage.inlineData);
+                        descriptor->Destruct(other.storage.inlineData);
+                    }
+                    else
+                    {
+                        storage.heapPtr = other.storage.heapPtr;
+                    }
+                    other.isValid = false;
+                    other.storage.heapPtr = nullptr;
+                }
+                return *this;
+            }
+            ResourceSlot(const ResourceSlot&) = delete;
+            ResourceSlot& operator=(const ResourceSlot&) = delete;
         };
 
         static constexpr uint16_t INVALID_INDEX = std::numeric_limits<uint16_t>::max();

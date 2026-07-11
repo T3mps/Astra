@@ -151,8 +151,15 @@ namespace Astra
         // ============= Entity Commands =============
 
         /**
-         * Create a new entity. The entity ID is allocated immediately,
-         * but the entity is not added to the archetype system until Execute().
+         * Create a new entity. The entity ID is allocated from the Registry's
+         * EntityManager IMMEDIATELY (at record time); only the archetype
+         * insertion is deferred to Execute().
+         *
+         * THREADING: because allocation mutates shared Registry state at
+         * record time, CreateEntity/CreateEntities must only be recorded from
+         * the thread that owns the Registry — including when this buffer is a
+         * ParallelCommandBuffer thread buffer. All other commands are safe to
+         * record from worker threads.
          */
         Entity CreateEntity()
         {
@@ -1102,6 +1109,9 @@ namespace Astra
          * running on fiber-based job systems must pin the fiber to its thread
          * while recording commands, or the buffer of a different thread may
          * be written concurrently.
+         *
+         * NOTE: CreateEntity/CreateEntities must not be recorded from worker
+         * threads (they allocate from the shared EntityManager at record time).
          */
         CommandBuffer& GetThreadBuffer() const
         {
