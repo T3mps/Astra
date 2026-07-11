@@ -773,6 +773,29 @@ namespace Astra
                 }
             }
 
+            // Validate that the saved per-chunk layout fits the pool we will
+            // allocate from — a save produced with a larger chunkSize must
+            // fail cleanly instead of overflowing chunk memory.
+            {
+                size_t perEntitySize = 0;
+                size_t nonEmptyComponents = 0;
+                for (const auto& d : descriptors)
+                {
+                    if (d.size == 0) continue;
+                    perEntitySize += d.size;
+                    ++nonEmptyComponents;
+                }
+                size_t alignmentOverhead = nonEmptyComponents > 1
+                    ? (nonEmptyComponents - 1) * CACHE_LINE_SIZE
+                    : 0;
+                size_t poolChunkSize = componentPool ? componentPool->GetChunkSize()
+                                                     : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                if (entitiesPerChunk * perEntitySize + alignmentOverhead > poolChunkSize)
+                {
+                    return ResultType::Err(SerializationError::SizeMismatch);
+                }
+            }
+
             // Create new archetype
             auto archetype = std::make_unique<Archetype>(mask);
             archetype->m_chunkPool = componentPool;

@@ -52,34 +52,38 @@ namespace Astra
             m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
-            m_workScheduler(config.workScheduler)
+            m_workScheduler(config.workScheduler),
+            m_config(config)
         {}
-        
+
         Registry(const EntityManager::Config& entityConfig, const ArchetypeChunkPool::Config& chunkConfig) :
             m_entityManager(entityConfig),
             m_componentRegistry(std::make_shared<ComponentRegistry>()),
             m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, chunkConfig)),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry),
-            m_workScheduler(nullptr)
+            m_workScheduler(nullptr),
+            m_config{entityConfig, chunkConfig, {}, nullptr}
         {}
-        
+
         Registry(std::shared_ptr<ComponentRegistry> componentRegistry, const Config& config = {}) :
             m_entityManager(config.entityManagerConfig),
             m_componentRegistry(std::move(componentRegistry)),
             m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
-            m_workScheduler(config.workScheduler)
+            m_workScheduler(config.workScheduler),
+            m_config(config)
         {}
-        
+
         explicit Registry(const Registry& other, const Config& config = {}) :
             m_entityManager(config.entityManagerConfig),
             m_componentRegistry(other.m_componentRegistry),
             m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
-            m_workScheduler(config.workScheduler)
+            m_workScheduler(config.workScheduler),
+            m_config(config)
         {}
 
         ~Registry() = default;
@@ -1004,7 +1008,7 @@ namespace Astra
                 // TODO: Consider if we want to emit signals during Clear()
             }
             
-            m_archetypeManager = std::make_shared<ArchetypeManager>(m_componentRegistry);
+            m_archetypeManager = std::make_shared<ArchetypeManager>(m_componentRegistry, m_config.chunkPoolConfig);
 
             m_relationshipGraph->Clear();
             
@@ -1547,7 +1551,7 @@ namespace Astra
             registry->m_entityManager = std::move(*(*managerResult.GetValue()));
             
             // Create new ArchetypeManager with the component registry and deserialize into it
-            registry->m_archetypeManager = std::make_shared<ArchetypeManager>(componentRegistry);
+            registry->m_archetypeManager = std::make_shared<ArchetypeManager>(componentRegistry, config.chunkPoolConfig);
             if (!registry->m_archetypeManager->Deserialize(reader))
             {
                 return Result<std::unique_ptr<Registry>, SerializationError>::Err(SerializationError::CorruptedData);
@@ -1578,5 +1582,6 @@ namespace Astra
         SignalManager m_signalManager;
         ResourceStorage m_resourceStorage;
         std::shared_ptr<IWorkScheduler> m_workScheduler;  // null = sequential inline fallback
+        Config m_config;   // retained so Clear()/Load() preserve pool + storage policy
     };
 }
