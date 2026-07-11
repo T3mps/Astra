@@ -454,7 +454,12 @@ namespace Astra
             {
                 ComponentID id = dstDesc.id;
                 const auto& dstInfo = dstArrays[id];
-                
+
+                if (dstInfo.base == nullptr) ASTRA_UNLIKELY
+                {
+                    continue;  // empty component: presence is carried by the mask
+                }
+
                 void* dstPtr = static_cast<std::byte*>(dstInfo.base) + dstEntityIndex * dstInfo.stride;
 
                 const auto& srcInfo = srcArrays[id];
@@ -1305,11 +1310,11 @@ namespace Astra
                 for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
                 {
                     const auto& srcInfo = srcArrays[id];
-                    if (!srcInfo.isValid)
+                    if (!srcInfo.isValid || srcInfo.base == nullptr)
                     {
                         continue;
                     }
-                    
+
                     void* srcPtr = static_cast<std::byte*>(srcInfo.base) + srcEntityIndex * srcInfo.stride;
                     void* destPtr = static_cast<std::byte*>(destArrays[id].base) + destEntityIndex * destArrays[id].stride;
                     

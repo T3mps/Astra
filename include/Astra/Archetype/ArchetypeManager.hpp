@@ -1022,8 +1022,14 @@ namespace Astra
             {
                 auto& dstComp = dstComponents[dstIdx];
                 const auto& dstArrayInfo = dstChunk->m_componentArrays[dstComp.id];
+
+                if (dstArrayInfo.base == nullptr) ASTRA_UNLIKELY
+                {
+                    continue;  // empty component: nothing to construct or move
+                }
+
                 void* dstPtr = static_cast<std::byte*>(dstArrayInfo.base) + dstEntityIdx * dstArrayInfo.stride;
-                
+
                 if (dstComp.id == newComponentId) ASTRA_UNLIKELY
                 {
                     new (dstPtr) T(std::forward<Args>(args)...);
@@ -1259,6 +1265,12 @@ namespace Astra
             {
                 auto& dstComp = dstComponents[dstIdx];
                 const auto& dstArrayInfo = dstChunk->m_componentArrays[dstComp.id];
+
+                if (dstArrayInfo.base == nullptr) ASTRA_UNLIKELY
+                {
+                    continue;  // empty component: nothing to construct or move
+                }
+
                 void* dstPtr = static_cast<std::byte*>(dstArrayInfo.base) + dstEntityIdx * dstArrayInfo.stride;
 
                 if (dstComp.id == newComponentId) ASTRA_UNLIKELY

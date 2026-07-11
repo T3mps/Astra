@@ -231,8 +231,8 @@ namespace Astra
                     
                     const auto& dstInfo = m_componentArrays[id];
                     const auto& srcInfo = srcChunk.m_componentArrays[id];
-                    
-                    if (!dstInfo.isValid || !srcInfo.isValid) continue;
+
+                    if (!dstInfo.isValid || !srcInfo.isValid || dstInfo.base == nullptr || srcInfo.base == nullptr) continue;
                     
                     if (dstInfo.descriptor.is_trivially_copyable && AreIndicesContiguous(dstIndices) && AreIndicesContiguous(srcIndices))
                     {
@@ -358,14 +358,14 @@ namespace Astra
                     for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
                     {
                         const auto& info = m_componentArrays[id];
-                        if (!info.isValid)
+                        if (!info.isValid || info.base == nullptr)
                         {
-                            continue;
+                            continue;  // empty (tag) component: no storage to touch
                         }
-                        
+
                         void* dstPtr = static_cast<std::byte*>(info.base) + index * info.stride;
                         void* srcPtr = static_cast<std::byte*>(info.base) + lastIndex * info.stride;
-                        
+
                         // Destruct destination, move from source
                         info.descriptor.Destruct(dstPtr);
                         info.descriptor.MoveConstruct(dstPtr, srcPtr);
@@ -377,11 +377,11 @@ namespace Astra
                     for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
                     {
                         const auto& info = m_componentArrays[id];
-                        if (!info.isValid)
+                        if (!info.isValid || info.base == nullptr)
                         {
-                            continue;
+                            continue;  // empty (tag) component: no storage to touch
                         }
-                        
+
                         void* ptr = static_cast<std::byte*>(info.base) + lastIndex * info.stride;
                         info.descriptor.Destruct(ptr);
                     }

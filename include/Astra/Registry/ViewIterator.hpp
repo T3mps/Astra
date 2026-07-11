@@ -155,6 +155,23 @@ namespace Astra
                 m_componentArrays = std::tuple{chunk->GetComponentArray<std::remove_const_t<Components>>()...};
             }
 
+            // Empty components have no storage (array pointer is nullptr);
+            // hand out a shared static instance instead — same contract as
+            // Archetype::ForEach.
+            template<typename T>
+            ASTRA_FORCEINLINE T& DerefComponent(std::remove_const_t<T>* array) const noexcept
+            {
+                if constexpr (std::is_empty_v<std::remove_const_t<T>>)
+                {
+                    static std::remove_const_t<T> s_emptyInstance{};
+                    return s_emptyInstance;
+                }
+                else
+                {
+                    return array[m_entityIndex];
+                }
+            }
+
             /**
              * Index-based access matching ForEach's optimized pattern:
              * entities[i], array0[i], array1[i], ...
@@ -164,7 +181,7 @@ namespace Astra
             {
                 return value_type{
                     m_entities[m_entityIndex],
-                    std::get<Is>(m_componentArrays)[m_entityIndex]...
+                    DerefComponent<Components>(std::get<Is>(m_componentArrays))...
                 };
             }
 
