@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
+#include <set>
 
 // MulticastDelegate::Invoke must dispatch over a stable snapshot of its
 // handlers so that a handler which registers/unregisters during dispatch
@@ -105,4 +106,67 @@ TEST(IterationSafety, DestroyEachChildDuringForEachIsSafe)
     });
 
     EXPECT_EQ(destroyed, kChildCount);  // all visited, no UAF, none skipped
+}
+
+// Stronger, deterministic regression guard for the ForEachChild snapshot.
+//
+// The DestroyEachChild test above passes even WITHOUT the snapshot fix, because
+// destroying-the-just-visited-entity is coincidentally mirror-symmetric under
+// RelationshipGraph's swap-and-pop removal and never dereferences freed memory.
+// This test instead forces a genuine buffer reallocation: with the container
+// already heap-promoted (8 > SmallVector<Entity,4> inline capacity), reparenting
+// a brand-new 9th child *inside the first callback* runs SmallVector::Grow()
+// (capacity 8 -> 16), which allocates a new buffer and FREES the old one. Without
+// the snapshot, the iteration holds a live reference whose cached begin/end now
+// point into that freed buffer, so it reads garbage / freed entity slots for the
+// remaining originals. With the snapshot, the copy is unaffected.
+//
+// We assert only on OBSERVABLE CORRECT behavior (never on garbage values):
+//   (a) every original child is visited exactly once  -> visitedOriginals == N
+//   (b) exactly N callback invocations                -> totalVisits == N
+//   (c) no non-original (garbage/freed) entity visited -> unexpectedVisits == 0
+// Post-fix all three hold; pre-fix (a) and (c) fail deterministically (in Debug
+// the freed buffer is CRT-fill garbage, so the remaining originals are skipped
+// and non-original values are observed instead).
+TEST(IterationSafety, ForEachChildSurvivesContainerReallocationDuringCallback)
+{
+    Astra::Registry reg;
+    Astra::Entity parent = reg.CreateEntity();
+
+    constexpr size_t N = 8;  // > SmallVector<Entity,4> inline capacity -> heap buffer
+    std::set<Astra::Entity> originals;
+    for (size_t i = 0; i < N; ++i)
+    {
+        Astra::Entity c = reg.CreateEntity();
+        reg.SetParent(c, parent);
+        originals.insert(c);
+    }
+
+    std::set<Astra::Entity> visitedOriginals;
+    size_t totalVisits = 0;
+    size_t unexpectedVisits = 0;
+    bool grewOnce = false;
+
+    reg.GetRelations(parent).ForEachChild([&](Astra::Entity child)
+    {
+        ++totalVisits;
+        if (originals.count(child) != 0)
+            visitedOriginals.insert(child);
+        else
+            ++unexpectedVisits;
+
+        if (!grewOnce)
+        {
+            grewOnce = true;
+            // Reparent a fresh 9th child under `parent`: this push_back forces
+            // m_children[parent] to grow (8 -> 16), reallocating and freeing the
+            // buffer that a live-reference iteration is walking.
+            Astra::Entity extra = reg.CreateEntity();
+            reg.SetParent(extra, parent);
+        }
+    });
+
+    EXPECT_EQ(visitedOriginals.size(), N);  // (a) all originals visited, none skipped
+    EXPECT_EQ(totalVisits, N);              // (b) no duplicates / extra iterations
+    EXPECT_EQ(unexpectedVisits, 0u);        // (c) never read a freed/garbage entity
 }
