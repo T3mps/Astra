@@ -99,7 +99,8 @@ namespace Astra
 
             ASTRA_ASSERT(index < m_resources.size(), "Invalid resource index");
             auto& slot = m_resources[index];
-            ASTRA_ASSERT(slot.isValid, "Invalid resource slot");
+            if (!slot.isValid) ASTRA_UNLIKELY
+                return nullptr;
 
             // Return pointer to resource data
             return reinterpret_cast<T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
@@ -117,7 +118,8 @@ namespace Astra
 
             ASTRA_ASSERT(index < m_resources.size(), "Invalid resource index");
             const auto& slot = m_resources[index];
-            ASTRA_ASSERT(slot.isValid, "Invalid resource slot");
+            if (!slot.isValid) ASTRA_UNLIKELY
+                return nullptr;
 
             // Return pointer to resource data
             return reinterpret_cast<const T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
@@ -129,6 +131,10 @@ namespace Astra
 
             ComponentID id = TypeID<T>::Value();
             if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return nullptr;
+
+            auto registry = m_componentRegistry.lock();
+            if (!registry) ASTRA_UNLIKELY
                 return nullptr;
 
             uint16_t index = m_sparse[id];
@@ -146,9 +152,6 @@ namespace Astra
                 slot.id = id;
                 slot.size = sizeof(T);
 
-                auto registry = m_componentRegistry.lock();
-                if (!registry) ASTRA_UNLIKELY
-                    return nullptr;
                 registry->RegisterComponent<T>();
                 slot.descriptor = registry->GetComponentDescriptor(id);
                 ASTRA_ASSERT(slot.descriptor, "Failed to get component descriptor");
@@ -180,9 +183,10 @@ namespace Astra
             {
                 // Update existing resource
                 auto& slot = m_resources[index];
-                ASTRA_ASSERT(slot.isValid, "Invalid resource slot");
+                if (!slot.isValid) ASTRA_UNLIKELY
+                    return nullptr;
                 ASTRA_ASSERT(slot.size == sizeof(T), "Resource size mismatch");
-                
+
                 // Update existing resource
                 T* existing = reinterpret_cast<T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
                 *existing = std::forward<T>(resource);
@@ -213,6 +217,10 @@ namespace Astra
             if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
                 return nullptr;
 
+            auto registry = m_componentRegistry.lock();
+            if (!registry) ASTRA_UNLIKELY
+                return nullptr;
+
             uint16_t index = m_sparse[id];
 
             if (index == INVALID_INDEX)
@@ -228,9 +236,6 @@ namespace Astra
                 slot.id = id;
                 slot.size = sizeof(T);
 
-                auto registry = m_componentRegistry.lock();
-                if (!registry) ASTRA_UNLIKELY
-                    return nullptr;
                 registry->RegisterComponent<T>();
                 slot.descriptor = registry->GetComponentDescriptor(id);
                 ASTRA_ASSERT(slot.descriptor, "Failed to get component descriptor");
@@ -262,9 +267,10 @@ namespace Astra
             {
                 // Update existing resource - destroy old and construct new
                 auto& slot = m_resources[index];
-                ASTRA_ASSERT(slot.isValid, "Invalid resource slot");
+                if (!slot.isValid) ASTRA_UNLIKELY
+                    return nullptr;
                 ASTRA_ASSERT(slot.size == sizeof(T), "Resource size mismatch");
-                
+
                 // Destroy existing resource
                 if (slot.descriptor)
                 {
