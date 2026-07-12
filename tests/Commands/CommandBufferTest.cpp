@@ -344,8 +344,52 @@ TEST_F(CommandBufferTest, ExtendedRelationshipCommands)
     // Remove all remaining children
     cmdBuffer->RemoveAllChildren(realParent);
     cmdBuffer->Execute();
-    
+
     // Verify all children removed
     auto finalChildren = registry->GetChildren(realParent);
     EXPECT_EQ(finalChildren.size(), 0u);
+}
+
+TEST_F(CommandBufferTest, RollbackPreservesCommittedEntities)
+{
+    // Entity e is created and committed to an archetype (via AddComponent)
+    // *before* a later command in the same buffer fails. DestroyEntity is
+    // recorded with Entity::Invalid(), which is accepted at record time but
+    // rejected by ExecuteDestroyEntity at Execute() time, aborting the
+    // buffer partway through and invoking RollbackAllocatedEntities().
+    Entity e = cmdBuffer->CreateEntity();
+    cmdBuffer->AddComponent(e, Position{1.0f, 2.0f, 3.0f});
+    cmdBuffer->DestroyEntity(Entity::Invalid());
+
+    auto result = cmdBuffer->Execute();
+    ASSERT_TRUE(result.IsErr());
+
+    // e was already committed to an archetype earlier in this same Execute()
+    // call; the rollback of not-yet-committed allocated entities must not
+    // touch it, so it must remain a live, valid entity with its component.
+    EXPECT_TRUE(registry->IsValid(e));
+    EXPECT_TRUE(registry->HasComponent<Position>(e));
+}
+
+TEST_F(CommandBufferTest, RollbackDestroysOnlyUncommittedEntities)
+{
+    // White-box check on the commit-tracking split itself: create three
+    // entities (all committed via CreateEntity executing successfully),
+    // then fail a fourth command. All three must survive since they were
+    // all committed before the failure point, regardless of how many.
+    Entity e1 = cmdBuffer->CreateEntity();
+    Entity e2 = cmdBuffer->CreateEntity();
+    Entity e3 = cmdBuffer->CreateEntity();
+    cmdBuffer->AddComponent(e1, Position{1.0f, 2.0f, 3.0f});
+    cmdBuffer->AddComponent(e2, Position{4.0f, 5.0f, 6.0f});
+    cmdBuffer->AddComponent(e3, Position{7.0f, 8.0f, 9.0f});
+    cmdBuffer->DestroyEntity(Entity::Invalid());
+
+    auto result = cmdBuffer->Execute();
+    ASSERT_TRUE(result.IsErr());
+
+    EXPECT_TRUE(registry->IsValid(e1));
+    EXPECT_TRUE(registry->IsValid(e2));
+    EXPECT_TRUE(registry->IsValid(e3));
+    EXPECT_EQ(registry->Size(), 3u);
 }

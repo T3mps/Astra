@@ -679,6 +679,7 @@ namespace Astra
 
             // Success - clear allocated entities tracking
             m_allocatedEntities.clear();
+            m_committedCount = 0;
 
             if (clearAfterExecution)
             {
@@ -703,6 +704,7 @@ namespace Astra
             CleanupPendingCommands();
             m_buffer.Clear();
             m_allocatedEntities.clear();
+            m_committedCount = 0;
             m_commandCount = 0;
         }
 
@@ -740,6 +742,7 @@ namespace Astra
             // Clear other buffer (don't call CleanupPendingCommands since we copied the data)
             other.m_buffer.Clear();
             other.m_allocatedEntities.clear();
+            other.m_committedCount = 0;
             other.m_commandCount = 0;
         }
 
@@ -769,18 +772,26 @@ namespace Astra
 
         /**
          * Rollback all entities that were allocated but not yet added to archetypes.
+         *
+         * m_allocatedEntities is populated in the same order CreateEntity/CreateEntities
+         * commands appear in the command buffer, and m_committedCount advances over that
+         * same prefix as each such command executes successfully during Execute(). So the
+         * committed entities are always exactly the prefix [0, m_committedCount) and only
+         * the uncommitted suffix needs to be destroyed here; committed entities already
+         * have live archetype rows and must survive an aborted Execute().
          */
         void RollbackAllocatedEntities()
         {
             if (m_registry)
             {
                 auto& manager = m_registry->GetEntityManager();
-                for (Entity e : m_allocatedEntities)
+                for (size_t i = m_committedCount; i < m_allocatedEntities.size(); ++i)
                 {
-                    manager.Destroy(e);
+                    manager.Destroy(m_allocatedEntities[i]);
                 }
             }
             m_allocatedEntities.clear();
+            m_committedCount = 0;
         }
 
     private:
@@ -848,6 +859,12 @@ namespace Astra
             auto* cmd = reinterpret_cast<CreateEntityPayload*>(payload);
             m_registry->GetArchetypeManager()->AddEntity(cmd->entity);
             m_registry->GetSignalManager()->Emit<Events::EntityCreated>(cmd->entity);
+            // Commit point: cmd->entity now has a live archetype row and must
+            // be excluded from any later RollbackAllocatedEntities() in this
+            // Execute() call. m_allocatedEntities is populated in the same
+            // order CreateEntity commands appear in the buffer, so advancing
+            // by one here keeps the committed set an exact prefix.
+            ++m_committedCount;
             return true;
         }
 
@@ -873,6 +890,9 @@ namespace Astra
                 archetypeManager->AddEntity(entities[i]);
                 signalManager->Emit<Events::EntityCreated>(entities[i]);
             }
+            // Commit point for the whole batch: see ExecuteCreateEntity for
+            // why this keeps m_allocatedEntities' committed set a prefix.
+            m_committedCount += cmd->entityCount;
             return true;
         }
 
@@ -1081,6 +1101,12 @@ namespace Astra
         Registry* m_registry;
         CommandByteBuffer m_buffer;
         std::vector<Entity> m_allocatedEntities;
+        // Entities in m_allocatedEntities[0, m_committedCount) have already been
+        // placed into an archetype (by ExecuteCreateEntity/ExecuteCreateEntities)
+        // earlier in the current Execute() call and are live rows; only the
+        // suffix [m_committedCount, size()) is rolled back on partial failure.
+        // Reset to 0 everywhere m_allocatedEntities is cleared.
+        size_t m_committedCount = 0;
         size_t m_commandCount = 0;
         size_t m_lastExecutedCount = 0;  // For debugging partial execution failures
     };
