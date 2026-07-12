@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
+#include <memory>
 #include <set>
 
 // MulticastDelegate::Invoke must dispatch over a stable snapshot of its
@@ -169,4 +170,45 @@ TEST(IterationSafety, ForEachChildSurvivesContainerReallocationDuringCallback)
     EXPECT_EQ(visitedOriginals.size(), N);  // (a) all originals visited, none skipped
     EXPECT_EQ(totalVisits, N);              // (b) no duplicates / extra iterations
     EXPECT_EQ(unexpectedVisits, 0u);        // (c) never read a freed/garbage entity
+}
+
+// Regression guard for MulticastDelegate::Invoke calling an empty snapshotted
+// delegate. Invoke() dispatches over a value-copy snapshot of m_handlers
+// (see the Invoke doc comment in Delegate.hpp). A handler that wraps a SMALL
+// move-only functor (fits the inline buffer, but not copy-constructible -
+// e.g. a lambda capturing a std::unique_ptr<int>) copies to an EMPTY
+// Delegate when snapshotted: Delegate's copy ctor falls back to the empty
+// state rather than leaving m_invoker set over unconstructed storage.
+// Pre-fix, Invoke() called every snapshotted handler unconditionally, so
+// this empty delegate got invoked: Delegate::operator() asserts in Debug
+// ("Calling empty delegate") and null-calls m_invoker in Release/Dist (UB /
+// crash). Post-fix, Invoke() skips empty snapshotted handlers, so this must
+// not crash/assert, and the other, normal (copyable) handler must still run.
+TEST(IterationSafety, MulticastInvokeSkipsEmptyHandlerFromMoveOnlyCopy)
+{
+    Astra::MulticastDelegate<void()> mc;
+    int normalCalls = 0;
+
+    // Move-only capture: std::unique_ptr<int> is small enough for Delegate's
+    // inline small-buffer path, but makes the closure non-copy-constructible,
+    // so Invoke()'s snapshot copy of this handler collapses to an empty
+    // Delegate.
+    auto owned = std::make_unique<int>(42);
+    mc.Register([captured = std::move(owned)]() mutable
+    {
+        // Only reachable if invoked from a delegate that still owns the
+        // moved-from functor (i.e. NOT the empty snapshot copy). Either way,
+        // touching `captured` here is safe; the assertion below is what
+        // actually proves the empty copy was skipped rather than invoked.
+        (void)captured;
+    });
+
+    mc.Register([&] { ++normalCalls; });
+
+    // Must not crash (Release/Dist null function-pointer call) or assert
+    // (Debug "Calling empty delegate") on the empty snapshotted copy of the
+    // move-only handler.
+    mc.Invoke();
+
+    EXPECT_EQ(normalCalls, 1);  // the normal copyable handler still ran
 }

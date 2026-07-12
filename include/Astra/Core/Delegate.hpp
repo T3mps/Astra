@@ -424,13 +424,19 @@ namespace Astra
         //   - Handlers unregistered DURING this dispatch that were already
         //     in the snapshot STILL run for this dispatch; the unregister
         //     itself still takes effect for future dispatches.
+        //   - A snapshotted handler that is EMPTY (e.g. the copy of a
+        //     non-copyable / small move-only handler falls back to the empty
+        //     delegate state - see Delegate's copy ctor) is SKIPPED for this
+        //     dispatch, so handlers should be copyable to be dispatched
+        //     reliably.
         template<typename U = R>
         std::enable_if_t<std::is_void_v<U>> Invoke(Args... args) const
         {
             auto handlers = m_handlers;
             for (const auto& handler : handlers)
             {
-                handler.delegate(std::forward<Args>(args)...);
+                if (handler.delegate)
+                    handler.delegate(std::forward<Args>(args)...);
             }
         }
 
@@ -443,7 +449,8 @@ namespace Astra
 
             for (const auto& handler : handlers)
             {
-                results.push_back(handler.delegate(std::forward<Args>(args)...));
+                if (handler.delegate)
+                    results.push_back(handler.delegate(std::forward<Args>(args)...));
             }
 
             return results;

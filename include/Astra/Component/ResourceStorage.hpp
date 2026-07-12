@@ -154,7 +154,8 @@ namespace Astra
 
                 registry->RegisterComponent<T>();
                 slot.descriptor = registry->GetComponentDescriptor(id);
-                ASTRA_ASSERT(slot.descriptor, "Failed to get component descriptor");
+                if (!slot.descriptor) ASTRA_UNLIKELY
+                    return nullptr;
 
                 // Decide between inline storage and heap allocation
                 if constexpr (sizeof(T) <= SBO_SIZE)
@@ -238,7 +239,8 @@ namespace Astra
 
                 registry->RegisterComponent<T>();
                 slot.descriptor = registry->GetComponentDescriptor(id);
-                ASTRA_ASSERT(slot.descriptor, "Failed to get component descriptor");
+                if (!slot.descriptor) ASTRA_UNLIKELY
+                    return nullptr;
 
                 // Decide between inline storage and heap allocation
                 if constexpr (sizeof(T) <= SBO_SIZE)
