@@ -1162,9 +1162,15 @@ namespace Astra
             // Check if the operation succeeded (non-empty result means success)
             if (newLocations.empty() && !entityBatch.empty())
             {
-                // Failed to allocate chunks - cannot proceed with batch operation
-                // This is a critical failure as we cannot guarantee entity integrity
-                ASTRA_ASSERT(false, "Failed to allocate chunks for batch move operation");
+                // Chunk-pool exhaustion is a recoverable allocation failure, not an
+                // invariant violation - it must not abort in any config (mirrors the
+                // "if (!chunk) return ..." bails elsewhere in Archetype.hpp). At this
+                // point BatchMoveEntitiesFrom has failed before mutating dstArchetype
+                // (no entities placed, m_entityCount/m_chunks untouched) and
+                // srcArchetype/m_entityMap haven't been touched yet either (the
+                // post-move op, entity-map update, and RemoveEntities all happen
+                // below) - so bailing here leaves entityBatch exactly as it was
+                // before the call, and the batch simply remains in srcArchetype.
                 return;
             }
             
