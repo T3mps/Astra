@@ -694,8 +694,11 @@ namespace Astra
             writer(static_cast<uint32_t>(m_archetypes.size()));
             writer(static_cast<uint32_t>(m_entityMap.size()));
             
-            // Write each archetype (skip root archetype at index 0)
-            for (size_t i = 1; i < m_archetypes.size(); ++i)
+            // Write each archetype, including the root (zero-component) archetype
+            // at index 0 - its entities must round-trip through Save/Load just
+            // like any other archetype's, or they become dangling entity-map
+            // entries after Load (invisible to iteration, UB on later removal).
+            for (size_t i = 0; i < m_archetypes.size(); ++i)
             {
                 const auto& entry = m_archetypes[i];
                 
@@ -760,14 +763,19 @@ namespace Astra
                 return false;  // Registry destroyed
             registry->GetAllDescriptors(registryDescriptors);
             
-            // Read each archetype
+            // Read each archetype, including the root (zero-component) archetype
+            // written at index 0. The constructor already created a fresh, empty
+            // root archetype (m_archetypes[0], pointed to by m_rootArchetype)
+            // before Deserialize ran, so index 0 must repopulate that EXISTING
+            // entry in place rather than push a second root - m_rootArchetype and
+            // m_archetypeMap must keep referring to exactly one root archetype.
             std::vector<uint32_t> archetypeIndices;
-            for (uint32_t i = 1; i < archetypeCount; ++i)
+            for (uint32_t i = 0; i < archetypeCount; ++i)
             {
                 uint32_t index;
                 reader(index);
                 archetypeIndices.push_back(index);
-                
+
                 // Deserialize the archetype
                 auto archetypeResult = Archetype::Deserialize(reader, registryDescriptors, &m_chunkPool);
                 if (archetypeResult.IsErr() || reader.HasError())
@@ -775,18 +783,29 @@ namespace Astra
                     return false;
                 }
                 auto archetype = std::move(*archetypeResult.GetValue());
-                
+
                 // Read metrics
                 // Read entity count for validation
                 uint64_t entityCount;
                 reader(entityCount);
-                
-                // Add to storage
-                ArchetypeEntry entry;
-                entry.archetype = std::move(archetype);
-                
-                m_archetypeMap[entry.archetype->GetMask()] = entry.archetype.get();
-                m_archetypes.push_back(std::move(entry));
+
+                if (i == 0)
+                {
+                    // Repopulate the pre-existing root archetype entry instead of
+                    // appending a new one.
+                    m_archetypes[0].archetype = std::move(archetype);
+                    m_rootArchetype = m_archetypes[0].archetype.get();
+                    m_archetypeMap[m_rootArchetype->GetMask()] = m_rootArchetype;
+                }
+                else
+                {
+                    // Add to storage
+                    ArchetypeEntry entry;
+                    entry.archetype = std::move(archetype);
+
+                    m_archetypeMap[entry.archetype->GetMask()] = entry.archetype.get();
+                    m_archetypes.push_back(std::move(entry));
+                }
             }
             
             // Read entity-to-archetype mappings
