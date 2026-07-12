@@ -140,17 +140,22 @@ namespace Astra
                 });
         }
         
-        ASTRA_NODISCARD size_t Size() const noexcept
+        ASTRA_NODISCARD size_t Size() noexcept
         {
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return 0;  // Registry destroyed
+
+            EnsureArchetypes();
+
             size_t total = 0;
-            for (const auto* archetype : m_archetypes)
+            for (Archetype* archetype : m_archetypes)
             {
                 total += archetype->GetEntityCount();
             }
             return total;
         }
 
-        ASTRA_NODISCARD bool Empty() const noexcept
+        ASTRA_NODISCARD bool Empty() noexcept
         {
             return Size() == 0;
         }

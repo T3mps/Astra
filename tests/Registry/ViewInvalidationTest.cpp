@@ -43,3 +43,22 @@ TEST(ViewInvalidation, SurvivesArchetypeRemoval)
     view.ForEach([&](Astra::Entity, VPos&) { ++after; });  // must not touch freed archetypes
     EXPECT_EQ(after, 0u);
 }
+
+TEST(ViewInvalidation, SizeIsSafeAndCorrectAfterDefragment)
+{
+    Astra::Registry reg;
+    auto a = reg.CreateEntity<VPos>();
+    auto b = reg.CreateEntity<VPos, VVel>();
+    auto view = reg.CreateView<VPos>();
+    EXPECT_EQ(view.Size(), 2u);
+
+    reg.DestroyEntity(a);
+    reg.DestroyEntity(b);
+    Astra::Registry::DefragmentationOptions opts;
+    opts.minArchetypesToKeep = 1;
+    reg.Defragment(opts);
+
+    // Before the fix: Size() dereferences a freed Archetype* (UAF).
+    EXPECT_EQ(view.Size(), 0u);
+    EXPECT_TRUE(view.Empty());
+}
