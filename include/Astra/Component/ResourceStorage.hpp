@@ -128,7 +128,8 @@ namespace Astra
         {
 
             ComponentID id = TypeID<T>::Value();
-            ASTRA_ASSERT(id < MAX_COMPONENTS, "Component ID out of range");
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return nullptr;
 
             uint16_t index = m_sparse[id];
 
@@ -137,20 +138,20 @@ namespace Astra
                 // New resource - allocate slot
                 index = static_cast<uint16_t>(m_resources.size());
                 ASTRA_ASSERT(index < INVALID_INDEX, "Too many resources");
-                
+
                 m_sparse[id] = index;
                 m_resources.emplace_back();
 
                 auto& slot = m_resources[index];
                 slot.id = id;
                 slot.size = sizeof(T);
-                
+
                 auto registry = m_componentRegistry.lock();
-                ASTRA_ASSERT(registry, "Component registry expired");
+                if (!registry) ASTRA_UNLIKELY
+                    return nullptr;
                 registry->RegisterComponent<T>();
                 slot.descriptor = registry->GetComponentDescriptor(id);
                 ASTRA_ASSERT(slot.descriptor, "Failed to get component descriptor");
-                slot.isValid = true;
 
                 // Decide between inline storage and heap allocation
                 if constexpr (sizeof(T) <= SBO_SIZE)
@@ -164,10 +165,16 @@ namespace Astra
                     // Allocate from heap
                     slot.isHeap = true;
                     AllocResult result = AllocateMemory(sizeof(T), alignof(T));
-                    ASTRA_ASSERT(result.ptr, "Failed to allocate memory for resource");
+                    if (!result.ptr) ASTRA_UNLIKELY
+                        return nullptr;
                     slot.storage.heapPtr = result.ptr;
                     new (slot.storage.heapPtr) T(std::forward<T>(resource));
                 }
+
+                // Only mark the slot valid once its storage is fully established —
+                // a failed heap allocation above must leave the slot invalid so
+                // teardown never frees a garbage pointer. (Mirrors SetByID/Deserialize.)
+                slot.isValid = true;
             }
             else
             {
@@ -203,7 +210,8 @@ namespace Astra
         {
 
             ComponentID id = TypeID<T>::Value();
-            ASTRA_ASSERT(id < MAX_COMPONENTS, "Component ID out of range");
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return nullptr;
 
             uint16_t index = m_sparse[id];
 
@@ -212,20 +220,20 @@ namespace Astra
                 // New resource - allocate slot
                 index = static_cast<uint16_t>(m_resources.size());
                 ASTRA_ASSERT(index < INVALID_INDEX, "Too many resources");
-                
+
                 m_sparse[id] = index;
                 m_resources.emplace_back();
 
                 auto& slot = m_resources[index];
                 slot.id = id;
                 slot.size = sizeof(T);
-                
+
                 auto registry = m_componentRegistry.lock();
-                ASTRA_ASSERT(registry, "Component registry expired");
+                if (!registry) ASTRA_UNLIKELY
+                    return nullptr;
                 registry->RegisterComponent<T>();
                 slot.descriptor = registry->GetComponentDescriptor(id);
                 ASTRA_ASSERT(slot.descriptor, "Failed to get component descriptor");
-                slot.isValid = true;
 
                 // Decide between inline storage and heap allocation
                 if constexpr (sizeof(T) <= SBO_SIZE)
@@ -239,10 +247,16 @@ namespace Astra
                     // Allocate from heap and construct in-place
                     slot.isHeap = true;
                     AllocResult result = AllocateMemory(sizeof(T), alignof(T));
-                    ASTRA_ASSERT(result.ptr, "Failed to allocate memory for resource");
+                    if (!result.ptr) ASTRA_UNLIKELY
+                        return nullptr;
                     slot.storage.heapPtr = result.ptr;
                     new (slot.storage.heapPtr) T(std::forward<Args>(args)...);
                 }
+
+                // Only mark the slot valid once its storage is fully established —
+                // a failed heap allocation above must leave the slot invalid so
+                // teardown never frees a garbage pointer. (Mirrors SetByID/Deserialize.)
+                slot.isValid = true;
             }
             else
             {
