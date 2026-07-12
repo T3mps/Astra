@@ -154,6 +154,25 @@ namespace Astra
 
             size_t chunkSize = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
             size_t remainingSpace = chunkSize > alignmentOverhead ? chunkSize - alignmentOverhead : 0;
+
+            // A single entity's footprint must fit in the usable chunk space. The old
+            // code clamped m_entitiesPerChunk to 1 and proceeded even when perEntitySize
+            // exceeded remainingSpace, so writing that one entity's components later
+            // overflowed past the chunk's actual allocation into neighboring memory.
+            // There is no valid per-chunk layout for this component set at this chunk
+            // size: refuse to initialize instead of clamping-and-overflowing. Leave
+            // m_initialized == false and m_entitiesPerChunk == 0 (its constructed
+            // default) and create no chunk; GetOrCreateChunk() and the batch-add paths
+            // check m_entitiesPerChunk == 0 and refuse to create a chunk that could
+            // never legally hold even one entity, so callers degrade gracefully
+            // (entity creation succeeds but the entity never gets this component)
+            // instead of overflowing.
+            if (perEntitySize > remainingSpace) ASTRA_UNLIKELY
+            {
+                m_initialized = false;
+                return;
+            }
+
             size_t maxEntities = perEntitySize > 0 ? remainingSpace / perEntitySize : 256;
 
             // Round down to nearest power of 2 for fast modulo/division operations
@@ -204,6 +223,13 @@ namespace Astra
             size_t remainingCapacity = GetRemainingCapacity();
             if (count > remainingCapacity) ASTRA_UNLIKELY
             {
+                if (m_entitiesPerChunk == 0) ASTRA_UNLIKELY
+                {
+                    // See GetOrCreateChunk(): this archetype never found a valid
+                    // per-chunk layout and can never hold an entity.
+                    return locations;
+                }
+
                 size_t additionalNeeded = count - remainingCapacity;
                 size_t newChunksNeeded = (additionalNeeded + m_entitiesPerChunk - 1) >> m_entitiesPerChunkShift;
 
@@ -266,6 +292,13 @@ namespace Astra
             size_t remainingCapacity = GetRemainingCapacity();
             if (count > remainingCapacity) ASTRA_UNLIKELY
             {
+                if (m_entitiesPerChunk == 0) ASTRA_UNLIKELY
+                {
+                    // See GetOrCreateChunk(): this archetype never found a valid
+                    // per-chunk layout and can never hold an entity.
+                    return locations;
+                }
+
                 size_t additionalNeeded = count - remainingCapacity;
                 size_t newChunksNeeded = (additionalNeeded + m_entitiesPerChunk - 1) >> m_entitiesPerChunkShift;
 
@@ -1067,6 +1100,13 @@ namespace Astra
             size_t remainingCapacity = GetRemainingCapacity();
             if (count > remainingCapacity) ASTRA_UNLIKELY
             {
+                if (m_entitiesPerChunk == 0) ASTRA_UNLIKELY
+                {
+                    // See GetOrCreateChunk(): this archetype never found a valid
+                    // per-chunk layout and can never hold an entity.
+                    return {};
+                }
+
                 size_t additionalNeeded = count - remainingCapacity;
                 size_t newChunksNeeded = (additionalNeeded + m_entitiesPerChunk - 1) >> m_entitiesPerChunkShift;
 
@@ -1244,8 +1284,17 @@ namespace Astra
         
         std::pair<size_t, bool> GetOrCreateChunk()
         {
+            if (m_entitiesPerChunk == 0) ASTRA_UNLIKELY
+            {
+                // Initialize() never found a valid per-chunk layout for this component
+                // set (single-entity footprint exceeds the usable chunk space) - refuse
+                // to create a chunk that could never legally hold even one entity
+                // instead of overflowing into neighboring memory.
+                return {INVALID_CHUNK_INDEX, false};
+            }
+
             size_t chunkIndex = m_firstNonFullChunkIndex;
-            
+
             if (chunkIndex < m_chunks.size() && !m_chunks[chunkIndex]->IsFull()) ASTRA_LIKELY
             {
                 return {chunkIndex, false};
