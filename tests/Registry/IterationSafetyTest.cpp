@@ -76,3 +76,33 @@ TEST(IterationSafety, HandlerRegisteredDuringDispatchIsNotInvokedUntilNextDispat
     EXPECT_EQ(calls, 2);
     EXPECT_EQ(lateCalls, 1);  // now runs on the next dispatch
 }
+
+// Relations::ForEachChild must iterate a stable snapshot of the parent's
+// children so that a callback which destroys the very entities being
+// iterated (mutating RelationshipGraph::m_children via swap-and-pop, and
+// potentially freeing the SmallVector's heap buffer once it has spilled
+// past its inline capacity) is safe: no skipped children, no UAF.
+TEST(IterationSafety, DestroyEachChildDuringForEachIsSafe)
+{
+    Astra::Registry reg;
+    Astra::Entity parent = reg.CreateEntity();
+
+    // ChildrenContainer = SmallVector<Entity, 4>; use 8 children (> inline
+    // capacity) to force heap promotion of m_children[parent] before we
+    // mutate it mid-iteration.
+    constexpr size_t kChildCount = 8;
+    for (size_t i = 0; i < kChildCount; ++i)
+    {
+        Astra::Entity c = reg.CreateEntity();
+        reg.SetParent(c, parent);
+    }
+
+    size_t destroyed = 0;
+    reg.GetRelations(parent).ForEachChild([&](Astra::Entity child)
+    {
+        reg.DestroyEntity(child);  // mutates m_children mid-iteration
+        ++destroyed;
+    });
+
+    EXPECT_EQ(destroyed, kChildCount);  // all visited, no UAF, none skipped
+}

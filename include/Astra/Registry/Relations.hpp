@@ -134,13 +134,18 @@ namespace Astra
         {
             if (!m_relationsGraph) ASTRA_UNLIKELY
                 return;  // Registry destroyed
-            
-            const auto& children = m_relationsGraph->GetChildren(m_rootEntity);
-            
+
+            // Snapshot (value copy): m_relationsGraph->GetChildren() returns a
+            // const ChildrenContainer& into RelationshipGraph's live m_children
+            // map. A callback that destroys/reparents entities can mutate
+            // (swap-and-pop) or free (map erase/rehash) that live storage, so
+            // we must iterate a local copy, not the live reference.
+            auto children = m_relationsGraph->GetChildren(m_rootEntity);
+
             // Early exit for empty
             if (children.empty()) ASTRA_UNLIKELY
                 return;
-            
+
             // Process children with proper component expansion
             ForEachChildImpl(children, std::forward<Func>(func), RequiredTuple{});
         }
@@ -150,46 +155,51 @@ namespace Astra
         {
             if (!m_relationsGraph) ASTRA_UNLIKELY
                 return;  // Registry destroyed
-            
-            // Use cached BFS traversal for optimal performance
-            const auto& cache = m_relationsGraph->GetDescendantsCached(m_rootEntity);
-            
+
+            // Snapshot (value copy): GetDescendantsCached() returns a
+            // const TraversalCache& into RelationshipGraph's live cache map. A
+            // callback that mutates the graph can invalidate/erase/rehash that
+            // cache entry, so we copy the cache (including its entries vector)
+            // before iterating.
+            auto cache = m_relationsGraph->GetDescendantsCached(m_rootEntity);
+
             const size_t count = cache.entries.size();
             if (count == 0) ASTRA_UNLIKELY
                 return;
-            
+
             // Process with proper component expansion
             ForEachDescendantImpl(cache, count, std::forward<Func>(func), RequiredTuple{});
         }
-        
+
         template<typename Func>
         ASTRA_FORCEINLINE void ForEachAncestor(Func&& func)
         {
             if (!m_relationsGraph) ASTRA_UNLIKELY
                 return;  // Registry destroyed
-            
-            // Use cached ancestor traversal
-            const auto& cache = m_relationsGraph->GetAncestorsCached(m_rootEntity);
-            
+
+            // Snapshot (value copy) - see ForEachDescendant.
+            auto cache = m_relationsGraph->GetAncestorsCached(m_rootEntity);
+
             const size_t count = cache.entries.size();
             if (count == 0) ASTRA_UNLIKELY
                 return;
-            
+
             // Process with proper component expansion
             ForEachAncestorImpl(cache, count, std::forward<Func>(func), RequiredTuple{});
         }
-        
+
         template<typename Func>
         ASTRA_FORCEINLINE void ForEachLink(Func&& func)
         {
             if (!m_relationsGraph) ASTRA_UNLIKELY
                 return;  // Registry destroyed
-            
-            const auto& links = m_relationsGraph->GetLinks(m_rootEntity);
-            
+
+            // Snapshot (value copy) - see ForEachChild.
+            auto links = m_relationsGraph->GetLinks(m_rootEntity);
+
             if (links.empty()) ASTRA_UNLIKELY
                 return;
-            
+
             // Process with proper component expansion
             ForEachLinkImpl(links, std::forward<Func>(func), RequiredTuple{});
         }
