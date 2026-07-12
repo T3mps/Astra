@@ -413,26 +413,39 @@ namespace Astra
             return m_handlers.empty();
         }
         
+        // Both overloads dispatch over a SNAPSHOT (value copy) of m_handlers
+        // rather than the live member, so a handler that registers or
+        // unregisters (itself or others) mid-dispatch cannot invalidate the
+        // iteration (UAF / null call on the mutated live vector). Safe
+        // because Handler holds a Delegate, and Delegate's copy ctor is
+        // well-defined (see Delegate's copy ctor above). Contract:
+        //   - Handlers registered DURING this dispatch are NOT invoked until
+        //     a subsequent Invoke() (they postdate the snapshot).
+        //   - Handlers unregistered DURING this dispatch that were already
+        //     in the snapshot STILL run for this dispatch; the unregister
+        //     itself still takes effect for future dispatches.
         template<typename U = R>
         std::enable_if_t<std::is_void_v<U>> Invoke(Args... args) const
         {
-            for (const auto& handler : m_handlers)
+            auto handlers = m_handlers;
+            for (const auto& handler : handlers)
             {
                 handler.delegate(std::forward<Args>(args)...);
             }
         }
-        
+
         template<typename U = R>
         std::enable_if_t<!std::is_void_v<U>, SmallVector<R, 4>> Invoke(Args... args) const
         {
+            auto handlers = m_handlers;
             SmallVector<R, 4> results;
-            results.reserve(m_handlers.size());
-            
-            for (const auto& handler : m_handlers)
+            results.reserve(handlers.size());
+
+            for (const auto& handler : handlers)
             {
                 results.push_back(handler.delegate(std::forward<Args>(args)...));
             }
-            
+
             return results;
         }
         
