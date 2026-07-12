@@ -72,6 +72,12 @@ namespace Astra
         template<typename T>
         ASTRA_NODISCARD T Get(const void* instance) const
         {
+            // All-config guard: a wrong-T read against a differently-sized/typed
+            // getter would corrupt `result`, and calling an unset getter is UB.
+            // ASTRA_ASSERT below remains as a Debug-only diagnostic; it is not
+            // the guard (Release/Dist must degrade safely, not just in Debug).
+            if (TypeID<T>::Hash() != typeHash || !getter) ASTRA_UNLIKELY
+                return T{};
             ASTRA_ASSERT(TypeID<T>::Hash() == typeHash, "Type mismatch in FieldInfo::Get");
             ASTRA_ASSERT(getter, "No getter function registered");
 
@@ -89,6 +95,12 @@ namespace Astra
         template<typename T>
         void Set(void* instance, const T& value) const
         {
+            // All-config guard: `setter` is an empty std::function for const
+            // fields, so calling it unconditionally would invoke std::bad_function_call
+            // (std::terminate under -fno-exceptions). Type mismatch and const-ness
+            // must both be checked before ever calling `setter`, in every config.
+            if (TypeID<T>::Hash() != typeHash || !setter || isConst) ASTRA_UNLIKELY
+                return; // no-op: never call an empty std::function
             ASTRA_ASSERT(TypeID<T>::Hash() == typeHash, "Type mismatch in FieldInfo::Set");
             ASTRA_ASSERT(setter, "No setter function registered");
             ASTRA_ASSERT(!isConst, "Cannot set const field");
@@ -105,6 +117,11 @@ namespace Astra
         template<typename T>
         ASTRA_NODISCARD T* GetPtr(void* instance) const
         {
+            // All-config guard: a const field must never hand back a writable
+            // pointer, and a wrong-T request must not reinterpret the field's
+            // bytes as a differently-sized/typed object.
+            if (TypeID<T>::Hash() != typeHash || isConst) ASTRA_UNLIKELY
+                return nullptr;
             ASTRA_ASSERT(TypeID<T>::Hash() == typeHash, "Type mismatch in FieldInfo::GetPtr");
             return reinterpret_cast<T*>(static_cast<std::byte*>(instance) + offset);
         }
@@ -118,6 +135,10 @@ namespace Astra
         template<typename T>
         ASTRA_NODISCARD const T* GetPtr(const void* instance) const
         {
+            // All-config guard: a wrong-T request must not reinterpret the
+            // field's bytes as a differently-sized/typed object.
+            if (TypeID<T>::Hash() != typeHash) ASTRA_UNLIKELY
+                return nullptr;
             ASTRA_ASSERT(TypeID<T>::Hash() == typeHash, "Type mismatch in FieldInfo::GetPtr");
             return reinterpret_cast<const T*>(static_cast<const std::byte*>(instance) + offset);
         }
