@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <vector>
 #include "../TestComponents.hpp"
+#include "Astra/Commands/CommandBuffer.hpp"
 #include "Astra/Registry/Registry.hpp"
 #include "Astra/Registry/View.hpp"
 
@@ -379,4 +380,85 @@ TEST_F(ViewTest, ModificationDuringIteration)
         Position* pos = registry->GetComponent<Position>(entities[i]);
         EXPECT_EQ(pos->x, float(i * 2));
     }
+}
+
+// View::ForEach carries a Debug-only reentrancy guard: it compares the
+// ArchetypeManager's structural-change counter before and after the loop and
+// ASTRA_ASSERTs it is unchanged. A normal ForEach that only reads entities and
+// mutates existing component VALUES (never structure) must complete cleanly
+// and produce correct results without ever tripping that guard. Deferring
+// structural changes into a CommandBuffer and Executing it AFTER the loop --
+// the documented remedy -- must also not trip it, since recording into a
+// CommandBuffer does not touch the ArchetypeManager; only Execute() does.
+TEST_F(ViewTest, ForEachNoStructuralMutationDoesNotTripReentrancyGuard)
+{
+    using namespace Astra::Test;
+
+    constexpr int kEntityCount = 20;
+    std::vector<Astra::Entity> entities;
+    entities.reserve(kEntityCount);
+    for (int i = 0; i < kEntityCount; ++i)
+    {
+        entities.push_back(registry->CreateEntityWith(
+            Position{float(i), 0.0f, 0.0f}, Velocity{float(i * 2), 0.0f, 0.0f}));
+    }
+
+    auto view = registry->CreateView<Position, Velocity>();
+
+    // Normal (non-structural) ForEach: accumulate values and mutate component
+    // VALUES in place. Must complete without tripping the reentrancy guard.
+    float positionSum = 0.0f;
+    float velocitySum = 0.0f;
+    size_t visited = 0;
+    view.ForEach([&](Astra::Entity, Position& pos, Velocity& vel)
+    {
+        positionSum += pos.x;
+        velocitySum += vel.dx;
+        pos.x += 1.0f;  // in-place value mutation, not a structural change
+        ++visited;
+    });
+
+    ASSERT_EQ(visited, entities.size());
+
+    float expectedPositionSum = 0.0f;
+    float expectedVelocitySum = 0.0f;
+    for (int i = 0; i < kEntityCount; ++i)
+    {
+        expectedPositionSum += float(i);
+        expectedVelocitySum += float(i * 2);
+    }
+    EXPECT_FLOAT_EQ(positionSum, expectedPositionSum);
+    EXPECT_FLOAT_EQ(velocitySum, expectedVelocitySum);
+
+    // Confirm the in-place value mutation actually took effect (pos.x += 1).
+    for (int i = 0; i < kEntityCount; ++i)
+    {
+        Position* pos = registry->GetComponent<Position>(entities[i]);
+        ASSERT_NE(pos, nullptr);
+        EXPECT_FLOAT_EQ(pos->x, float(i) + 1.0f);
+    }
+
+    // Deferred structural mutation: record RemoveComponent<Velocity> for every
+    // entity while iterating, then Execute() AFTER the loop returns. This must
+    // not trip the guard either, since the buffer only mutates the registry
+    // during Execute() -- never during recording.
+    Astra::CommandBuffer cmdBuffer(registry.get());
+    size_t recorded = 0;
+    view.ForEach([&](Astra::Entity e, Position&, Velocity&)
+    {
+        cmdBuffer.RemoveComponent<Velocity>(e);
+        ++recorded;
+    });
+    EXPECT_EQ(recorded, entities.size());
+
+    auto result = cmdBuffer.Execute();
+    ASSERT_TRUE(result.IsOk());
+
+    // Velocity was removed from every entity, so the view should now be empty.
+    size_t afterCount = 0;
+    view.ForEach([&](Astra::Entity, Position&, Velocity&)
+    {
+        ++afterCount;
+    });
+    EXPECT_EQ(afterCount, 0u);
 }

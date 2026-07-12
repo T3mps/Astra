@@ -10,6 +10,7 @@
 #include "../Archetype/Archetype.hpp"
 #include "../Archetype/ArchetypeManager.hpp"
 #include "../Component/Component.hpp"
+#include "../Core/Base.hpp"
 #include "../Core/WorkScheduler.hpp"
 #include "../Entity/Entity.hpp"
 #include "Query.hpp"
@@ -59,21 +60,55 @@ namespace Astra
             return m_archetypeManager != nullptr;
         }
 
+        /**
+         * Invoke func(Entity, Components&...) for every entity matching this View.
+         *
+         * CONTRACT: structural mutation is NOT supported during this call. Do not
+         * create or destroy entities, or add/remove components, from within func --
+         * the Archetype/chunk pointers this loop walks are captured up front and are
+         * not re-validated mid-iteration, so a direct structural change here is
+         * undefined behavior. In-place edits to already-present component VALUES
+         * (e.g. `pos.x += 1`) are fine.
+         *
+         * To change entity structure while iterating, record the changes into a
+         * `CommandBuffer` and call `Execute()` AFTER this loop returns. Recording
+         * into a CommandBuffer does not itself touch the ArchetypeManager, so a
+         * properly deferred CommandBuffer never trips the Debug guard below.
+         *
+         * In Debug builds this is additionally enforced by an ASTRA_ASSERT that
+         * compares the ArchetypeManager's structural-change counter before and
+         * after the loop; the check (and the counter read) is compiled out
+         * entirely in Release/Dist builds, so this contract carries zero Release
+         * cost.
+         */
         template<typename Func>
         ASTRA_FORCEINLINE void ForEach(Func&& func)
         {
             if (!m_archetypeManager) ASTRA_UNLIKELY
                 return;  // Registry destroyed
-            
+
             EnsureArchetypes();
-            
+
+#ifdef ASTRA_BUILD_DEBUG
+            // Captured AFTER EnsureArchetypes() so its own (legitimate) refresh
+            // of the counter is never mistaken for an in-loop structural change.
+            const uint32_t debugStartStructuralChangeCounter =
+                m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
+#endif
+
             if (m_archetypes.empty()) ASTRA_UNLIKELY
                 return;
-            
+
             for (Archetype* archetype : m_archetypes)
             {
                 ForEachImpl(archetype, std::forward<Func>(func), RequiredTypes{}, OptionalTypes{});
             }
+
+#ifdef ASTRA_BUILD_DEBUG
+            ASTRA_ASSERT(m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire) == debugStartStructuralChangeCounter,
+                "Structural mutation (create/destroy entity, add/remove component) detected during View::ForEach. "
+                "Defer structural changes into a CommandBuffer and call Execute() after the loop.");
+#endif
         }
         
         template<typename Func>

@@ -227,6 +227,8 @@ for (auto [entity, pos, vel] : view)
 }
 ```
 
+Structural mutation (create/destroy entity, add/remove component) during `ForEach` is unsupported; to change entity structure while iterating, record the changes into a `CommandBuffer` and call `Execute()` after the loop.
+
 ### Query Modifiers
 
 - `Not<T>` - Exclude entities with component T
