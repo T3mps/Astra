@@ -92,7 +92,15 @@ namespace Astra
         {
             if (m_invoker && m_manager)
             {
-                m_manager(ManagerOp::Copy, m_storage, other.m_storage);
+                if (!m_manager(ManagerOp::Copy, m_storage, other.m_storage))
+                {
+                    // Stored functor is not copy-constructible (small-buffer,
+                    // move-only capture): m_storage was left unconstructed.
+                    // Fall back to the empty delegate state rather than leaving
+                    // m_invoker set over uninitialized storage.
+                    m_invoker = nullptr;
+                    m_manager = nullptr;
+                }
             }
             else if (m_invoker)
             {
@@ -130,7 +138,12 @@ namespace Astra
                 m_manager = other.m_manager;
                 if (m_invoker && m_manager)
                 {
-                    m_manager(ManagerOp::Copy, m_storage, other.m_storage);
+                    if (!m_manager(ManagerOp::Copy, m_storage, other.m_storage))
+                    {
+                        // Same non-copy-constructible fallback as the copy ctor.
+                        m_invoker = nullptr;
+                        m_manager = nullptr;
+                    }
                 }
                 else if (m_invoker)
                 {
@@ -140,7 +153,7 @@ namespace Astra
             }
             return *this;
         }
-        
+
         Delegate& operator=(Delegate&& other) noexcept
         {
             if (this != &other)
@@ -221,7 +234,10 @@ namespace Astra
             Destroy
         };
         
-        using ManagerType = void(*)(ManagerOp, void*, const void*);
+        // Returns true if the operation left `dst` holding a constructed object
+        // (always true for Move/Destroy; for Copy, false means the functor is not
+        // copy-constructible and `dst` was left unconstructed).
+        using ManagerType = bool(*)(ManagerOp, void*, const void*);
         
         template<typename Func>
         static R InvokeFunctionPointer(const void* storage, Args... args)
@@ -258,7 +274,7 @@ namespace Astra
         }
         
         template<typename Func>
-        static void ManageSmallFunctor(ManagerOp op, void* dst, const void* src)
+        static bool ManageSmallFunctor(ManagerOp op, void* dst, const void* src)
         {
             switch (op)
             {
@@ -266,40 +282,49 @@ namespace Astra
                     if constexpr (std::is_copy_constructible_v<Func>)
                     {
                         new (dst) Func(*reinterpret_cast<const Func*>(src));
+                        return true;
                     }
                     else
                     {
-                        ASTRA_ASSERT(false, "Functor is not copy constructible");
+                        // Func is not copy-constructible (e.g. captures a move-only
+                        // type). Leave `dst` unconstructed and report failure so the
+                        // caller (copy ctor/assignment) can fall back to the empty
+                        // delegate state instead of leaving m_invoker set over
+                        // uninitialized storage.
+                        return false;
                     }
-                    break;
                 case ManagerOp::Move:
                     new (dst) Func(std::move(*reinterpret_cast<Func*>(const_cast<void*>(src))));
                     reinterpret_cast<Func*>(const_cast<void*>(src))->~Func();
-                    break;
+                    return true;
                 case ManagerOp::Destroy:
                     reinterpret_cast<Func*>(dst)->~Func();
-                    break;
+                    return true;
             }
+            return true;
         }
-        
+
         template<typename Func>
-        static void ManageLargeFunctor(ManagerOp op, void* dst, const void* src)
+        static bool ManageLargeFunctor(ManagerOp op, void* dst, const void* src)
         {
             using SharedType = std::shared_ptr<Func>;
-            
+
             switch (op)
             {
                 case ManagerOp::Copy:
+                    // shared_ptr copy only bumps the refcount - always succeeds
+                    // regardless of whether Func itself is copy-constructible.
                     new (dst) SharedType(*reinterpret_cast<const SharedType*>(src));
-                    break;
+                    return true;
                 case ManagerOp::Move:
                     new (dst) SharedType(std::move(*reinterpret_cast<SharedType*>(const_cast<void*>(src))));
                     reinterpret_cast<SharedType*>(const_cast<void*>(src))->~SharedType();
-                    break;
+                    return true;
                 case ManagerOp::Destroy:
                     reinterpret_cast<SharedType*>(dst)->~SharedType();
-                    break;
+                    return true;
             }
+            return true;
         }
 
         alignas(std::max_align_t) mutable std::byte m_storage[SMALL_BUFFER_SIZE];

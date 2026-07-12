@@ -143,16 +143,19 @@ namespace Astra
 
         ASTRA_NODISCARD T& operator*() & noexcept
         {
+            ASTRA_ASSERT(m_hasValue, "Dereferencing Result with no value");
             return *m_storage.template As<T>();
         }
 
         ASTRA_NODISCARD const T& operator*() const& noexcept
         {
+            ASTRA_ASSERT(m_hasValue, "Dereferencing Result with no value");
             return *m_storage.template As<T>();
         }
 
         ASTRA_NODISCARD T&& operator*() && noexcept
         {
+            ASTRA_ASSERT(m_hasValue, "Dereferencing Result with no value");
             return std::move(*m_storage.template As<T>());
         }
 
