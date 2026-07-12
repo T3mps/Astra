@@ -113,6 +113,17 @@ namespace Astra
             // Empty components should report size 0 to avoid memory allocation
             desc.size = std::is_empty_v<T> ? 0 : sizeof(T);
             desc.alignment = std::is_empty_v<T> ? 1 : alignof(T);
+            // All-config guard: chunk storage can only honor alignments up to
+            // CACHE_LINE_SIZE; refuse registration so failure is observable
+            // (descriptor lookup returns nullptr; Registry::AddComponent returns
+            // nullptr) instead of handing back a descriptor the storage will
+            // misalign. Must run BEFORE the ASTRA_ASSERT below so Debug builds
+            // degrade the same way as Release/Dist (mirrors FieldInfo.hpp's
+            // Get/Set/GetPtr guard-before-assert ordering).
+            if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY
+            {
+                return;
+            }
             ASTRA_ASSERT(desc.alignment <= CACHE_LINE_SIZE,
                          "Component alignment above 64 bytes is not supported by chunk storage");
 

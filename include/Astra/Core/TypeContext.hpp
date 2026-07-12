@@ -78,6 +78,17 @@ namespace Astra
 #endif
                 return it->second;
             }
+            // All-config guard: uint16 id space exhausted. Refuse rather than
+            // wrap m_next (which would silently alias a fresh type onto a
+            // previously-assigned id). Not cached in the hash map, so every
+            // call for this hash keeps refusing instead of caching a bogus
+            // mapping. Must run BEFORE the ASTRA_ASSERT below so Debug builds
+            // degrade the same way as Release/Dist (mirrors ComponentRegistry's
+            // and FieldInfo.hpp's guard-before-assert ordering).
+            if (m_next == INVALID_COMPONENT) ASTRA_UNLIKELY
+            {
+                return INVALID_COMPONENT;
+            }
             ASTRA_ASSERT(m_next != INVALID_COMPONENT, "TypeContext ID space exhausted");
             const ComponentID id = m_next++;
             m_hashToId[hash] = id;
