@@ -764,13 +764,22 @@ namespace Astra
             registry->GetAllDescriptors(registryDescriptors);
             
             // Read each archetype, including the root (zero-component) archetype
-            // written at index 0. The constructor already created a fresh, empty
-            // root archetype (m_archetypes[0], pointed to by m_rootArchetype)
-            // before Deserialize ran, so index 0 must repopulate that EXISTING
-            // entry in place rather than push a second root - m_rootArchetype and
-            // m_archetypeMap must keep referring to exactly one root archetype.
+            // written at index 0 (format v3+). The constructor already created a
+            // fresh, empty root archetype (m_archetypes[0], pointed to by
+            // m_rootArchetype) before Deserialize ran, so index 0 must repopulate
+            // that EXISTING entry in place rather than push a second root -
+            // m_rootArchetype and m_archetypeMap must keep referring to exactly
+            // one root archetype.
+            //
+            // Version gate: archives written before v3 (format v2 and earlier)
+            // do not contain a root-archetype record at all - their archetypeCount
+            // covers only the non-root archetypes starting at index 1. Starting
+            // the read loop at 1 for those archives reproduces the pre-v3 reader
+            // exactly (root stays empty, same as when it was written), instead of
+            // misreading the first non-root record's bytes as a root record.
             std::vector<uint32_t> archetypeIndices;
-            for (uint32_t i = 0; i < archetypeCount; ++i)
+            const uint32_t firstArchetypeIndex = (reader.GetVersion() >= 3) ? 0u : 1u;
+            for (uint32_t i = firstArchetypeIndex; i < archetypeCount; ++i)
             {
                 uint32_t index;
                 reader(index);

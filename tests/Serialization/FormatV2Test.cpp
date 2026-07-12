@@ -3,8 +3,13 @@
 
 namespace { struct FPos { float x, y, z; }; }
 
-TEST(FormatV2, HeaderVersionIs2)
+TEST(FormatV2, HeaderVersionMatchesCurrentFormatVersion)
 {
+    // Was HeaderVersionIs2 / hardcoded EXPECT_EQ(version, 2) before the v3
+    // root-archetype format bump (BINARY_FORMAT_VERSION now 3, see
+    // BinaryArchive.hpp). A freshly-saved archive is always stamped with
+    // whatever BINARY_FORMAT_VERSION currently is, so assert against that
+    // symbol rather than a literal that goes stale on the next format bump.
     Astra::Registry reg;
     reg.GetComponentRegistry()->RegisterComponent<FPos>();
     reg.CreateEntityWith(FPos{1, 2, 3});
@@ -15,7 +20,7 @@ TEST(FormatV2, HeaderVersionIs2)
     // BinaryHeader: magic[5], then uint16 version at offset 5 (packed struct).
     uint16_t version = 0;
     std::memcpy(&version, bytes.data() + 5, sizeof(version));
-    EXPECT_EQ(version, 2);
+    EXPECT_EQ(version, Astra::BINARY_FORMAT_VERSION);
 }
 
 TEST(FormatV2, ChecksumIsPortableFunctionAndDetectsCorruption)

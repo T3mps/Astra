@@ -79,8 +79,10 @@ namespace Astra
      * Binary format version history:
      * v1: Initial format (ISA-dependent checksum; size_t container sizes)
      * v2: Portable checksum; explicit uint64 container sizes; resource block
+     * v3: Adds the root (zero-component) archetype record; v2 archives (which
+     *     lack this record) remain readable via version-gated deserialize
      */
-    inline constexpr uint16_t BINARY_FORMAT_VERSION = 2;
+    inline constexpr uint16_t BINARY_FORMAT_VERSION = 3;
     inline constexpr char BINARY_MAGIC[6] = "ASTRA";
     
     /**
