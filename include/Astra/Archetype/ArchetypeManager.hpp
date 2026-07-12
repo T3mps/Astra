@@ -559,7 +559,46 @@ namespace Astra
         }
         
         ArchetypeChunkPool& GetChunkPool() { return m_chunkPool; }
-        
+
+        /**
+         * Resets the manager to a freshly-constructed state IN PLACE: every
+         * archetype (including the old root) is destroyed, the entity map,
+         * archetype map, and edge-graph caches are emptied, and a brand-new
+         * empty-mask root archetype is created and registered exactly as the
+         * constructor does. The ComponentRegistry (weak_ptr) and the chunk
+         * pool (and its configured chunk size) are left untouched so Clear()
+         * keeps honoring the pool config the manager was constructed with.
+         *
+         * This is done in place - the ArchetypeManager object identity never
+         * changes - so any View/Relations already holding a shared_ptr to
+         * this manager keep pointing at a live, valid object instead of a
+         * discarded one. Bumping both counters below signals those cached
+         * views that everything changed AND that cached Archetype* pointers
+         * are stale, so they fully re-collect (see View::EnsureArchetypes).
+         */
+        void Clear()
+        {
+            m_entityMap.clear();
+            m_archetypeMap.Clear();
+            m_edgeGraph.Clear();
+            m_archetypes.clear();  // destroys every archetype, incl. the old root
+
+            auto rootArchetype = std::make_unique<Archetype>(ComponentMask{});
+            m_rootArchetype = rootArchetype.get();
+            m_rootArchetype->m_chunkPool = &m_chunkPool;
+            m_rootArchetype->Initialize({});
+
+            ArchetypeEntry entry;
+            entry.archetype = std::move(rootArchetype);
+            entry.creationGeneration = 0;  // Root archetype is generation 0
+            m_archetypes.push_back(std::move(entry));
+
+            m_generation = 1;  // matches the NSDMI a freshly constructed manager starts with
+
+            m_structuralChangeCounter.fetch_add(1, std::memory_order_release);
+            m_archetypeRemovalCounter.fetch_add(1, std::memory_order_release);
+        }
+
         // Options for archetype defragmentation
         struct DefragmentOptions
         {

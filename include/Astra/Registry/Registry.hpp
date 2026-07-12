@@ -1003,17 +1003,9 @@ namespace Astra
         
         void Clear()
         {
-            if (m_signalManager.IsSignalEnabled(Signal::EntityDestroyed))
-            {
-                // TODO: Consider if we want to emit signals during Clear()
-            }
-            
-            m_archetypeManager = std::make_shared<ArchetypeManager>(m_componentRegistry, m_config.chunkPoolConfig);
-
+            m_archetypeManager->Clear();   // in place -- keeps cached Views/Relations valid
             m_relationshipGraph->Clear();
-            
             m_entityManager.Clear();
-            
         }
 
         ASTRA_NODISCARD std::size_t Size() const noexcept
