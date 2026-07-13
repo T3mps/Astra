@@ -124,3 +124,36 @@ TEST(SystemScheduler, NoTraitSystemForcesSerialization)
     ASSERT_EQ(plan.size(), 3u);
     EXPECT_EQ(plan[1].size(), 1u);  // the no-trait system is alone
 }
+
+// ---- Task 4: execution guard -----------------------------------------------
+
+namespace
+{
+    // A system that mutates the scheduler mid-Execute (the practical misuse).
+    struct SelfRemovingSystem
+    {
+        Astra::SystemScheduler* sched = nullptr;
+        bool* sawExecuting = nullptr;
+        void operator()(Astra::Registry&)
+        {
+            *sawExecuting = sched->IsExecuting();     // must be true inside Execute
+            sched->RemoveSystem<SelfRemovingSystem>(); // must no-op (guarded)
+        }
+    };
+}
+
+TEST(SystemScheduler, IsExecutingTrueInsideExecuteAndMutationNoOps)
+{
+    Astra::Registry reg;
+    Astra::SystemScheduler s;
+    bool sawExecuting = false;
+    (void)s.AddSystem<SelfRemovingSystem>(&s, &sawExecuting);
+    EXPECT_FALSE(s.IsExecuting());
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+
+    EXPECT_TRUE(sawExecuting);          // flag was set during Execute
+    EXPECT_FALSE(s.IsExecuting());      // cleared after Execute
+    EXPECT_EQ(s.Size(), 1u);           // RemoveSystem no-oped during execution
+}

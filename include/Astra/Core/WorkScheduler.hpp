@@ -22,10 +22,13 @@ namespace Astra
         // all batches complete. Must be safe to call from multiple threads
         // and re-entrantly from inside fn (implementations may degrade to
         // inline execution in either case).
-        // Memory model: implementations MUST establish a happens-before edge
-        // between the completion of every fn invocation and the return of
-        // ParallelFor -- all writes made inside fn must be visible to the
-        // caller afterwards.
+        // Memory model: implementations MUST establish a happens-before edge in
+        // BOTH directions: (1) from the ParallelFor call site to the start of
+        // every fn invocation (writes made before ParallelFor are visible inside
+        // fn), and (2) from the completion of every fn invocation to the return
+        // of ParallelFor (writes made inside fn are visible to the caller after).
+        // Every conforming scheduler (std::execution::par, TBB parallel_for, a
+        // task pool) already provides both; Astra's correctness depends on it.
         // fn must not throw (Astra is exception-free), and must not suspend
         // or migrate OS threads mid-invocation: Astra uses thread identity
         // (thread_local) for per-thread state such as ParallelCommandBuffer.

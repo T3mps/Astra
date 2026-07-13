@@ -23,28 +23,34 @@ namespace Astra
     class SystemScheduler
     {
     public:
-        // RAII guard for execution lock (prevents use-after-free during parallel execution)
+        // RAII depth counter for execution. NOT a lock: it does not provide
+        // mutual exclusion against external threads. Registration (Add/Remove/
+        // Clear) follows the same single-writer contract as the Registry — it
+        // must not race Execute. The counter exists to (a) make the one
+        // practical mistake safe (a system, on a worker, calling Remove/Add
+        // mid-frame no-ops) and (b) stay truthful under reentrant Execute.
+        // Depth returning to zero is the designated B2 command-buffer sync point.
         class ExecutionGuard
         {
         public:
-            explicit ExecutionGuard(std::atomic<bool>& flag) : m_flag(flag)
+            explicit ExecutionGuard(std::atomic<int>& depth) : m_depth(depth)
             {
-                m_flag.store(true, std::memory_order_release);
+                m_depth.fetch_add(1, std::memory_order_acq_rel);
             }
             ~ExecutionGuard()
             {
-                m_flag.store(false, std::memory_order_release);
+                m_depth.fetch_sub(1, std::memory_order_acq_rel);
             }
             ExecutionGuard(const ExecutionGuard&) = delete;
             ExecutionGuard& operator=(const ExecutionGuard&) = delete;
         private:
-            std::atomic<bool>& m_flag;
+            std::atomic<int>& m_depth;
         };
 
         // Check if scheduler is currently executing (cannot be modified during execution)
         ASTRA_NODISCARD bool IsExecuting() const noexcept
         {
-            return m_isExecuting.load(std::memory_order_acquire);
+            return m_executionDepth.load(std::memory_order_acquire) > 0;
         }
 
         template<System T, typename... Args>
@@ -117,8 +123,10 @@ namespace Astra
         template<System T>
         void RemoveSystem()
         {
-            // Prevent modification during execution to avoid use-after-free
-            ASTRA_ASSERT(!IsExecuting(), "Cannot remove system while scheduler is executing");
+            // Prevent modification during execution to avoid use-after-free.
+            // No assert here (unlike AddSystem): a system calling RemoveSystem
+            // on itself mid-Execute is the one practical mistake the guard
+            // makes safe, so this must no-op gracefully rather than abort.
             if (IsExecuting()) return;
 
             uint64_t typeId = TypeID<T>::Hash();
@@ -163,7 +171,11 @@ namespace Astra
 
             // Acquire execution lock - prevents modification during parallel execution
             // This prevents use-after-free when systems are removed while executing
-            ExecutionGuard guard(m_isExecuting);
+            ASTRA_ASSERT(m_executionDepth.load(std::memory_order_acquire) == 0,
+                "Reentrant SystemScheduler::Execute is unsupported; if a system must "
+                "re-run systems, do it from an Astra::Exclusive system. (The depth "
+                "counter keeps this safe, but nesting is almost always a design error.)");
+            ExecutionGuard guard(m_executionDepth);
 
             if (m_needsRebuild)
             {
@@ -189,8 +201,8 @@ namespace Astra
         
         void Clear()
         {
-            // Prevent modification during execution to avoid use-after-free
-            ASTRA_ASSERT(!IsExecuting(), "Cannot clear scheduler while executing");
+            // Prevent modification during execution to avoid use-after-free.
+            // No assert here (unlike AddSystem): see RemoveSystem's note above.
             if (IsExecuting()) return;
 
             m_systems.clear();
@@ -378,6 +390,6 @@ namespace Astra
         FlatMap<uint64_t, size_t> m_systemIndices;                      // key: TypeID<T>::Hash() — systems must not consume dense ComponentIDs
         mutable std::vector<std::vector<size_t>> m_executionPlan;       // Cached parallel groups
         mutable bool m_needsRebuild = true;                             // Whether execution plan needs rebuild
-        mutable std::atomic<bool> m_isExecuting{false};                 // Execution lock to prevent modification during parallel execution
+        mutable std::atomic<int> m_executionDepth{0};                   // reentrancy-safe; ==0 is the B2 sync point
     };
 } // namespace Astra
