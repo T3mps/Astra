@@ -3,6 +3,7 @@
 #include <concepts>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 
 #include "../Component/Component.hpp"
 #include "../Core/Base.hpp"
@@ -18,37 +19,32 @@ namespace Astra
     
     template<typename... Components>
     struct Reads { using type = std::tuple<Components...>; };
-    
+
     template<typename... Components>
     struct Writes { using type = std::tuple<Components...>; };
-    
+
+    // Marker: a system that mutates entity structure (create/destroy/add/remove)
+    // or accesses state outside its declared masks. Forces a solo execution group.
+    struct Exclusive {};
+
+    namespace Detail
+    {
+        template<typename T> struct TraitReads  { using type = std::tuple<>; };
+        template<typename... R> struct TraitReads<Reads<R...>>  { using type = std::tuple<R...>; };
+        template<typename T> struct TraitWrites { using type = std::tuple<>; };
+        template<typename... W> struct TraitWrites<Writes<W...>> { using type = std::tuple<W...>; };
+    }
+
+    // Accepts Reads<...>, Writes<...>, and Exclusive in any order/combination.
     template<typename... Traits>
-    struct SystemTraits {};
-    
-    template<typename... ReadComponents, typename... WriteComponents>
-    struct SystemTraits<Reads<ReadComponents...>, Writes<WriteComponents...>>
+    struct SystemTraits
     {
-        using ReadsComponents = std::tuple<ReadComponents...>;
-        using WritesComponents = std::tuple<WriteComponents...>;
+        using ReadsComponents  = decltype(std::tuple_cat(std::declval<typename Detail::TraitReads<Traits>::type>()...));
+        using WritesComponents = decltype(std::tuple_cat(std::declval<typename Detail::TraitWrites<Traits>::type>()...));
         static constexpr bool HasTraits = true;
+        static constexpr bool RequiresExclusive = (std::is_same_v<Traits, Exclusive> || ...);
     };
-    
-    template<typename... ReadComponents>
-    struct SystemTraits<Reads<ReadComponents...>>
-    {
-        using ReadsComponents = std::tuple<ReadComponents...>;
-        using WritesComponents = std::tuple<>;
-        static constexpr bool HasTraits = true;
-    };
-    
-    template<typename... WriteComponents>
-    struct SystemTraits<Writes<WriteComponents...>>
-    {
-        using ReadsComponents = std::tuple<>;
-        using WritesComponents = std::tuple<WriteComponents...>;
-        static constexpr bool HasTraits = true;
-    };
-    
+
     template<typename T>
     struct HasSystemTraits : std::false_type {};
     
@@ -107,7 +103,8 @@ namespace Astra
         using ReadsComponents = decltype(ExtractReads<ComponentArgs>(std::make_index_sequence<std::tuple_size_v<ComponentArgs>>{}));
         using WritesComponents = decltype(ExtractWrites<ComponentArgs>(std::make_index_sequence<std::tuple_size_v<ComponentArgs>>{}));
         static constexpr bool HasTraits = true;
-        
+        static constexpr bool RequiresExclusive = false;  // lambda systems operate on a view; never exclusive
+
         explicit LambdaSystemWrapper(Lambda lambda) : m_lambda(std::move(lambda)) {}
         
         // Implement the System interface

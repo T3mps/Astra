@@ -29,6 +29,9 @@ namespace Astra
         
         // Insertion order (for stable sorting and debugging)
         size_t insertionOrder;
+
+        // True if the system declared Astra::Exclusive (runs in its own solo group).
+        bool requiresExclusive = false;
     };
     
     /**
