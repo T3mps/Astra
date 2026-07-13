@@ -519,6 +519,8 @@ In `Execute(Registry&, ISystemExecutor*)` (`:153-162`), before constructing the 
             ExecutionGuard guard(m_executionDepth);
 ```
 
+**Also (uniform-graceful misuse policy, decision 2026-07-13):** remove the `ASTRA_ASSERT(!IsExecuting(), …)` line from **`RemoveSystem`** (`:117`) and **`Clear`** (`:189`), keeping each method's existing graceful `if (IsExecuting()) return;` guard. These two `void` methods have no error channel; a system calling them mid-`Execute` is the "one practical mistake" the guard makes safe (a no-op), so aborting in Debug contradicts that and would crash the Task-4 test. (`AddSystem`'s two misuse-asserts are removed as part of Task 5, which rewrites `AddSystem` wholesale.) The reentrancy assert added just above is the **only** execution-guard assert that remains.
+
 - [ ] **Step 4: Fix the `IWorkScheduler` contract comment (I4)**
 
 In `include/Astra/Core/WorkScheduler.hpp`, extend the memory-model clause (`:25-28`) to require both edges:
@@ -638,7 +640,10 @@ Replace the signature/body of `AddSystem<System T, Args...>` (`:50-104`). Key ch
         template<System T, typename... Args>
         ASTRA_NODISCARD Result<void, SystemError> AddSystem(Args&&... args)
         {
-            ASTRA_ASSERT(!IsExecuting(), "Cannot add system while scheduler is executing");
+            // Uniform-graceful misuse policy (decision 2026-07-13): NO
+            // ASTRA_ASSERT here — the Result channel below IS the contract, so
+            // asserting-and-aborting on the same condition would make the error
+            // unreachable/untestable in Debug. Return the typed error instead.
             if (IsExecuting())
                 return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
 
@@ -648,7 +653,8 @@ Replace the signature/body of `AddSystem<System T, Args...>` (`:50-104`). Key ch
             const uint64_t typeId = TypeID<T>::Hash();
             if (m_systemIndices.Contains(typeId))
             {
-                ASTRA_ASSERT(false, "System type already registered");
+                // No ASTRA_ASSERT — duplicate registration is a handleable
+                // runtime error (uniform-graceful policy, decision 2026-07-13).
                 return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
             }
 
@@ -698,7 +704,7 @@ Change the lambda `AddSystem` (`:106-111`) to return and forward the result:
         }
 ```
 
-Change both `AddLambdaSystemImpl` overloads (`:368-381`) to `ASTRA_NODISCARD Result<void, SystemError>` and `return AddSystemInternal<Wrapper>(...);`. Change `AddSystemInternal` (`:383-432`) to `ASTRA_NODISCARD Result<void, SystemError>`, mirroring Step 4's body (nothrow `new`, the three `Err`/`Ok` returns, `.requiresExclusive = false` initializer, and the `if constexpr (requires { SystemType::RequiresExclusive; })` block).
+Change both `AddLambdaSystemImpl` overloads (`:368-381`) to `ASTRA_NODISCARD Result<void, SystemError>` and `return AddSystemInternal<Wrapper>(...);`. Change `AddSystemInternal` (`:383-432`) to `ASTRA_NODISCARD Result<void, SystemError>`, mirroring Step 4's body (nothrow `new`, the three `Err`/`Ok` returns, `.requiresExclusive = false` initializer, the `if constexpr (requires { SystemType::RequiresExclusive; })` block, and — per the uniform-graceful policy — **NO misuse-asserts**: strip the existing `ASTRA_ASSERT(!IsExecuting(), …)` and `ASTRA_ASSERT(false, "System type already registered")` here too).
 
 - [ ] **Step 6: Resync `insertionOrder` in `RemoveSystem`**
 
