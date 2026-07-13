@@ -326,6 +326,36 @@ config.workScheduler = scheduler;
 Astra::Registry registry(config);
 ```
 
+#### System scheduling contract (built-in `SystemScheduler`)
+
+The built-in scheduler is an **opt-in convenience**, not a guarantee. When you
+inject an `IWorkScheduler` and use `ParallelExecutor`, it groups systems that
+declare **disjoint** component masks and runs them concurrently. The rules:
+
+- **Declared masks are a promise of purity.** A system in a multi-member
+  parallel group must touch only the components in its `Reads`/`Writes` and must
+  perform **no** structural changes (create/destroy entity, add/remove
+  component). In Debug, an undeclared structural change trips an assert.
+- **`Astra::Exclusive`** — mark a system that does structural changes or reaches
+  outside its declared masks. It runs in its own solo group (nothing concurrent):
+
+  ```cpp
+  struct SpawnSystem : Astra::SystemTraits<Astra::Writes<Position>, Astra::Exclusive>
+  {
+      void operator()(Astra::Registry& r) { r.CreateEntity<Position>(); /* safe: solo */ }
+  };
+  ```
+
+- **Ordering.** Only component-mask dependencies are honored. Within a parallel
+  group, order is concurrent and unspecified. Independent systems are **not**
+  reordered across insertion order (the plan is insertion-order-stable, and
+  `SequentialExecutor` and `ParallelExecutor` produce identical observable
+  order). A hidden dependency between two mask-independent systems in the same
+  group (through a resource, event, or side effect) is a *system-order
+  ambiguity* and is not honored — express it via masks.
+- **Registration** (`AddSystem`) returns `Result<void, SystemError>` and must
+  not race `Execute` (single-writer, like the `Registry` itself).
+
 ### Memory Configuration
 
 Configure memory allocation via `ArchetypeChunkPool::Config`:
