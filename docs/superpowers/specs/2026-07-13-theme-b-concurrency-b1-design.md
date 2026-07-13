@@ -121,7 +121,6 @@ Source-compatible: existing `scheduler.AddSystem<Foo>();` calls still compile (`
 ## Section 5 — In-file minors + forward-compat contract
 
 **Fold into B1:**
-- **`IsReadOnly` pointer-to-const (`System.hpp:78`)** — fix the predicate to strip the pointer before the const check, handling both `const T&` and `const T*`, so read-only optionals classify as reads (not writes) and stop needlessly serializing. Improves scheduling accuracy — in scope.
 - **Stale `insertionOrder` (`SystemScheduler.hpp:126-136`)** — the plan orders by *vector position* (`i`), not `metadata.insertionOrder`, and `erase` preserves relative vector order, so §3's stable plan is already correct across removals. Re-sync the stored field in the existing index-fixup loop so it isn't misleading (can't drop it — it's public `SystemExecutionContext.metadata` surface).
 - **Hash-collision note (`SystemScheduler.hpp:57`)** — add the assert-noting comment (astronomically unlikely, but it's a hash keying a registry).
 
@@ -130,7 +129,9 @@ Source-compatible: existing `scheduler.AddSystem<Foo>();` calls still compile (`
 - `context.metadata` copied per `Execute` — intentional public surface for custom integrations; note the cost.
 - `GetExecutionPlan() const` mutates via `const_cast` — fine under the single-writer contract; document "not during `Execute`."
 
-**Deferred** (my recommendation, accepted): the **lambda view-cache** (`System.hpp:114-135`, fresh `View` per invocation → per-frame archetype re-scan) — pure perf with a registry-identity subtlety; a focused perf pass, not this correctness release.
+**Deferred — a dedicated "lambda-system polish" pass** (two entangled items, both touching `LambdaSystemWrapper`):
+- The **lambda view-cache** (`System.hpp:114-135`, fresh `View` per invocation → per-frame archetype re-scan) — pure perf with a registry-identity subtlety.
+- The **`IsReadOnly` pointer-to-const minor + optional-param support** (`System.hpp:78`). Plan-time trace found the `const T*` classification bug can't be fixed in isolation: `BaseType` doesn't strip the pointer and `ExtractAndExecute` builds `CreateView<const T*>` (malformed) — optional/nullable params are not actually implemented in the wrapper. A partial `IsReadOnly`-only fix would yield wrong masks or fail to compile, with nothing functional to test. Correct fix = implement optional-as-pointer end-to-end (`Optional<T>`-backed), out of B1's honesty-and-correctness scope. The current behavior is *safe* (over-conservative serialization of a feature no system uses today), so deferral costs nothing.
 
 **The B2 forward-compat contract (why B1 is additive):**
 1. `Exclusive` is a composable tag in a variadic `SystemTraits`; B2 adds resource/out-of-band access declarations and deferred-structural intent to the *same* block without breaking existing `SystemTraits` uses.
@@ -163,8 +164,6 @@ Conventions: reuse `tests/Support/TestWorkerPool.hpp` as the injected `IWorkSche
 
 **E. Registration error channel (§4):** duplicate → `Err(AlreadyRegistered)`; during-execution → `Err(SchedulerExecuting)`; success → `Ok`. (`AllocationFailed` by inspection — not portably forceable.)
 
-**F. `IsReadOnly` fix (§5):** a `const T*` read-only optional param classifies as a read (parallelizes with another reader of `T`), asserted via the resulting grouping.
-
 **Infra:** likely new `tests/System/SystemSchedulerTest.cpp` (+ possibly `SystemExecutorTest.cpp`) → regen `premake5 vs2022`, never `git add ide/`; keep each file's `TEST`/`TEST_F` macro consistent; baseline 551, gate on "all configs green + intended new tests."
 
 ---
@@ -174,7 +173,8 @@ Conventions: reuse `tests/Support/TestWorkerPool.hpp` as the injected `IWorkSche
 - **B2 in its entirety:** `SystemContext&` system form, wiring `ParallelCommandBuffer` into the executor, access-set expansion (resources + structural intent), merge/flush points, deterministic deferred-apply order, per-system runtime error channel, explicit `Before`/`After`/`chain` ordering + ambiguity detection.
 - **The custom assert/verify seam:** a full `ASTRA_ASSERT`/`ASTRA_VERIFY` overhaul (debug-break + formatted messages + settable `SetAssertHandler` + no logging dependency) is worthwhile but orthogonal and library-wide (32+ files). Queued as its **own** work item, sequenced **after B1** (B1 does not need it; its proposed `ASTRA_ASSERT(condition, ...)` signature is backward-compatible with today's two-arg form, so B1's new asserts migrate in that later sweep for free).
 - No mutex / no built-in thread-safety guarantee added to any core type.
-- No lambda view-cache perf fix; no `BuildExecutionPlan` algorithmic-complexity work.
+- No `BuildExecutionPlan` algorithmic-complexity work.
+- **Lambda-system polish pass (deferred, see §5):** lambda view-cache; `IsReadOnly` pointer-to-const minor + real optional/nullable-param (`Optional<T>`) support in `LambdaSystemWrapper`.
 
 ## Gate
 
