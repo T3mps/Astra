@@ -108,8 +108,8 @@ namespace
 
         // Two distinct typed systems (lambda taking Registry& does not satisfy
         // LambdaLike in Astra — use explicit System structs instead).
-        scheduler.AddSystem<CountingSystem<0>>(ran);
-        scheduler.AddSystem<CountingSystem<1>>(ran);
+        (void)scheduler.AddSystem<CountingSystem<0>>(ran);
+        (void)scheduler.AddSystem<CountingSystem<1>>(ran);
 
         Astra::ParallelExecutor executor(std::make_shared<Astra::Testing::TestWorkerPool>());
         scheduler.Execute(registry, &executor);

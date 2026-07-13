@@ -1136,9 +1136,9 @@ static void BM_SystemScheduler_Sequential(benchmark::State& state)
 
     Astra::SystemScheduler scheduler;
 
-    scheduler.AddSystem<MoveSystem>();
-    scheduler.AddSystem<BoundsCheckSystem>();
-    scheduler.AddSystem<SpecialProcessingSystem>();
+    (void)scheduler.AddSystem<MoveSystem>();
+    (void)scheduler.AddSystem<BoundsCheckSystem>();
+    (void)scheduler.AddSystem<SpecialProcessingSystem>();
 
     for (auto _ : state)
     {
@@ -1163,13 +1163,13 @@ static void BM_SystemScheduler_Lambda(benchmark::State& state)
 
     Astra::SystemScheduler scheduler;
 
-    scheduler.AddSystem([](Astra::Entity e, const Velocity& vel, Position& pos)
+    (void)scheduler.AddSystem([](Astra::Entity e, const Velocity& vel, Position& pos)
     {
         pos.x += vel.x;
         pos.y += vel.y;
     });  // Auto-detects: Reads<Velocity>, Writes<Position>
 
-    scheduler.AddSystem([](Astra::Entity e, Position& pos)
+    (void)scheduler.AddSystem([](Astra::Entity e, Position& pos)
     {
         if (pos.x > 1000) pos.x = 0;
         if (pos.y > 1000) pos.y = 0;
@@ -1206,12 +1206,12 @@ static void BM_SystemScheduler_Parallel(benchmark::State& state)
 
     Astra::SystemScheduler scheduler;
 
-    scheduler.AddSystem<PhysicsSystem>();         // Auto-detects: Reads<Velocity>, Writes<Position>
-    scheduler.AddSystem<Comp0ProcessingSystem>(); // Auto-detects: Writes<Comp<0>>
-    scheduler.AddSystem<Comp1ProcessingSystem>(); // Auto-detects: Writes<Comp<1>>
+    (void)scheduler.AddSystem<PhysicsSystem>();         // Auto-detects: Reads<Velocity>, Writes<Position>
+    (void)scheduler.AddSystem<Comp0ProcessingSystem>(); // Auto-detects: Writes<Comp<0>>
+    (void)scheduler.AddSystem<Comp1ProcessingSystem>(); // Auto-detects: Writes<Comp<1>>
 
     // This system depends on Position from Physics
-    scheduler.AddSystem<BoundsCheckSystem>();     // Auto-detects: Reads<Position>, Writes<Position>
+    (void)scheduler.AddSystem<BoundsCheckSystem>();     // Auto-detects: Reads<Position>, Writes<Position>
 
     Astra::ParallelExecutor executor(BenchPool());
 
@@ -1240,11 +1240,11 @@ static void BM_SystemScheduler_ManyIndependent(benchmark::State& state)
 
     Astra::SystemScheduler scheduler;
 
-    scheduler.AddSystem<MoveSystem>();          // Auto-detects: Reads<Velocity>, Writes<Position>
-    scheduler.AddSystem<PhysicsSystem>();       // Auto-detects: Reads<Velocity>, Writes<Position>  
-    scheduler.AddSystem<Comp0ProcessingSystem>(); // Auto-detects: Writes<Comp<0>>
-    scheduler.AddSystem<Comp1ProcessingSystem>(); // Auto-detects: Writes<Comp<1>>
-    scheduler.AddSystem<Comp2ProcessingSystem>(); // Auto-detects: Writes<Comp<2>>
+    (void)scheduler.AddSystem<MoveSystem>();          // Auto-detects: Reads<Velocity>, Writes<Position>
+    (void)scheduler.AddSystem<PhysicsSystem>();       // Auto-detects: Reads<Velocity>, Writes<Position>
+    (void)scheduler.AddSystem<Comp0ProcessingSystem>(); // Auto-detects: Writes<Comp<0>>
+    (void)scheduler.AddSystem<Comp1ProcessingSystem>(); // Auto-detects: Writes<Comp<1>>
+    (void)scheduler.AddSystem<Comp2ProcessingSystem>(); // Auto-detects: Writes<Comp<2>>
 
     for (auto _ : state)
     {
@@ -1268,11 +1268,11 @@ static void BM_SystemScheduler_WithDependencies(benchmark::State& state)
 
     Astra::SystemScheduler scheduler;
 
-    scheduler.AddSystem<ChainSystem<0>>();
-    scheduler.AddSystem<ChainSystem<1>>();
-    scheduler.AddSystem<ChainSystem<2>>();
-    scheduler.AddSystem<ChainSystem<3>>();
-    scheduler.AddSystem<ChainSystem<4>>();
+    (void)scheduler.AddSystem<ChainSystem<0>>();
+    (void)scheduler.AddSystem<ChainSystem<1>>();
+    (void)scheduler.AddSystem<ChainSystem<2>>();
+    (void)scheduler.AddSystem<ChainSystem<3>>();
+    (void)scheduler.AddSystem<ChainSystem<4>>();
 
     for (auto _ : state)
     {
@@ -1297,8 +1297,8 @@ static void BM_SystemScheduler_CustomExecutor(benchmark::State& state)
 
     Astra::SystemScheduler scheduler;
 
-    scheduler.AddSystem<PhysicsSystem>();
-    scheduler.AddSystem<BoundsCheckSystem>();
+    (void)scheduler.AddSystem<PhysicsSystem>();
+    (void)scheduler.AddSystem<BoundsCheckSystem>();
 
     BenchmarkExecutor customExecutor;
 

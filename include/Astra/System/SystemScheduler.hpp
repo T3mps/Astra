@@ -12,6 +12,7 @@
 #include "../Component/Component.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/Delegate.hpp"
+#include "../Core/Result.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Registry/Registry.hpp"
 #include "System.hpp"
@@ -20,6 +21,13 @@
 
 namespace Astra
 {
+    enum class SystemError
+    {
+        AlreadyRegistered,  // a system of this type is already registered
+        AllocationFailed,   // nothrow allocation of the system instance failed
+        SchedulerExecuting  // registration attempted while Execute() is running
+    };
+
     class SystemScheduler
     {
     public:
@@ -54,28 +62,33 @@ namespace Astra
         }
 
         template<System T, typename... Args>
-        void AddSystem(Args&&... args)
+        ASTRA_NODISCARD Result<void, SystemError> AddSystem(Args&&... args)
         {
-            // Prevent modification during execution to avoid use-after-free
-            ASTRA_ASSERT(!IsExecuting(), "Cannot add system while scheduler is executing");
-            if (IsExecuting()) return;
+            // Uniform-graceful misuse policy (decision 2026-07-13): NO
+            // ASTRA_ASSERT here — the Result channel below IS the contract, so
+            // asserting-and-aborting on the same condition would make the error
+            // unreachable/untestable in Debug. Return the typed error instead.
+            if (IsExecuting())
+                return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
 
-            uint64_t typeId = TypeID<T>::Hash();
-
-            // Check if system type is already registered
+            // Systems are keyed by TypeID::Hash() (64-bit). A hash collision
+            // would make a DISTINCT type look already-registered and be dropped;
+            // astronomically unlikely, but it is a hash, not a dense unique id.
+            const uint64_t typeId = TypeID<T>::Hash();
             if (m_systemIndices.Contains(typeId))
             {
-                ASTRA_ASSERT(false, "System type already registered");
-                return;
+                // No ASTRA_ASSERT — duplicate registration is a handleable
+                // runtime error (uniform-graceful policy, decision 2026-07-13).
+                return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
             }
 
-            size_t index = m_systems.size();
+            T* instance = new (std::nothrow) T(std::forward<Args>(args)...);
+            if (!instance)
+                return Result<void, SystemError>::Err(SystemError::AllocationFailed);
+
+            const size_t index = m_systems.size();
             m_systemIndices[typeId] = index;
 
-            // Create system instance with perfect forwarding
-            auto* instance = new T(std::forward<Args>(args)...);
-
-            // Create initial metadata
             SystemMetadata metadata
             {
                 .reads = ComponentMask{},
@@ -84,40 +97,28 @@ namespace Astra
                 .insertionOrder = index,
                 .requiresExclusive = false
             };
-
-            // Auto-detect component dependencies if the system has traits
             if constexpr (HasSystemTraits_v<T>)
-            {
                 ExtractSystemTraits<T>(metadata);
-            }
-            else
-            {
-                // No traits = conservative approach: assume system touches everything
-                // This forces sequential execution for safety
-                // Leave reads and writes empty - this triggers conservative scheduling
-            }
-
             if constexpr (requires { T::RequiresExclusive; })
                 metadata.requiresExclusive = T::RequiresExclusive;
 
-            // Create entry with type erasure
             m_systems.emplace_back(SystemEntry
             {
                 .instance = std::unique_ptr<void, void(*)(void*)>(instance,
-                    [](void* ptr) { delete static_cast<T*>(ptr); }
-                ),
+                    [](void* ptr) { delete static_cast<T*>(ptr); }),
                 .execute = [instance](Registry& reg) { (*instance)(reg); },
                 .metadata = metadata
             });
-            
+
             m_needsRebuild = true;
+            return Result<void, SystemError>::Ok();
         }
 
         template<typename Lambda>
         requires LambdaLike<Lambda>
-        void AddSystem(Lambda&& lambda)
+        ASTRA_NODISCARD Result<void, SystemError> AddSystem(Lambda&& lambda)
         {
-            AddLambdaSystemImpl(std::forward<Lambda>(lambda), &std::decay_t<Lambda>::operator());
+            return AddLambdaSystemImpl(std::forward<Lambda>(lambda), &std::decay_t<Lambda>::operator());
         }
 
         template<System T>
@@ -146,7 +147,12 @@ namespace Astra
                     --idx;
                 }
             }
-            
+
+            // Keep insertionOrder consistent with vector position after erase
+            // (it is exposed via SystemExecutionContext.metadata).
+            for (size_t idx = 0; idx < m_systems.size(); ++idx)
+                m_systems[idx].metadata.insertionOrder = idx;
+
             m_needsRebuild = true;
         }
         
@@ -317,43 +323,48 @@ namespace Astra
 
         // Helper to extract signature from const lambda
         template<typename Lambda, typename Ret, typename Class, typename... Args>
-        void AddLambdaSystemImpl(Lambda&& lambda, Ret(Class::*)(Args...) const)
+        ASTRA_NODISCARD Result<void, SystemError> AddLambdaSystemImpl(Lambda&& lambda, Ret(Class::*)(Args...) const)
         {
             using Wrapper = LambdaSystemWrapper<std::decay_t<Lambda>, Args...>;
-            AddSystemInternal<Wrapper>(Wrapper{std::forward<Lambda>(lambda)});
+            return AddSystemInternal<Wrapper>(Wrapper{std::forward<Lambda>(lambda)});
         }
 
         // Helper to extract signature from non-const lambda
         template<typename Lambda, typename Ret, typename Class, typename... Args>
-        void AddLambdaSystemImpl(Lambda&& lambda, Ret(Class::*)(Args...))
+        ASTRA_NODISCARD Result<void, SystemError> AddLambdaSystemImpl(Lambda&& lambda, Ret(Class::*)(Args...))
         {
             using Wrapper = LambdaSystemWrapper<std::decay_t<Lambda>, Args...>;
-            AddSystemInternal<Wrapper>(Wrapper{std::forward<Lambda>(lambda)});
+            return AddSystemInternal<Wrapper>(Wrapper{std::forward<Lambda>(lambda)});
         }
 
         template<typename SystemType>
-        void AddSystemInternal(SystemType system)
+        ASTRA_NODISCARD Result<void, SystemError> AddSystemInternal(SystemType system)
         {
-            // Prevent modification during execution to avoid use-after-free
-            ASTRA_ASSERT(!IsExecuting(), "Cannot add system while scheduler is executing");
-            if (IsExecuting()) return;
+            // Uniform-graceful misuse policy (decision 2026-07-13): NO
+            // ASTRA_ASSERT here — the Result channel below IS the contract, so
+            // asserting-and-aborting on the same condition would make the error
+            // unreachable/untestable in Debug. Return the typed error instead.
+            if (IsExecuting())
+                return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
 
-            uint64_t typeId = TypeID<SystemType>::Hash();
-
-            // Check if system type is already registered
+            // Systems are keyed by TypeID::Hash() (64-bit). A hash collision
+            // would make a DISTINCT type look already-registered and be dropped;
+            // astronomically unlikely, but it is a hash, not a dense unique id.
+            const uint64_t typeId = TypeID<SystemType>::Hash();
             if (m_systemIndices.Contains(typeId))
             {
-                ASTRA_ASSERT(false, "System type already registered");
-                return;
+                // No ASTRA_ASSERT — duplicate registration is a handleable
+                // runtime error (uniform-graceful policy, decision 2026-07-13).
+                return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
             }
 
-            size_t index = m_systems.size();
+            SystemType* instance = new (std::nothrow) SystemType(std::move(system));
+            if (!instance)
+                return Result<void, SystemError>::Err(SystemError::AllocationFailed);
+
+            const size_t index = m_systems.size();
             m_systemIndices[typeId] = index;
 
-            // Create system instance
-            auto* instance = new SystemType(std::move(system));
-
-            // Create initial metadata
             SystemMetadata metadata
             {
                 .reads = ComponentMask{},
@@ -362,28 +373,21 @@ namespace Astra
                 .insertionOrder = index,
                 .requiresExclusive = false
             };
-
-            // Auto-detect component dependencies
             if constexpr (HasSystemTraits_v<SystemType>)
-            {
                 ExtractSystemTraits<SystemType>(metadata);
-            }
-
             if constexpr (requires { SystemType::RequiresExclusive; })
                 metadata.requiresExclusive = SystemType::RequiresExclusive;
 
-            // Create entry with type erasure
             m_systems.emplace_back(SystemEntry
             {
-                .instance = std::unique_ptr<void, void(*)(void*)>(
-                    instance,
-                    [](void* ptr) { delete static_cast<SystemType*>(ptr); }
-                ),
-                    .execute = [instance](Registry& reg) { (*instance)(reg); },
-                    .metadata = metadata
-                });
+                .instance = std::unique_ptr<void, void(*)(void*)>(instance,
+                    [](void* ptr) { delete static_cast<SystemType*>(ptr); }),
+                .execute = [instance](Registry& reg) { (*instance)(reg); },
+                .metadata = metadata
+            });
 
             m_needsRebuild = true;
+            return Result<void, SystemError>::Ok();
         }
         
         std::vector<SystemEntry> m_systems;                             // All registered systems
