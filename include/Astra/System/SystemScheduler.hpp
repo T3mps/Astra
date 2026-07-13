@@ -75,9 +75,10 @@ namespace Astra
                 .reads = ComponentMask{},
                 .writes = ComponentMask{},
                 .typeId = static_cast<size_t>(typeId),
-                .insertionOrder = index
+                .insertionOrder = index,
+                .requiresExclusive = false
             };
-            
+
             // Auto-detect component dependencies if the system has traits
             if constexpr (HasSystemTraits_v<T>)
             {
@@ -89,7 +90,10 @@ namespace Astra
                 // This forces sequential execution for safety
                 // Leave reads and writes empty - this triggers conservative scheduling
             }
-            
+
+            if constexpr (requires { T::RequiresExclusive; })
+                metadata.requiresExclusive = T::RequiresExclusive;
+
             // Create entry with type erasure
             m_systems.emplace_back(SystemEntry
             {
@@ -244,124 +248,59 @@ namespace Astra
             ((mask |= MakeComponentMask<std::tuple_element_t<Is, Tuple>>()), ...);
         }
         
+        // Partition systems into sequential groups of concurrently-runnable
+        // systems. The plan is a set of CONTIGUOUS insertion-order runs: a run
+        // grows from its opener until the first system that conflicts (mask
+        // overlap), is Exclusive, or declares no traits. This keeps Sequential
+        // and Parallel executors in identical observable order and never lets a
+        // later system's effects appear before an earlier system's (I3). O(n).
         void BuildExecutionPlan()
         {
             m_executionPlan.clear();
-            
             if (m_systems.empty())
             {
                 m_needsRebuild = false;
                 return;
             }
-            
-            std::vector<bool> scheduled(m_systems.size(), false);
-            
-            // Process systems in insertion order
-            for (size_t i = 0; i < m_systems.size(); ++i)
+
+            size_t i = 0;
+            while (i < m_systems.size())
             {
-                if (scheduled[i])
-                {
-                    continue;
-                }
-                
-                std::vector<size_t> group;
-                group.reserve(m_systems.size() - i);  // Reserve space for potential members
-                group.push_back(i);
-                scheduled[i] = true;
-                
-                // Track component usage for the entire group
-                // This allows us to check conflicts with the group as a whole
-                // rather than checking against each system in the group
                 const auto& sysI = m_systems[i].metadata;
+
+                std::vector<size_t> group;
+                group.push_back(i);
                 ComponentMask groupReads = sysI.reads;
                 ComponentMask groupWrites = sysI.writes;
-                
-                // If the first system has no hints, no other system can join this group
-                // This ensures conservative safety
-                const bool groupAcceptsMore = !(sysI.reads.None() && sysI.writes.None());
-                
-                // Look ahead for systems that can run in parallel
-                for (size_t j = i + 1; j < m_systems.size() && groupAcceptsMore; ++j)
+
+                // A solo opener (Exclusive, or no declared hints) accepts nobody.
+                const bool acceptsMore = !sysI.requiresExclusive
+                                      && !(sysI.reads.None() && sysI.writes.None());
+
+                size_t j = i + 1;
+                for (; acceptsMore && j < m_systems.size(); ++j)
                 {
-                    if (scheduled[j])
-                    {
-                        continue;
-                    }
-                    
                     const auto& sysJ = m_systems[j].metadata;
-                    
-                    // Fast conflict check against group's aggregate component usage
-                    // System j conflicts with the group if:
-                    // - It writes to something the group reads or writes
-                    // - It reads something the group writes
-                    bool conflictsWithGroup = false;
-                    
-                    // Check if system has no hints (conservative approach)
-                    if (sysJ.reads.None() && sysJ.writes.None())
-                    {
-                        conflictsWithGroup = true;
-                    }
-                    else
-                    {
-                        // Check actual component conflicts using bitmasks
-                        conflictsWithGroup = 
-                            (sysJ.writes & groupWrites).Any() || // Write-write conflict
-                            (sysJ.writes & groupReads).Any()  || // Write-read conflict  
-                            (sysJ.reads  & groupWrites).Any();   // Read-write conflict
-                    }
-                    
-                    if (conflictsWithGroup)
-                    {
-                        continue;
-                    }
-                    
-                    // Check if j depends on any unscheduled system before it
-                    // This preserves relative ordering
-                    bool dependsOnEarlier = false;
-                    for (size_t k = i + 1; k < j; ++k)
-                    {
-                        if (!scheduled[k] && HasConflict(k, j))
-                        {
-                            dependsOnEarlier = true;
-                            break;
-                        }
-                    }
-                    
-                    if (!dependsOnEarlier)
-                    {
-                        // Add system to group and update groups component usage
-                        group.push_back(j);
-                        scheduled[j] = true;
-                        groupReads |= sysJ.reads;
-                        groupWrites |= sysJ.writes;
-                    }
+
+                    // Exclusive / no-trait systems never join an existing group,
+                    // and any conflict ends the contiguous run (order preserved).
+                    if (sysJ.requiresExclusive || (sysJ.reads.None() && sysJ.writes.None()))
+                        break;
+                    if ((sysJ.writes & groupWrites).Any() ||
+                        (sysJ.writes & groupReads ).Any() ||
+                        (sysJ.reads  & groupWrites).Any())
+                        break;
+
+                    group.push_back(j);
+                    groupReads  |= sysJ.reads;
+                    groupWrites |= sysJ.writes;
                 }
-                
+
                 m_executionPlan.push_back(std::move(group));
+                i = j;  // next group starts right after this contiguous run
             }
-            
+
             m_needsRebuild = false;
-        }
-
-        ASTRA_NODISCARD bool HasConflict(size_t a, size_t b) const
-        {
-            const auto& sysA = m_systems[a].metadata;
-            const auto& sysB = m_systems[b].metadata;
-            
-            // Conservative: if either system has no hints, assume conflict
-            // This ensures safety when users don't provide Read/Write information
-            if ((sysA.reads.None() && sysA.writes.None()) || (sysB.reads.None() && sysB.writes.None()))
-                return true;
-            
-            // Check for write-write conflicts
-            if ((sysA.writes & sysB.writes).Any())
-                return true;
-            
-            // Check for read-write conflicts
-            if (((sysA.reads & sysB.writes).Any()) || (sysA.writes & sysB.reads).Any())
-                return true;
-
-            return false;
         }
 
         // Helper to extract signature from const lambda
@@ -408,7 +347,8 @@ namespace Astra
                 .reads = ComponentMask{},
                 .writes = ComponentMask{},
                 .typeId = static_cast<size_t>(typeId),
-                .insertionOrder = index
+                .insertionOrder = index,
+                .requiresExclusive = false
             };
 
             // Auto-detect component dependencies
@@ -416,6 +356,9 @@ namespace Astra
             {
                 ExtractSystemTraits<SystemType>(metadata);
             }
+
+            if constexpr (requires { SystemType::RequiresExclusive; })
+                metadata.requiresExclusive = SystemType::RequiresExclusive;
 
             // Create entry with type erasure
             m_systems.emplace_back(SystemEntry
