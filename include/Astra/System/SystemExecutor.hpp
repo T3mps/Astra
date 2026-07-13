@@ -6,6 +6,10 @@
 #include "../Core/WorkScheduler.hpp"
 #include "SystemMetadata.hpp"
 
+#ifdef ASTRA_BUILD_DEBUG
+    #include "../Registry/Registry.hpp"          // GetArchetypeManager() (Debug tripwire only)
+#endif
+
 namespace Astra
 {
     class ISystemExecutor
@@ -48,13 +52,26 @@ namespace Astra
                 }
                 else
                 {
+#ifdef ASTRA_BUILD_DEBUG
+                    const uint32_t structuralBefore =
+                        context.registry->GetArchetypeManager()->GetStructuralChangeCounter();
+#endif
                     // Dispatch each system in the group as its own unit of work.
-                    // minBatch=1 so the scheduler may assign one system per worker.
                     m_scheduler->ParallelFor(group.size(), 1, [&](size_t begin, size_t end)
                     {
                         for (size_t i = begin; i < end; ++i)
                             context.systems[group[i]](*context.registry);
                     });
+#ifdef ASTRA_BUILD_DEBUG
+                    const uint32_t structuralAfter =
+                        context.registry->GetArchetypeManager()->GetStructuralChangeCounter();
+                    ASTRA_ASSERT(structuralBefore == structuralAfter,
+                        "A system in a multi-member parallel group performed a structural "
+                        "change (create/destroy entity, add/remove component) without "
+                        "declaring Astra::Exclusive. Mark it Exclusive, or defer the change "
+                        "via a CommandBuffer. (Structural mutation races the archetype "
+                        "storage against the other systems in the group.)");
+#endif
                 }
             }
         }

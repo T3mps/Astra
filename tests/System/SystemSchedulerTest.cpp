@@ -208,3 +208,63 @@ TEST(SystemScheduler, RemoveSystemKeepsSurvivorsValid)
     s.Execute(reg, &exec);
     EXPECT_EQ(ran.load(), 101);          // 0 and 2 ran, 1 did not; delegates valid
 }
+
+// ---- Task 6: C1 safety — Exclusive spawner is solo and safe under threads ---
+
+namespace
+{
+    struct SpawnSystem : Astra::SystemTraits<Astra::Writes<Position>, Astra::Exclusive>
+    {
+        void operator()(Astra::Registry& r)
+        {
+            for (int k = 0; k < 10; ++k) (void)r.CreateEntity<Position>();  // structural
+        }
+    };
+    struct TouchVelocity : Astra::SystemTraits<Astra::Writes<Velocity>>
+    {
+        void operator()(Astra::Registry& r)
+        {
+            auto v = r.CreateView<Velocity>();
+            v.ForEach([](Astra::Entity, Velocity& vel) { vel.dx += 1.0f; });
+        }
+    };
+    struct TouchHealth : Astra::SystemTraits<Astra::Writes<Health>>
+    {
+        void operator()(Astra::Registry& r)
+        {
+            auto v = r.CreateView<Health>();
+            v.ForEach([](Astra::Entity, Health& h) { h.current += 1; });
+        }
+    };
+
+    size_t CountPositions(Astra::Registry& r)
+    {
+        auto v = r.CreateView<Position>();
+        size_t n = 0;
+        v.ForEach([&](Astra::Entity, Position&) { ++n; });
+        return n;
+    }
+}
+
+TEST(SystemScheduler, ExclusiveSpawnerRunsSoloWhilePureGroupRunsOnThreads)
+{
+    Astra::Registry reg;
+    Astra::SystemScheduler s;
+    (void)s.AddSystem<SpawnSystem>();     // 0: exclusive => solo group
+    (void)s.AddSystem<TouchVelocity>();   // 1: pure (writes B)
+    (void)s.AddSystem<TouchHealth>();     // 2: pure (writes C, disjoint from B)
+    // Plan: [[0]], [[1,2]] — 1 and 2 form a real multi-member group dispatched
+    // concurrently to the pool; 0 (structural) is solo, so it never races them.
+    ASSERT_EQ(s.GetExecutionPlan().size(), 2u);
+    ASSERT_EQ(s.GetExecutionPlan()[1].size(), 2u);
+
+    Astra::ParallelExecutor exec(std::make_shared<Astra::Testing::TestWorkerPool>());
+
+    constexpr int kFrames = 50;
+    for (int f = 0; f < kFrames; ++f)
+        s.Execute(reg, &exec);
+
+    // 10 new Position entities per frame, no corruption/loss. The Debug tripwire
+    // sees no structural change across the pure [1,2] group, so it never fires.
+    EXPECT_EQ(CountPositions(reg), static_cast<size_t>(10 * kFrames));
+}
