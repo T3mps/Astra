@@ -557,8 +557,16 @@ namespace Astra
         {
             return m_chunkPool.GetStats();
         }
-        
+
         ArchetypeChunkPool& GetChunkPool() { return m_chunkPool; }
+
+        // Monotonic count of structural changes (archetype creation, entity
+        // add/remove transitions). Used by the built-in ParallelExecutor's Debug
+        // tripwire and by View cache invalidation. Read-only; single-writer.
+        ASTRA_NODISCARD uint32_t GetStructuralChangeCounter() const noexcept
+        {
+            return m_structuralChangeCounter.load(std::memory_order_acquire);
+        }
 
         /**
          * Resets the manager to a freshly-constructed state IN PLACE: every
