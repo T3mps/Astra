@@ -560,9 +560,12 @@ namespace Astra
 
         ArchetypeChunkPool& GetChunkPool() { return m_chunkPool; }
 
-        // Monotonic count of structural changes (archetype creation, entity
-        // add/remove transitions). Used by the built-in ParallelExecutor's Debug
-        // tripwire and by View cache invalidation. Read-only; single-writer.
+        // Monotonic count of archetype-SET changes: a new archetype being
+        // created, or an empty archetype removed during defragmentation. This
+        // does NOT count entity add/remove/destroy or component transitions that
+        // stay within already-existing archetypes. Used as a best-effort Debug
+        // tripwire by the built-in ParallelExecutor and for View cache
+        // invalidation. Read-only; single-writer.
         ASTRA_NODISCARD uint32_t GetStructuralChangeCounter() const noexcept
         {
             return m_structuralChangeCounter.load(std::memory_order_acquire);

@@ -66,11 +66,13 @@ namespace Astra
                     const uint32_t structuralAfter =
                         context.registry->GetArchetypeManager()->GetStructuralChangeCounter();
                     ASTRA_ASSERT(structuralBefore == structuralAfter,
-                        "A system in a multi-member parallel group performed a structural "
-                        "change (create/destroy entity, add/remove component) without "
-                        "declaring Astra::Exclusive. Mark it Exclusive, or defer the change "
-                        "via a CommandBuffer. (Structural mutation races the archetype "
-                        "storage against the other systems in the group.)");
+                        "A system in a multi-member parallel group changed the archetype "
+                        "set (created a new archetype, or triggered defragmentation) "
+                        "without declaring Astra::Exclusive. Mark it Exclusive, or defer "
+                        "the change via a CommandBuffer. (Structural mutation races the "
+                        "archetype storage against the other systems in the group. This "
+                        "tripwire is best-effort: it catches archetype-set changes, not "
+                        "entity add/remove within an existing archetype.)");
 #endif
                 }
             }
