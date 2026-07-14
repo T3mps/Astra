@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <Astra/Core/Assert.hpp>
+#include <Astra/Core/Log.hpp>
 #include <string>
 
 namespace
@@ -15,6 +16,19 @@ namespace
         c->expr = ctx.expression ? ctx.expression : "";
         c->message = ctx.message ? ctx.message : "";
         return Astra::AssertAction::Continue;
+    }
+
+    // Captures LogRecords delivered by the DEFAULT assert handler (Assert + Log are one
+    // seam: with no assert handler installed, a failure routes through the log sink).
+    struct LogCapture { int count = 0; Astra::LogLevel level{}; std::string message; unsigned line = 0; };
+
+    void CapturingLogSink(const Astra::LogRecord& r, void* user) noexcept
+    {
+        auto* c = static_cast<LogCapture*>(user);
+        c->count++;
+        c->level = r.level;
+        c->message = std::string(r.message);
+        c->line = r.location.line();
     }
 }
 
@@ -42,6 +56,74 @@ TEST(Assert, FailEnsureReportsAndReturnsFalseWithoutAborting)
     EXPECT_FALSE(r);
     EXPECT_EQ(cap.count, 1);
     Astra::SetAssertHandler(nullptr);
+}
+
+// ---- Final-review fixes: the handler->sink integration point ---------------
+// These close the exact coverage hole that let the headline bug ship: with no
+// assert handler installed, DefaultAssertHandler used to report via detail::Emit,
+// which is a no-op with no log sink installed either -- so a stock build aborted
+// on a failing guard while printing nothing at all. None of the above tests
+// exercise the DEFAULT handler; they all install RecordingHandler.
+
+// The reason Log and Assert are ONE seam: a failure with no assert handler
+// installed must still reach an installed LOG sink, at Critical, with the
+// message and a plausible source location. This is the test that would have
+// caught the Critical -- it fails against the old detail::Emit-only handler,
+// which never touched g_logSink.
+TEST(Assert, DefaultHandlerRoutesFailureToInstalledLogSink)
+{
+    LogCapture cap;
+    Astra::SetLogSink(&CapturingLogSink, &cap);
+    Astra::SetAssertHandler(nullptr);   // exercise the DEFAULT handler, not a test double
+
+    const unsigned expectedLine = __LINE__ + 1;
+    const auto action = Astra::detail::ReportAssertFailure(
+        Astra::AssertContext{"x < y", "bad bounds", std::source_location::current()});
+
+    EXPECT_EQ(action, Astra::AssertAction::Break);
+    EXPECT_EQ(cap.count, 1);                                  // the sink was actually called
+    EXPECT_EQ(cap.level, Astra::LogLevel::Critical);           // fatal reports are always Critical
+    EXPECT_EQ(cap.message, "bad bounds");
+    EXPECT_EQ(cap.line, expectedLine);                         // plausible source location
+
+    Astra::SetLogSink(nullptr);
+}
+
+// The shipped default policy (Break) was never asserted anywhere.
+TEST(Assert, BreakIsTheDefaultDecision)
+{
+    // Install a sink only to keep the run pristine (DefaultAssertHandler falls back to
+    // stderr with none installed) -- this test is about the returned decision, not the
+    // sink; see DefaultHandlerRoutesFailureToInstalledLogSink above for that.
+    LogCapture cap;
+    Astra::SetLogSink(&CapturingLogSink, &cap);
+    Astra::SetAssertHandler(nullptr);
+
+    const auto action = Astra::detail::ReportAssertFailure(
+        Astra::AssertContext{"cond", "message", std::source_location::current()});
+
+    EXPECT_EQ(action, Astra::AssertAction::Break);
+
+    Astra::SetLogSink(nullptr);
+}
+
+// Guards this Critical from regressing: with NEITHER a log sink NOR an assert handler
+// installed, the default handler must still print the message somewhere -- StderrSink
+// is the fallback, and this is its first coverage (previously dead code).
+TEST(Assert, DefaultHandlerFallsBackToStderrWithNoSinkInstalled)
+{
+    Astra::SetLogSink(nullptr);
+    Astra::SetAssertHandler(nullptr);
+
+    testing::internal::CaptureStderr();
+    // Do NOT use ASTRA_ASSERT here -- with no debugger attached it would abort() the
+    // test process. Call the reporting path directly, same as the tests above.
+    (void)Astra::detail::ReportAssertFailure(
+        Astra::AssertContext{"p != nullptr", "stderr fallback message", std::source_location::current()});
+    const std::string output = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(output.empty());
+    EXPECT_NE(output.find("stderr fallback message"), std::string::npos) << output;
 }
 
 // ---- Task 4: ASSERT + VERIFY ------------------------------------------------
@@ -120,12 +202,24 @@ TEST(Assert, EnsureAlwaysReportsEveryTime)
 //
 // Under an attached debugger this test WILL break once (by design -- it drives the
 // default Break decision). Hit continue. CI has no debugger, so it never fires there.
+//
+// Installs a capturing LOG sink (not an assert handler override) so this drives the
+// real DEFAULT handler end to end: since DefaultAssertHandler now falls back to stderr
+// with no sink installed, leaving no sink here would print a stray [critical] line on
+// every suite run. The sink also lets us assert the default handler actually reported.
 TEST(Assert, DefaultEnsureFailureRecoversWithoutDebugger)
 {
+    LogCapture cap;
+    Astra::SetLogSink(&CapturingLogSink, &cap);
     Astra::SetAssertHandler(nullptr);   // default handler: reports, returns Break
 
     const bool ok = ASTRA_ENSURE(1 == 2, "recoverable condition");
 
-    EXPECT_FALSE(ok);   // yields the condition, so the caller can recover
+    EXPECT_FALSE(ok);                                  // yields the condition, so the caller can recover
+    EXPECT_EQ(cap.count, 1);                            // default handler routed the failure to the sink
+    EXPECT_EQ(cap.level, Astra::LogLevel::Critical);
+    EXPECT_EQ(cap.message, "recoverable condition");
+
+    Astra::SetLogSink(nullptr);
     SUCCEED();          // reaching this line at all proves the process was not halted
 }

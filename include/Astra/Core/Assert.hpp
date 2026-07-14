@@ -3,9 +3,10 @@
 #include <cstdlib>          // std::abort
 #include <atomic>
 #include <source_location>
+#include <string_view>
 
 #include "Base.hpp"         // ASTRA_HAS_BUILTIN, ASTRA_COMPILER_* (see note below)
-#include "Log.hpp"          // detail::Emit, LogLevel
+#include "Log.hpp"          // detail::Emit, LogLevel, LogRecord, LogSink, g_logSink, g_logUser, StderrSink
 #include "Platform.hpp"     // ASTRA_PLATFORM_WINDOWS (do not rely on Base.hpp's include order)
 
 // --- Portable, CONTINUABLE debugger break ------------------------------------
@@ -59,12 +60,26 @@ namespace Astra
         inline std::atomic<AssertHandler> g_assertHandler{nullptr};
         inline std::atomic<void*>         g_assertUser{nullptr};
 
-        // Default handler: route the failure through the log sink at Critical, then
-        // ask to Break. (Astra cannot flush a user's sink; StderrSink flushes itself.)
+        // A fatal condition must never die silently -- plain assert() always printed before
+        // aborting, and the 134 ASTRA_ASSERT sites inherited that. If the host installed a
+        // sink, route through it (they may forward to a crash reporter). Otherwise fall back
+        // to stderr directly, because detail::Emit is a no-op with no sink installed.
+        // The category is hard-coded: ASTRA_LOG_CATEGORY is redefinable per-TU, and baking a
+        // per-TU token into this inline function's body would be an ODR violation.
         inline AssertAction DefaultAssertHandler(const AssertContext& ctx, void* /*user*/) noexcept
         {
-            Emit(LogLevel::Critical, ASTRA_LOG_CATEGORY, ctx.location,
-                 ctx.message != nullptr ? ctx.message : ctx.expression);
+            const std::string_view text = ctx.message != nullptr ? ctx.message : ctx.expression;
+            const LogRecord record{LogLevel::Critical, "Astra", text, ctx.location};
+
+            const LogSink sink = g_logSink.load(std::memory_order_acquire);
+            if (sink != nullptr)
+            {
+                sink(record, g_logUser.load(std::memory_order_acquire));
+            }
+            else
+            {
+                StderrSink(record, nullptr);
+            }
             return AssertAction::Break;
         }
 
