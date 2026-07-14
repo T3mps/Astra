@@ -806,10 +806,11 @@ namespace Astra
                 auto& block = m_blocks[idx];
                 
                 // Double-check that block is truly empty (use acquire to synchronize with Release operations)
+                // A chunk was acquired after our initial check -- expected under concurrent
+                // Acquire/Release, not a guard failure. Skip the block and move on.
                 size_t blockUsed = block.usedChunks.load(std::memory_order_acquire);
-                if (!ASTRA_ENSURE(blockUsed == 0, "Attempting to release non-empty block")) ASTRA_UNLIKELY
+                if (blockUsed != 0) ASTRA_UNLIKELY
                 {
-                    // Skip this block if it's not actually empty - a chunk was acquired after our initial check
                     continue;
                 }
                 
