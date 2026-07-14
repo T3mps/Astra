@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
-#include <iostream>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -562,9 +561,8 @@ namespace Astra
             // Batch construct component in each chunk
             for (auto& [chunkIndex, indices] : chunkBatches)
             {
-                ASTRA_ASSERT(chunkIndex < m_chunks.size(), "Chunk index out of bounds");
-                if (chunkIndex >= m_chunks.size()) ASTRA_UNLIKELY
-                    continue;  // Skip invalid chunk indices in Release builds
+                if (!ASTRA_ENSURE(chunkIndex < m_chunks.size(), "Chunk index out of bounds")) ASTRA_UNLIKELY
+                    continue;  // Skip invalid chunk indices
                 m_chunks[chunkIndex]->BatchConstructComponent<T>(indices, value);
             }
         }

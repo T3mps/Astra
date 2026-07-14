@@ -170,7 +170,8 @@ namespace Astra
         
         void Execute(Registry& registry, ISystemExecutor* executor)
         {
-            ASTRA_ASSERT(executor != nullptr, "Executor cannot be null");
+            if (!ASTRA_ENSURE(executor != nullptr, "Executor cannot be null"))
+                return;
 
             if (m_systems.empty())
                 return;

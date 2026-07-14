@@ -567,8 +567,7 @@ namespace Astra
             }
 
             // Should never trigger if ReserveForInsert() works correctly
-            ASTRA_ASSERT(insertIdx < m_capacity, "FlatMap::Emplace failed to find insertion slot");
-            if (insertIdx >= m_capacity) ASTRA_UNLIKELY
+            if (!ASTRA_ENSURE(insertIdx < m_capacity, "FlatMap::Emplace failed to find insertion slot")) ASTRA_UNLIKELY
             {
                 return {end(), false};
             }
