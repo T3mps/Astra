@@ -113,3 +113,16 @@ TEST(Assert, EnsureAlwaysReportsEveryTime)
     EXPECT_EQ(cap.count, 3);
     Astra::SetAssertHandler(nullptr);
 }
+
+// Regression: a failing ENSURE on the DEFAULT handler (which returns Break) must not
+// halt a process with no debugger attached. Before the debugger-gated break, this
+// executed a bare __debugbreak() and killed the test process (Release/Dist exit 3).
+TEST(Assert, DefaultEnsureFailureRecoversWithoutDebugger)
+{
+    Astra::SetAssertHandler(nullptr);   // default handler: reports, returns Break
+
+    const bool ok = ASTRA_ENSURE(1 == 2, "recoverable condition");
+
+    EXPECT_FALSE(ok);   // yields the condition, so the caller can recover
+    SUCCEED();          // reaching this line at all proves the process was not halted
+}

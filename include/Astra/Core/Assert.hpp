@@ -26,6 +26,19 @@
     #define ASTRA_DEBUG_BREAK() std::raise(SIGTRAP)
 #endif
 
+// --- Debugger detection (gates the recoverable ENSURE break) ------------------
+// A recoverable guard must break ONLY into an attached debugger (this mirrors
+// Unreal's UE_DEBUG_BREAK / IsDebuggerPresent): an unattended process must never
+// execute a bare int3, which would raise an unhandled EXCEPTION_BREAKPOINT and
+// kill it. We forward-declare the Win32 entry point instead of including
+// <windows.h>: Base.hpp includes this header, so <windows.h> here would leak into
+// every single Astra TU. The signature matches <debugapi.h> exactly
+// (WINBASEAPI BOOL WINAPI IsDebuggerPresent(VOID)), so a TU that also includes
+// <windows.h> — e.g. anything pulling Memory.hpp — sees a compatible redeclaration.
+#if defined(ASTRA_PLATFORM_WINDOWS)
+extern "C" __declspec(dllimport) int __stdcall IsDebuggerPresent(void);
+#endif
+
 namespace Astra
 {
     enum class AssertAction { Break, Continue };
@@ -74,12 +87,27 @@ namespace Astra
             return false;
         }
 
-        // ENSURE failure path: report; on Break → break (NEVER abort); always yields false.
+        // Best-effort: on platforms with no cheap query we report "no debugger",
+        // which errs toward never halting an unattended process.
+        [[nodiscard]] inline bool IsDebuggerAttached() noexcept
+        {
+        #if defined(ASTRA_PLATFORM_WINDOWS)
+            return ::IsDebuggerPresent() != 0;
+        #else
+            return false;
+        #endif
+        }
+
+        // ENSURE failure path (recoverable): report; break ONLY into an attached
+        // debugger; NEVER abort; always yield false so the caller runs its recovery.
         inline bool FailEnsure(const char* expr, const char* msg,
                                const std::source_location& loc) noexcept
         {
-            if (ReportAssertFailure(AssertContext{expr, msg, loc}) == AssertAction::Break)
+            if (ReportAssertFailure(AssertContext{expr, msg, loc}) == AssertAction::Break
+                && IsDebuggerAttached())
+            {
                 ASTRA_DEBUG_BREAK();
+            }
             return false;
         }
     }
