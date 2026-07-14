@@ -30,7 +30,8 @@ namespace Astra
         
         void Set(size_t index) noexcept
         {
-            if (ASTRA_ENSURE(index < Bits, "Bitmap index out of range (component ID space overflow?)")) ASTRA_LIKELY
+            ASTRA_ASSERT(index < Bits, "Bitmap index out of range (component ID space overflow?)");
+            if (index < Bits) ASTRA_LIKELY
             {
                 const size_t word = index / BITS_PER_WORD;
                 const size_t bit = index % BITS_PER_WORD;
@@ -40,7 +41,8 @@ namespace Astra
         
         void Reset(size_t index) noexcept
         {
-            if (ASTRA_ENSURE(index < Bits, "Bitmap index out of range (component ID space overflow?)")) ASTRA_LIKELY
+            ASTRA_ASSERT(index < Bits, "Bitmap index out of range (component ID space overflow?)");
+            if (index < Bits) ASTRA_LIKELY
             {
                 const size_t word = index / BITS_PER_WORD;
                 const size_t bit = index % BITS_PER_WORD;

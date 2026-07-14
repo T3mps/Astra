@@ -60,17 +60,19 @@ TEST_F(BitmapTest, BoundaryConditions)
     bitmap.Set(255);  // Valid - last bit
     EXPECT_TRUE(bitmap.Test(255));
 
-    // Out-of-range Set is an ENSURE-guarded recoverable no-op in every config.
-    Astra::SetAssertHandler([](const Astra::AssertContext&, void*) noexcept
-                            { return Astra::AssertAction::Continue; });
-
-    bitmap.Set(256);   // invalid — out of range
+    // Task 11: Set() now asserts loudly on out-of-range indices in Debug
+    // (component ID space overflow guard) instead of silently ignoring them.
+    // Release builds keep the old no-op fallback since ASTRA_ASSERT compiles out.
+#ifdef ASTRA_BUILD_DEBUG
+    EXPECT_DEATH({ bitmap.Set(256); }, "");
+    EXPECT_DEATH({ bitmap.Set(1000); }, "");
+#else
+    bitmap.Set(256);  // Invalid - out of range
     EXPECT_FALSE(bitmap.Test(256));
 
-    bitmap.Set(1000);  // invalid — way out of range
+    bitmap.Set(1000); // Invalid - way out of range
     EXPECT_FALSE(bitmap.Test(1000));
-
-    Astra::SetAssertHandler(nullptr);
+#endif
 
     // Test word boundaries (64-bit words)
     bitmap.Set(63);
