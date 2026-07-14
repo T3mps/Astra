@@ -162,9 +162,23 @@ namespace Astra
 // a failure when active. (cond, message) — message is a plain string.
 // =============================================================================
 
+// ASTRA_ENABLE_ASSERTS must be defined BUILD-WIDE (a project-level define), never per-TU in
+// an individual .cpp. It changes how the ASTRA_ASSERT/ASTRA_VERIFY macros below expand, so an
+// inline or template function containing either -- Registry::Get<T>, say -- compiles to a
+// genuinely different body in a TU that defines the knob than in one that does not. Both
+// bodies claim to define the same inline function, which the One Definition Rule requires to
+// be identical; the linker does not diagnose the mismatch, it just keeps one arbitrarily, and
+// every caller silently gets whichever body won. Defining it build-wide means every TU agrees,
+// so there is only ever one body to link.
+//
+// tests/Core/CheckedAssertsTest.cpp is the one deliberate exception: it #defines the knob for
+// itself alone. That is safe there, and only there, because it includes nothing from Astra but
+// this header -- and this header (plus everything it pulls in: Base.hpp, Platform.hpp,
+// Log.hpp) contains zero assert sites of its own, so there is no inline function for the two
+// expansions to diverge on.
 #if defined(ASTRA_BUILD_DEBUG) || defined(ASTRA_ENABLE_ASSERTS)
 
-    #define ASTRA_ASSERT(cond, message)                                                    \
+    #define ASTRA_ASSERT(cond, message)                                                  \
         do {                                                                               \
             if (!(cond)) [[unlikely]] {                                                    \
                 (void)::Astra::detail::FailFatal(#cond, (message),                         \
