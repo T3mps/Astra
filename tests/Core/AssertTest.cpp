@@ -75,8 +75,7 @@ TEST(Assert, DefaultHandlerRoutesFailureToInstalledLogSink)
     Astra::Testing::ScopedAssertHandler handlerGuard(nullptr);  // exercise the DEFAULT handler
 
     const unsigned expectedLine = __LINE__ + 1;
-    const auto action = Astra::detail::ReportAssertFailure(
-        Astra::AssertContext{"x < y", "bad bounds", std::source_location::current()});
+    const auto action = Astra::detail::ReportAssertFailure(Astra::AssertContext{"x < y", "bad bounds", std::source_location::current()});
 
     EXPECT_EQ(action, Astra::AssertAction::Break);
     EXPECT_EQ(cap.count, 1);                                  // the sink was actually called
