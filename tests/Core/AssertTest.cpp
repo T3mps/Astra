@@ -79,3 +79,37 @@ TEST(Assert, VerifyEvaluatesConditionInEveryConfigAndYieldsIt)
 #endif
     Astra::SetAssertHandler(nullptr);
 }
+
+// ---- Task 5: ENSURE ---------------------------------------------------------
+
+TEST(Assert, EnsureContinuesReturnsConditionAndFiresOncePerSite)
+{
+    AssertCapture cap;
+    Astra::SetAssertHandler(&RecordingHandler, &cap);
+
+    int recovered = 0;
+    for (int i = 0; i < 5; ++i)
+    {
+        // Same call-site hit 5x: fires ONCE, always returns false, always lets us recover.
+        if (!ASTRA_ENSURE(i > 100, "i too small")) { ++recovered; }
+    }
+    EXPECT_EQ(recovered, 5);          // non-fatal: recovery branch taken every iteration
+    EXPECT_EQ(cap.count, 1);          // reported once for this call-site
+
+    const bool ok = ASTRA_ENSURE(1 + 1 == 2, "math");
+    EXPECT_TRUE(ok);                  // passing ensure yields true, no report
+    EXPECT_EQ(cap.count, 1);
+
+    Astra::SetAssertHandler(nullptr);
+}
+
+// (Each ASTRA_ENSURE expansion owns its own call-site-local `static` fire-once flag.)
+
+TEST(Assert, EnsureAlwaysReportsEveryTime)
+{
+    AssertCapture cap;
+    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    for (int i = 0; i < 3; ++i) (void)ASTRA_ENSURE_ALWAYS(false, "each time");
+    EXPECT_EQ(cap.count, 3);
+    Astra::SetAssertHandler(nullptr);
+}

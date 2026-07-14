@@ -127,3 +127,25 @@ namespace Astra
     #define ASTRA_VERIFY(cond, message) ( (cond) ? true : (((void)(message)), false) )
 
 #endif
+
+// ENSURE — recoverable guard, ALL configs, non-fatal, returns cond. Fires once
+// per call-site via a call-site-local static (each macro expansion is a distinct
+// lambda type → its own `static`). Best-effort under threads (documented). The
+// immediately-invoked lambda takes cond/message/location as ARGUMENTS so cond is
+// evaluated exactly once and source_location is captured at the call site.
+#define ASTRA_ENSURE(cond, message)                                                        \
+    ([](bool astra_ok, const char* astra_msg,                                              \
+        const std::source_location& astra_loc) noexcept -> bool {                          \
+        if (astra_ok) [[likely]] return true;                                              \
+        static bool astra_ensure_fired = false;                                            \
+        if (!astra_ensure_fired) {                                                         \
+            astra_ensure_fired = true;                                                     \
+            (void)::Astra::detail::FailEnsure(#cond, astra_msg, astra_loc);                \
+        }                                                                                  \
+        return false;                                                                      \
+    }(static_cast<bool>(cond), (message), std::source_location::current()))
+
+// ENSURE_ALWAYS — reports on every failure (no per-site dedup). Plain expression.
+#define ASTRA_ENSURE_ALWAYS(cond, message)                                                 \
+    ( (cond) ||                                                                             \
+      ::Astra::detail::FailEnsure(#cond, (message), std::source_location::current()) )
