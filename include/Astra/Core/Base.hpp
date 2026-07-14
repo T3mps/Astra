@@ -42,11 +42,6 @@
     #endif
 #endif
 
-// Runtime assertion macro
-// Note: Define ASTRA_BUILD_DEBUG in your build system (premake5) for debug builds
-#ifdef ASTRA_BUILD_DEBUG
-    #include <cassert>
-    #define ASTRA_ASSERT(condition, message) assert((condition) && (message))
-#else
-    #define ASTRA_ASSERT(condition, message) ((void)0)
-#endif
+// Diagnostics seam — included last so Log/Assert see the macros defined above.
+#include "Log.hpp"
+#include "Assert.hpp"

@@ -43,3 +43,39 @@ TEST(Assert, FailEnsureReportsAndReturnsFalseWithoutAborting)
     EXPECT_EQ(cap.count, 1);
     Astra::SetAssertHandler(nullptr);
 }
+
+// ---- Task 4: ASSERT + VERIFY ------------------------------------------------
+
+TEST(Assert, AssertInvokesHandlerOnlyWhenActive)
+{
+    AssertCapture cap;
+    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    ASTRA_ASSERT(1 == 2, "never equal");
+#if defined(ASTRA_BUILD_DEBUG) || defined(ASTRA_ENABLE_ASSERTS)
+    EXPECT_EQ(cap.count, 1);          // active config → fired (handler returned Continue)
+    EXPECT_EQ(cap.message, "never equal");
+#else
+    EXPECT_EQ(cap.count, 0);          // compiled out → not evaluated
+#endif
+    Astra::SetAssertHandler(nullptr);
+}
+
+TEST(Assert, VerifyEvaluatesConditionInEveryConfigAndYieldsIt)
+{
+    AssertCapture cap;
+    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    int sideEffects = 0;
+    const bool ok = ASTRA_VERIFY([&]{ ++sideEffects; return true; }(), "should pass");
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(sideEffects, 1);        // condition ran in EVERY config
+
+    const bool bad = ASTRA_VERIFY([&]{ ++sideEffects; return false; }(), "should fail");
+    EXPECT_FALSE(bad);
+    EXPECT_EQ(sideEffects, 2);        // still evaluated even on the failing path
+#if defined(ASTRA_BUILD_DEBUG) || defined(ASTRA_ENABLE_ASSERTS)
+    EXPECT_EQ(cap.count, 1);          // failure handled (Continue) in active configs
+#else
+    EXPECT_EQ(cap.count, 0);          // failure not handled in Release/Dist
+#endif
+    Astra::SetAssertHandler(nullptr);
+}

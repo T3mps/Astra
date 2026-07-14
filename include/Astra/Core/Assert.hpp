@@ -90,3 +90,40 @@ namespace Astra
         detail::g_assertHandler.store(handler, std::memory_order_release);
     }
 }
+
+// =============================================================================
+// Guard macros. ASSERT is statement-form and compiles out in Release/Dist
+// (condition NOT evaluated) unless ASTRA_ENABLE_ASSERTS. VERIFY is an
+// expression that ALWAYS evaluates its condition and yields it; it only HANDLES
+// a failure when active. (cond, message) — message is a plain string.
+// =============================================================================
+
+#if defined(ASTRA_BUILD_DEBUG) || defined(ASTRA_ENABLE_ASSERTS)
+
+    #define ASTRA_ASSERT(cond, message)                                                    \
+        do {                                                                               \
+            if (!(cond)) [[unlikely]] {                                                     \
+                if (::Astra::detail::ReportAssertFailure(                                   \
+                        ::Astra::AssertContext{#cond, (message),                            \
+                                               std::source_location::current()})            \
+                    == ::Astra::AssertAction::Break) [[unlikely]] {                         \
+                    ASTRA_DEBUG_BREAK();                                                    \
+                    std::abort();                                                          \
+                }                                                                          \
+            }                                                                              \
+        } while (0)
+
+    #define ASTRA_VERIFY(cond, message)                                                    \
+        ( (cond) ||                                                                         \
+          ::Astra::detail::FailFatal(#cond, (message), std::source_location::current()) )
+
+#else
+
+    // Compiled out: keep `cond` compiler-checked at zero runtime cost. Do NOT insert an
+    // unreachable-hint here (that would mask a recoverable Condition — see release-safety spec).
+    #define ASTRA_ASSERT(cond, message) do { (void)sizeof(bool(cond)); (void)sizeof(message); } while (0)
+
+    // VERIFY still EVALUATES cond in Release/Dist (side effects preserved), discards the result.
+    #define ASTRA_VERIFY(cond, message) ( (cond) ? true : (((void)(message)), false) )
+
+#endif
