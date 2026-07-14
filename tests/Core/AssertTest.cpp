@@ -162,6 +162,26 @@ TEST(Assert, VerifyEvaluatesConditionInEveryConfigAndYieldsIt)
     Astra::SetAssertHandler(nullptr);
 }
 
+// FailFatal's abort() was never directly exercised by this file in any config -- only
+// incidentally, Debug-only, by the pre-existing Bitmap death tests. ASSERT now delegates
+// to FailFatal (see Assert.hpp) instead of hand-inlining the same fatal path, so this
+// covers that shared path directly. Only applies where the guards are active: with no
+// installed handler the DEFAULT handler runs and, with no debugger attached, always
+// aborts on Break.
+#if defined(ASTRA_BUILD_DEBUG) || defined(ASTRA_ENABLE_ASSERTS)
+
+TEST(Assert, AssertAbortsOnFailureInActiveConfig)
+{
+    EXPECT_DEATH({ ASTRA_ASSERT(false, "boom"); }, "");
+}
+
+TEST(Assert, VerifyAbortsOnFailureInActiveConfig)
+{
+    EXPECT_DEATH({ (void)ASTRA_VERIFY(false, "boom"); }, "");
+}
+
+#endif
+
 // ---- Task 5: ENSURE ---------------------------------------------------------
 
 TEST(Assert, EnsureContinuesReturnsConditionAndFiresOncePerSite)

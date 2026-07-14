@@ -157,16 +157,9 @@ namespace Astra
 
     #define ASTRA_ASSERT(cond, message)                                                    \
         do {                                                                               \
-            if (!(cond)) [[unlikely]] {                                                     \
-                if (::Astra::detail::ReportAssertFailure(                                   \
-                        ::Astra::AssertContext{#cond, (message),                            \
-                                               std::source_location::current()})            \
-                    == ::Astra::AssertAction::Break) [[unlikely]] {                         \
-                    if (::Astra::detail::IsDebuggerAttached()) [[unlikely]] {              \
-                        ASTRA_DEBUG_BREAK();                                               \
-                    }                                                                      \
-                    std::abort();                                                          \
-                }                                                                          \
+            if (!(cond)) [[unlikely]] {                                                    \
+                (void)::Astra::detail::FailFatal(#cond, (message),                         \
+                                                 std::source_location::current());          \
             }                                                                              \
         } while (0)
 
