@@ -65,9 +65,12 @@ TEST(Assert, FailEnsureReportsAndReturnsFalseWithoutAborting)
 
 // The reason Log and Assert are ONE seam: a failure with no assert handler
 // installed must still reach an installed LOG sink, at Critical, with the
-// message and a plausible source location. This is the test that would have
-// caught the Critical -- it fails against the old detail::Emit-only handler,
-// which never touched g_logSink.
+// message and a plausible source location. This does NOT catch the Critical --
+// detail::Emit already does exactly this (load g_logSink, call it), so this
+// test passes against the buggy handler too. What it pins is that the DEFAULT
+// handler routes through an installed sink rather than always hitting stderr;
+// see DefaultHandlerFallsBackToStderrWithNoSinkInstalled below for the test
+// that actually catches the silent-abort regression.
 TEST(Assert, DefaultHandlerRoutesFailureToInstalledLogSink)
 {
     LogCapture cap;
@@ -101,8 +104,9 @@ TEST(Assert, BreakIsTheDefaultDecision)
 }
 
 // Guards this Critical from regressing: with NEITHER a log sink NOR an assert handler
-// installed, the default handler must still print the message somewhere -- StderrSink
-// is the fallback, and this is its first coverage (previously dead code).
+// installed, the default handler must still print the failure -- including the
+// stringized condition, which LogRecord (and therefore StderrSink) has no field for,
+// so the no-sink path formats and writes to stderr directly.
 TEST(Assert, DefaultHandlerFallsBackToStderrWithNoSinkInstalled)
 {
     Astra::Testing::ScopedLogSink sinkGuard(nullptr);
@@ -117,6 +121,7 @@ TEST(Assert, DefaultHandlerFallsBackToStderrWithNoSinkInstalled)
 
     EXPECT_FALSE(output.empty());
     EXPECT_NE(output.find("stderr fallback message"), std::string::npos) << output;
+    EXPECT_NE(output.find("p != nullptr"), std::string::npos) << output;   // the condition itself
 }
 
 // ---- Task 4: ASSERT + VERIFY ------------------------------------------------
@@ -163,12 +168,12 @@ TEST(Assert, VerifyEvaluatesConditionInEveryConfigAndYieldsIt)
 
 TEST(Assert, AssertAbortsOnFailureInActiveConfig)
 {
-    EXPECT_DEATH({ ASTRA_ASSERT(false, "boom"); }, "");
+    EXPECT_DEATH({ ASTRA_ASSERT(false, "boom"); }, "boom");
 }
 
 TEST(Assert, VerifyAbortsOnFailureInActiveConfig)
 {
-    EXPECT_DEATH({ (void)ASTRA_VERIFY(false, "boom"); }, "");
+    EXPECT_DEATH({ (void)ASTRA_VERIFY(false, "boom"); }, "boom");
 }
 
 #endif

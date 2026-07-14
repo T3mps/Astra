@@ -7,6 +7,8 @@
 #include <Astra/Core/Log.hpp>
 #include <string>
 
+#include "../Support/DiagnosticsTestGuards.hpp"
+
 namespace
 {
     struct Capture { int count = 0; Astra::LogLevel level{}; std::string message; std::string category; unsigned line = 0; };
@@ -30,7 +32,7 @@ namespace
 TEST(LogFloor, CompileTimeFloorStripsBelowFloorCallsRegardlessOfRuntimeLevel)
 {
     Capture cap;
-    Astra::SetLogSink(&CapturingSink, &cap);
+    Astra::Testing::ScopedLogSink sinkGuard(&CapturingSink, &cap);
     Astra::SetLogLevel(Astra::LogLevel::Trace);  // most permissive runtime level
 
     ASTRA_LOG_INFO("stripped");        // Info(2) < floor(4): disabled at compile time
@@ -43,6 +45,5 @@ TEST(LogFloor, CompileTimeFloorStripsBelowFloorCallsRegardlessOfRuntimeLevel)
     EXPECT_EQ(cap.count, 1);
     EXPECT_EQ(cap.message, "delivered");
 
-    Astra::SetLogSink(nullptr);
     Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
 }

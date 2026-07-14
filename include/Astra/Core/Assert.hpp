@@ -1,12 +1,13 @@
 #pragma once
 
+#include <cstdio>           // std::fprintf, std::fflush (no-sink stderr fallback)
 #include <cstdlib>          // std::abort
 #include <atomic>
 #include <source_location>
 #include <string_view>
 
 #include "Base.hpp"         // ASTRA_HAS_BUILTIN, ASTRA_COMPILER_* (see note below)
-#include "Log.hpp"          // detail::Emit, LogLevel, LogRecord, LogSink, g_logSink, g_logUser, StderrSink
+#include "Log.hpp"          // LogLevel, LogRecord, LogSink, StderrSink, g_logSink, g_logUser
 #include "Platform.hpp"     // ASTRA_PLATFORM_WINDOWS (do not rely on Base.hpp's include order)
 
 // --- Portable, CONTINUABLE debugger break ------------------------------------
@@ -63,23 +64,31 @@ namespace Astra
         // A fatal condition must never die silently -- plain assert() always printed before
         // aborting, and the 134 ASTRA_ASSERT sites inherited that. If the host installed a
         // sink, route through it (they may forward to a crash reporter). Otherwise fall back
-        // to stderr directly, because detail::Emit is a no-op with no sink installed.
+        // to printing the failure ourselves, because there is no sink to delegate to.
         // The category is hard-coded: ASTRA_LOG_CATEGORY is redefinable per-TU, and baking a
         // per-TU token into this inline function's body would be an ODR violation.
         inline AssertAction DefaultAssertHandler(const AssertContext& ctx, void* /*user*/) noexcept
         {
             const std::string_view text = ctx.message != nullptr ? ctx.message : ctx.expression;
-            const LogRecord record{LogLevel::Critical, "Astra", text, ctx.location};
-
             const LogSink sink = g_logSink.load(std::memory_order_acquire);
             if (sink != nullptr)
             {
-                sink(record, g_logUser.load(std::memory_order_acquire));
+                sink(LogRecord{LogLevel::Critical, "Astra", text, ctx.location},
+                     g_logUser.load(std::memory_order_acquire));
+                return AssertAction::Break;
             }
-            else
-            {
-                StderrSink(record, nullptr);
-            }
+
+            // No sink: print the failure ourselves, including the stringized condition.
+            // LogRecord has no expression field (a log line has no business with one), so
+            // routing this through StderrSink would silently drop the condition -- exactly
+            // what plain assert() always printed. A host that wants the expression as well
+            // installs an AssertHandler and gets the whole AssertContext.
+            std::fprintf(stderr, "[critical] %s:%u - assertion failed: %s (%s)\n",
+                         ctx.location.file_name(),
+                         static_cast<unsigned>(ctx.location.line()),
+                         ctx.expression != nullptr ? ctx.expression : "<expression>",
+                         ctx.message != nullptr ? ctx.message : "");
+            std::fflush(stderr);
             return AssertAction::Break;
         }
 
