@@ -5,7 +5,6 @@
 namespace
 {
     struct Capture { int count = 0; Astra::LogLevel level{}; std::string message; std::string category; unsigned line = 0; };
-    Capture g_cap;
 
     void CapturingSink(const Astra::LogRecord& r, void* user) noexcept
     {
@@ -29,6 +28,7 @@ TEST(Log, EmitDeliversRecordToInstalledSink)
     EXPECT_EQ(cap.message, "hello");
     EXPECT_EQ(cap.category, "TestCat");
     Astra::SetLogSink(nullptr);  // restore no-op for other tests
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
 }
 
 TEST(Log, NullSinkIsSilent)
@@ -42,5 +42,11 @@ TEST(Log, NullSinkIsSilent)
 TEST(Log, LevelNameMapsAllLevels)
 {
     EXPECT_EQ(Astra::LevelName(Astra::LogLevel::Trace), "trace");
+    EXPECT_EQ(Astra::LevelName(Astra::LogLevel::Debug), "debug");
+    EXPECT_EQ(Astra::LevelName(Astra::LogLevel::Info), "info");
+    EXPECT_EQ(Astra::LevelName(Astra::LogLevel::Warn), "warn");
+    EXPECT_EQ(Astra::LevelName(Astra::LogLevel::Error), "error");
     EXPECT_EQ(Astra::LevelName(Astra::LogLevel::Critical), "critical");
+    EXPECT_EQ(Astra::LevelName(Astra::LogLevel::Off), "off");
+    EXPECT_EQ(Astra::LevelName(static_cast<Astra::LogLevel>(999)), "unknown");
 }
