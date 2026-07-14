@@ -194,9 +194,8 @@ namespace Astra
     ([](bool astra_ok, const char* astra_msg,                                              \
         const std::source_location& astra_loc) noexcept -> bool {                          \
         if (astra_ok) [[likely]] return true;                                              \
-        static bool astra_ensure_fired = false;                                            \
-        if (!astra_ensure_fired) {                                                         \
-            astra_ensure_fired = true;                                                     \
+        static std::atomic<bool> astra_ensure_fired{false};                                \
+        if (!astra_ensure_fired.exchange(true, std::memory_order_relaxed)) {               \
             (void)::Astra::detail::FailEnsure(#cond, astra_msg, astra_loc);                \
         }                                                                                  \
         return false;                                                                      \
