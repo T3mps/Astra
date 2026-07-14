@@ -62,8 +62,13 @@ TEST(Log, MacroRoutesToSinkAtOrAboveRuntimeLevel)
     ASTRA_LOG_INFO("below threshold");   // Info < Warn: filtered at runtime
     EXPECT_EQ(cap.count, 0);
 
-    ASTRA_LOG_ERROR("at or above");      // Error >= Warn: delivered
+    ASTRA_LOG_WARN("at threshold");      // Warn == Warn: delivered (the ">=" boundary)
     EXPECT_EQ(cap.count, 1);
+    EXPECT_EQ(cap.level, Astra::LogLevel::Warn);
+    EXPECT_EQ(cap.message, "at threshold");
+
+    ASTRA_LOG_ERROR("at or above");      // Error >= Warn: delivered
+    EXPECT_EQ(cap.count, 2);
     EXPECT_EQ(cap.level, Astra::LogLevel::Error);
     EXPECT_EQ(cap.message, "at or above");
     EXPECT_EQ(cap.category, "Astra");    // default ASTRA_LOG_CATEGORY
