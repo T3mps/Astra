@@ -195,6 +195,9 @@ namespace Astra
   and a buffering user sink should flush on `Critical` since a following `abort()` won't.)
 - **How the macro layer acts on the returned decision** (this is where fatal vs. non-fatal lives, *not*
   in the handler):
+  > **Superseded 2026-07-14** — the break below is described as ungated. It shipped
+  > **debugger-gated** instead (both paths break only under `IsDebuggerAttached()`, and the
+  > fatal path then always `abort()`s regardless). See "Amendments (2026-07-14)" §1.
   - `ASSERT` / `VERIFY` (fatal): `Break` → `ASTRA_DEBUG_BREAK()` then `std::abort()`; `Continue` → proceed.
   - `ENSURE` (non-fatal): `Break` → `ASTRA_DEBUG_BREAK()` then **continue** (never `abort()`); `Continue`
     → continue. Either way `ENSURE` then returns `cond`. So a `Break` decision drops you into the
@@ -249,9 +252,15 @@ namespace Astra
    Release; `ENSURE` makes it first-class *and* adds the missing Release signal):
    - `Archetype.hpp:565` — `chunkIndex < m_chunks.size()` ("Skip invalid chunk indices in Release builds").
    - `ArchetypeChunkPool.hpp:810` — `blockUsed == 0` before releasing a block (race-recoverable).
+     > **Superseded 2026-07-14** — this site was reclassified as control flow, not a guard: the
+     > re-check is an *expected* outcome of the lock-free path, not a violated invariant. It is a
+     > plain branch now, with no diagnostic. See "Amendments (2026-07-14)" §3.
    - `FlatSet.hpp:536` — `insertIdx < m_capacity` (Emplace slot → `{end(), false}`).
    - `FlatMap.hpp:570` — same.
    - `Bitmap.hpp:33`, `Bitmap.hpp:44` — `index < Bits` (component-ID overflow).
+     > **Superseded 2026-07-14** — Bitmap stays `ASTRA_ASSERT` (fatal) and was excluded from this
+     > conversion: "recovering" here silently drops a bit from an archetype mask, so a query for
+     > that component would silently return nothing. See "Amendments (2026-07-14)" §2.
    Each becomes `if (!ASTRA_ENSURE(cond, "…")) { existing recovery }`, deleting the now-redundant
    separate `ASTRA_ASSERT`.
 3. **Upgrade the assert-only `SystemScheduler.hpp:173`** `executor != nullptr` (currently asserts then
@@ -319,3 +328,55 @@ ide/`, `Astra.sln`, `Makefile`, `*.make`. Baseline on `dev` is 563 tests.
 - Double-gate — spdlog `SPDLOG_ACTIVE_LEVEL`, Abseil `ABSL_MIN_LOG_LEVEL` (+ stripping caveat).
 - Macro/message footgun — WG21 P2264 "Make `assert()` macro user friendly".
 - Namespace-collision precedent — EnTT #63 (`ensure`→`assure` due to UE's global `ensure`).
+
+## Amendments (2026-07-14)
+
+Recorded during the whole-branch final review (1 Critical, 7 Important) after implementation.
+This section documents where the shipped code diverged from this spec, and why — the sections
+above are left in place, marked superseded in place, because the history is the point: Theme C
+reads this document, and "here's what we tried and why it changed" is more useful than a silently
+rewritten spec.
+
+1. **Both the fatal *and* recoverable breaks are gated on `IsDebuggerAttached()`; the fatal path
+   then always `abort()`s.** §5.2 as written describes an *ungated* `ASTRA_DEBUG_BREAK()` on
+   `Break`. That is unsafe for an unattended process: a bare `int3`/`__debugbreak()` with no
+   debugger attached raises an unhandled `EXCEPTION_BREAKPOINT` and kills the process right there
+   — it never reaches the `std::abort()` the matrix promises, so there is no CRT abort report, no
+   `SIGABRT`, and a confusing exit code for anything watching the process (a test runner, a CI
+   job, a crash-reporting wrapper). Gating the break on an attached debugger (mirroring Unreal's
+   `UE_DEBUG_BREAK` / `IsDebuggerPresent`) means: under a debugger you land in it and can inspect;
+   without one, `ASSERT`/`VERIFY` always still reach `abort()`, and `ENSURE` never halts at all.
+   Implemented in `Assert.hpp`'s `FailFatal`/`FailEnsure` via `detail::IsDebuggerAttached()`.
+
+2. **`Bitmap` stays fatal (`ASTRA_ASSERT`) and is excluded from the `ENSURE` sweep.** §6 item 2
+   listed `Bitmap.hpp:33`/`:44` as ENSURE conversions. `ENSURE`'s whole value proposition is
+   "recover and keep going" — but here, recovering means silently dropping a bit from an
+   archetype's component mask, which means every future query for that component on that
+   archetype silently returns nothing. A wrong answer with no crash is strictly worse than halting
+   immediately at the corruption site. This is the exact shape (`ASSERT(cond); if (cond) { work
+   }`) the `ENSURE` primitive exists to remove elsewhere, which is precisely why it needed calling
+   out here instead of converting on autopilot — both `Bitmap::Set` and `Bitmap::Reset` now carry
+   an inline comment saying so, pointing back here.
+
+3. **`ArchetypeChunkPool`'s block-release re-check (`:810`) is a plain branch, not a guard.** §6
+   item 2 also listed this site as an ENSURE conversion (it started life as an `ASTRA_ASSERT`
+   before that). Neither classification was right: the code immediately below the check already
+   documented *"a chunk was acquired after our initial check"* — an **anticipated, by-design**
+   branch of the lock-free acquire/release algorithm under concurrent access, not a violated
+   invariant. As an `ASSERT` it aborted Debug builds on a perfectly legal race. As an `ENSURE` it
+   reported healthy, expected operation to every host sink at `LogLevel::Critical` on every such
+   race — the one place in the sweep where the seam would have cried wolf, teaching exactly the
+   wrong lesson about what `ENSURE` means right as Theme C starts adopting it. It is now a plain
+   `if (blockUsed != 0) { continue; }` with no diagnostic at all, which is what it always should
+   have been.
+
+4. **The default assert handler falls back to `StderrSink` when no sink is installed.** §5.2's
+   "Default handler: emit the record through the log sink at `Critical`" undersold what "emit"
+   meant: the as-implemented first pass routed only through `detail::Emit`, which is a **no-op**
+   with no sink installed — and no sink is installed by default. The practical effect: a stock
+   build that never calls `SetLogSink` got total silence on every failing guard, immediately
+   followed by `abort()`. That is a regression against `plain assert()`'s behavior (file, line,
+   expression, message to stderr before dying) and against this branch's own "134 sites behave
+   unchanged" constraint. `DefaultAssertHandler` now checks whether a sink is installed: if so, it
+   routes through it (a host may forward to a crash reporter); if not, it calls the provided
+   `StderrSink` directly, so a fatal condition is never silent regardless of host configuration.

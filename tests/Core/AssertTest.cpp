@@ -3,10 +3,11 @@
 #include <Astra/Core/Log.hpp>
 #include <string>
 
+#include "../Support/DiagnosticsTestGuards.hpp"
+
 namespace
 {
     struct AssertCapture { int count = 0; std::string expr; std::string message; };
-    AssertCapture g_ac;
 
     // Records and CONTINUES (so the process does not abort during tests).
     Astra::AssertAction RecordingHandler(const Astra::AssertContext& ctx, void* user) noexcept
@@ -35,7 +36,7 @@ namespace
 TEST(Assert, HandlerReceivesContextAndItsDecisionIsReturned)
 {
     AssertCapture cap;
-    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    Astra::Testing::ScopedAssertHandler guard(&RecordingHandler, &cap);
 
     const auto action = Astra::detail::ReportAssertFailure(
         Astra::AssertContext{"x < y", "bad bounds", std::source_location::current()});
@@ -44,18 +45,15 @@ TEST(Assert, HandlerReceivesContextAndItsDecisionIsReturned)
     EXPECT_EQ(cap.count, 1);
     EXPECT_EQ(cap.expr, "x < y");
     EXPECT_EQ(cap.message, "bad bounds");
-
-    Astra::SetAssertHandler(nullptr);  // restore default for other tests
 }
 
 TEST(Assert, FailEnsureReportsAndReturnsFalseWithoutAborting)
 {
     AssertCapture cap;
-    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    Astra::Testing::ScopedAssertHandler guard(&RecordingHandler, &cap);
     const bool r = Astra::detail::FailEnsure("p != nullptr", "null", std::source_location::current());
     EXPECT_FALSE(r);
     EXPECT_EQ(cap.count, 1);
-    Astra::SetAssertHandler(nullptr);
 }
 
 // ---- Final-review fixes: the handler->sink integration point ---------------
@@ -73,8 +71,8 @@ TEST(Assert, FailEnsureReportsAndReturnsFalseWithoutAborting)
 TEST(Assert, DefaultHandlerRoutesFailureToInstalledLogSink)
 {
     LogCapture cap;
-    Astra::SetLogSink(&CapturingLogSink, &cap);
-    Astra::SetAssertHandler(nullptr);   // exercise the DEFAULT handler, not a test double
+    Astra::Testing::ScopedLogSink sinkGuard(&CapturingLogSink, &cap);
+    Astra::Testing::ScopedAssertHandler handlerGuard(nullptr);  // exercise the DEFAULT handler
 
     const unsigned expectedLine = __LINE__ + 1;
     const auto action = Astra::detail::ReportAssertFailure(
@@ -85,8 +83,6 @@ TEST(Assert, DefaultHandlerRoutesFailureToInstalledLogSink)
     EXPECT_EQ(cap.level, Astra::LogLevel::Critical);           // fatal reports are always Critical
     EXPECT_EQ(cap.message, "bad bounds");
     EXPECT_EQ(cap.line, expectedLine);                         // plausible source location
-
-    Astra::SetLogSink(nullptr);
 }
 
 // The shipped default policy (Break) was never asserted anywhere.
@@ -96,15 +92,13 @@ TEST(Assert, BreakIsTheDefaultDecision)
     // stderr with none installed) -- this test is about the returned decision, not the
     // sink; see DefaultHandlerRoutesFailureToInstalledLogSink above for that.
     LogCapture cap;
-    Astra::SetLogSink(&CapturingLogSink, &cap);
-    Astra::SetAssertHandler(nullptr);
+    Astra::Testing::ScopedLogSink sinkGuard(&CapturingLogSink, &cap);
+    Astra::Testing::ScopedAssertHandler handlerGuard(nullptr);
 
     const auto action = Astra::detail::ReportAssertFailure(
         Astra::AssertContext{"cond", "message", std::source_location::current()});
 
     EXPECT_EQ(action, Astra::AssertAction::Break);
-
-    Astra::SetLogSink(nullptr);
 }
 
 // Guards this Critical from regressing: with NEITHER a log sink NOR an assert handler
@@ -112,8 +106,8 @@ TEST(Assert, BreakIsTheDefaultDecision)
 // is the fallback, and this is its first coverage (previously dead code).
 TEST(Assert, DefaultHandlerFallsBackToStderrWithNoSinkInstalled)
 {
-    Astra::SetLogSink(nullptr);
-    Astra::SetAssertHandler(nullptr);
+    Astra::Testing::ScopedLogSink sinkGuard(nullptr);
+    Astra::Testing::ScopedAssertHandler handlerGuard(nullptr);
 
     testing::internal::CaptureStderr();
     // Do NOT use ASTRA_ASSERT here -- with no debugger attached it would abort() the
@@ -131,7 +125,7 @@ TEST(Assert, DefaultHandlerFallsBackToStderrWithNoSinkInstalled)
 TEST(Assert, AssertInvokesHandlerOnlyWhenActive)
 {
     AssertCapture cap;
-    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    Astra::Testing::ScopedAssertHandler guard(&RecordingHandler, &cap);
     ASTRA_ASSERT(1 == 2, "never equal");
 #if defined(ASTRA_BUILD_DEBUG) || defined(ASTRA_ENABLE_ASSERTS)
     EXPECT_EQ(cap.count, 1);          // active config → fired (handler returned Continue)
@@ -139,13 +133,12 @@ TEST(Assert, AssertInvokesHandlerOnlyWhenActive)
 #else
     EXPECT_EQ(cap.count, 0);          // compiled out → not evaluated
 #endif
-    Astra::SetAssertHandler(nullptr);
 }
 
 TEST(Assert, VerifyEvaluatesConditionInEveryConfigAndYieldsIt)
 {
     AssertCapture cap;
-    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    Astra::Testing::ScopedAssertHandler guard(&RecordingHandler, &cap);
     int sideEffects = 0;
     const bool ok = ASTRA_VERIFY([&]{ ++sideEffects; return true; }(), "should pass");
     EXPECT_TRUE(ok);
@@ -159,7 +152,6 @@ TEST(Assert, VerifyEvaluatesConditionInEveryConfigAndYieldsIt)
 #else
     EXPECT_EQ(cap.count, 0);          // failure not handled in Release/Dist
 #endif
-    Astra::SetAssertHandler(nullptr);
 }
 
 // FailFatal's abort() was never directly exercised by this file in any config -- only
@@ -187,7 +179,7 @@ TEST(Assert, VerifyAbortsOnFailureInActiveConfig)
 TEST(Assert, EnsureContinuesReturnsConditionAndFiresOncePerSite)
 {
     AssertCapture cap;
-    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    Astra::Testing::ScopedAssertHandler guard(&RecordingHandler, &cap);
 
     int recovered = 0;
     for (int i = 0; i < 5; ++i)
@@ -201,8 +193,6 @@ TEST(Assert, EnsureContinuesReturnsConditionAndFiresOncePerSite)
     const bool ok = ASTRA_ENSURE(1 + 1 == 2, "math");
     EXPECT_TRUE(ok);                  // passing ensure yields true, no report
     EXPECT_EQ(cap.count, 1);
-
-    Astra::SetAssertHandler(nullptr);
 }
 
 // (Each ASTRA_ENSURE expansion owns its own call-site-local `static` fire-once flag.)
@@ -210,10 +200,9 @@ TEST(Assert, EnsureContinuesReturnsConditionAndFiresOncePerSite)
 TEST(Assert, EnsureAlwaysReportsEveryTime)
 {
     AssertCapture cap;
-    Astra::SetAssertHandler(&RecordingHandler, &cap);
+    Astra::Testing::ScopedAssertHandler guard(&RecordingHandler, &cap);
     for (int i = 0; i < 3; ++i) (void)ASTRA_ENSURE_ALWAYS(false, "each time");
     EXPECT_EQ(cap.count, 3);
-    Astra::SetAssertHandler(nullptr);
 }
 
 // Regression: a failing ENSURE on the DEFAULT handler (which returns Break) must not
@@ -230,8 +219,8 @@ TEST(Assert, EnsureAlwaysReportsEveryTime)
 TEST(Assert, DefaultEnsureFailureRecoversWithoutDebugger)
 {
     LogCapture cap;
-    Astra::SetLogSink(&CapturingLogSink, &cap);
-    Astra::SetAssertHandler(nullptr);   // default handler: reports, returns Break
+    Astra::Testing::ScopedLogSink sinkGuard(&CapturingLogSink, &cap);
+    Astra::Testing::ScopedAssertHandler handlerGuard(nullptr);  // default handler: reports, returns Break
 
     const bool ok = ASTRA_ENSURE(1 == 2, "recoverable condition");
 
@@ -240,6 +229,5 @@ TEST(Assert, DefaultEnsureFailureRecoversWithoutDebugger)
     EXPECT_EQ(cap.level, Astra::LogLevel::Critical);
     EXPECT_EQ(cap.message, "recoverable condition");
 
-    Astra::SetLogSink(nullptr);
     SUCCEED();          // reaching this line at all proves the process was not halted
 }

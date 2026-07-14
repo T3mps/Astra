@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cassert>
 #include <cstddef>
 #include <cstring>
 #include <limits>

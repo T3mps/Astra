@@ -30,6 +30,9 @@ namespace Astra
         
         void Set(size_t index) noexcept
         {
+            // Deliberately FATAL, not ASTRA_ENSURE: "recovering" here drops a bit from an
+            // archetype mask, so queries for that component silently return nothing. A wrong
+            // answer with no crash is worse than halting. See the seam spec's amendments.
             ASTRA_ASSERT(index < Bits, "Bitmap index out of range (component ID space overflow?)");
             if (index < Bits) ASTRA_LIKELY
             {
@@ -38,9 +41,12 @@ namespace Astra
                 m_words[word] |= (Word(1) << bit);
             }
         }
-        
+
         void Reset(size_t index) noexcept
         {
+            // Deliberately FATAL, not ASTRA_ENSURE: "recovering" here drops a bit from an
+            // archetype mask, so queries for that component silently return nothing. A wrong
+            // answer with no crash is worse than halting. See the seam spec's amendments.
             ASTRA_ASSERT(index < Bits, "Bitmap index out of range (component ID space overflow?)");
             if (index < Bits) ASTRA_LIKELY
             {

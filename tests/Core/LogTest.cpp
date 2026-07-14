@@ -2,6 +2,8 @@
 #include <Astra/Core/Log.hpp>
 #include <string>
 
+#include "../Support/DiagnosticsTestGuards.hpp"
+
 namespace
 {
     struct Capture { int count = 0; Astra::LogLevel level{}; std::string message; std::string category; unsigned line = 0; };
@@ -20,14 +22,13 @@ namespace
 TEST(Log, EmitDeliversRecordToInstalledSink)
 {
     Capture cap;
-    Astra::SetLogSink(&CapturingSink, &cap);
+    Astra::Testing::ScopedLogSink guard(&CapturingSink, &cap);
     Astra::SetLogLevel(Astra::LogLevel::Trace);
     Astra::detail::Emit(Astra::LogLevel::Warn, "TestCat", std::source_location::current(), "hello");
     EXPECT_EQ(cap.count, 1);
     EXPECT_EQ(cap.level, Astra::LogLevel::Warn);
     EXPECT_EQ(cap.message, "hello");
     EXPECT_EQ(cap.category, "TestCat");
-    Astra::SetLogSink(nullptr);  // restore no-op for other tests
     Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
 }
 
@@ -56,7 +57,7 @@ TEST(Log, LevelNameMapsAllLevels)
 TEST(Log, MacroRoutesToSinkAtOrAboveRuntimeLevel)
 {
     Capture cap;
-    Astra::SetLogSink(&CapturingSink, &cap);
+    Astra::Testing::ScopedLogSink guard(&CapturingSink, &cap);
     Astra::SetLogLevel(Astra::LogLevel::Warn);
 
     ASTRA_LOG_INFO("below threshold");   // Info < Warn: filtered at runtime
@@ -73,18 +74,16 @@ TEST(Log, MacroRoutesToSinkAtOrAboveRuntimeLevel)
     EXPECT_EQ(cap.message, "at or above");
     EXPECT_EQ(cap.category, "Astra");    // default ASTRA_LOG_CATEGORY
 
-    Astra::SetLogSink(nullptr);
     Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
 }
 
 TEST(Log, MacroCapturesCallSiteLine)
 {
     Capture cap;
-    Astra::SetLogSink(&CapturingSink, &cap);
+    Astra::Testing::ScopedLogSink guard(&CapturingSink, &cap);
     Astra::SetLogLevel(Astra::LogLevel::Trace);
     const unsigned expected = __LINE__ + 1;
     ASTRA_LOG_WARN("here");
     EXPECT_EQ(cap.line, expected);
-    Astra::SetLogSink(nullptr);
     Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
 }

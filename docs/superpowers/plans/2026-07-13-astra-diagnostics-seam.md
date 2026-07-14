@@ -791,6 +791,12 @@ Replace with:
 
 - [ ] **Step 2: Convert `ArchetypeChunkPool.hpp:810`**
 
+> **Superseded 2026-07-14** (final-review fix, Important 4) — this site was reclassified as
+> control flow, not a guard, and reverted to a plain `if (blockUsed != 0) { continue; }` with
+> no diagnostic at all: the check immediately below it documents that a chunk being acquired
+> after the initial check is an *expected* outcome of the concurrent lock-free acquire/release
+> path, not a violated invariant. See the design spec's "Amendments (2026-07-14)" §3.
+
 Current:
 ```cpp
                 ASTRA_ASSERT(blockUsed == 0, "Attempting to release non-empty block");
@@ -821,6 +827,12 @@ Replace the first two lines with:
 Do the identical transform in `FlatMap.hpp:570` (message `"FlatMap::Emplace failed to find insertion slot"`).
 
 - [ ] **Step 4: Convert `Bitmap.hpp:33` and `:44`**
+
+> **Superseded 2026-07-14** (final-review fix, Important 7) — `Bitmap` was excluded from this
+> conversion and stays `ASTRA_ASSERT` (fatal): "recovering" here drops a bit from an archetype
+> mask, so a query for that component would silently return nothing — a wrong answer with no
+> crash, which is worse than halting. Both `Bitmap::Set` and `Bitmap::Reset` carry an inline
+> comment recording this. See the design spec's "Amendments (2026-07-14)" §2.
 
 Both sites are:
 ```cpp

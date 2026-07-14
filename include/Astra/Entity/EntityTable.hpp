@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
-#include <cassert>
 
 #include "../Core/Base.hpp"
 #include "../Core/Memory.hpp"

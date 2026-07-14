@@ -87,6 +87,12 @@ namespace Astra
         detail::g_logSink.store(sink, std::memory_order_release);
     }
 
+    // Runtime floor for ASTRA_LOG_*. Deliberately does NOT gate assert/ensure reports:
+    // DefaultAssertHandler (Assert.hpp) delivers straight to the installed sink (or falls
+    // back to StderrSink with none installed), bypassing both detail::Emit and this level
+    // entirely, so SetLogLevel(LogLevel::Off) silences ASTRA_LOG_CRITICAL but not a failing
+    // guard. That is intentional -- a fatal condition must not become suppressible by a log
+    // setting -- but is easy to assume otherwise.
     inline void SetLogLevel(LogLevel minimum) noexcept
     {
         detail::g_logLevel.store(minimum, std::memory_order_relaxed);
