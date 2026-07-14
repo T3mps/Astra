@@ -108,3 +108,52 @@ namespace Astra
         std::fflush(stderr);
     }
 }
+
+// =============================================================================
+// Logging macros. Two gates: the per-macro #if strips calls below the
+// compile-time floor (ASTRA_ACTIVE_LEVEL); the runtime `if` filters against the
+// installed SetLogLevel. `msg` is a plain string (no formatting).
+// =============================================================================
+
+#define ASTRA_DETAIL_LOG(level_, msg)                                              \
+    do {                                                                           \
+        if ((level_) >= ::Astra::GetLogLevel()) [[unlikely]] {                     \
+            ::Astra::detail::Emit((level_), ASTRA_LOG_CATEGORY,                     \
+                                  std::source_location::current(), (msg));         \
+        }                                                                          \
+    } while (0)
+
+// Disabled form: reference `msg` in an unevaluated context so there is no code
+// and no unused-variable warning.
+#define ASTRA_DETAIL_LOG_DISABLED(msg) do { (void)sizeof(msg); } while (0)
+
+#if ASTRA_ACTIVE_LEVEL <= ASTRA_LEVEL_TRACE
+#  define ASTRA_LOG_TRACE(msg) ASTRA_DETAIL_LOG(::Astra::LogLevel::Trace, msg)
+#else
+#  define ASTRA_LOG_TRACE(msg) ASTRA_DETAIL_LOG_DISABLED(msg)
+#endif
+#if ASTRA_ACTIVE_LEVEL <= ASTRA_LEVEL_DEBUG
+#  define ASTRA_LOG_DEBUG(msg) ASTRA_DETAIL_LOG(::Astra::LogLevel::Debug, msg)
+#else
+#  define ASTRA_LOG_DEBUG(msg) ASTRA_DETAIL_LOG_DISABLED(msg)
+#endif
+#if ASTRA_ACTIVE_LEVEL <= ASTRA_LEVEL_INFO
+#  define ASTRA_LOG_INFO(msg) ASTRA_DETAIL_LOG(::Astra::LogLevel::Info, msg)
+#else
+#  define ASTRA_LOG_INFO(msg) ASTRA_DETAIL_LOG_DISABLED(msg)
+#endif
+#if ASTRA_ACTIVE_LEVEL <= ASTRA_LEVEL_WARN
+#  define ASTRA_LOG_WARN(msg) ASTRA_DETAIL_LOG(::Astra::LogLevel::Warn, msg)
+#else
+#  define ASTRA_LOG_WARN(msg) ASTRA_DETAIL_LOG_DISABLED(msg)
+#endif
+#if ASTRA_ACTIVE_LEVEL <= ASTRA_LEVEL_ERROR
+#  define ASTRA_LOG_ERROR(msg) ASTRA_DETAIL_LOG(::Astra::LogLevel::Error, msg)
+#else
+#  define ASTRA_LOG_ERROR(msg) ASTRA_DETAIL_LOG_DISABLED(msg)
+#endif
+#if ASTRA_ACTIVE_LEVEL <= ASTRA_LEVEL_CRITICAL
+#  define ASTRA_LOG_CRITICAL(msg) ASTRA_DETAIL_LOG(::Astra::LogLevel::Critical, msg)
+#else
+#  define ASTRA_LOG_CRITICAL(msg) ASTRA_DETAIL_LOG_DISABLED(msg)
+#endif

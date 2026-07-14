@@ -50,3 +50,36 @@ TEST(Log, LevelNameMapsAllLevels)
     EXPECT_EQ(Astra::LevelName(Astra::LogLevel::Off), "off");
     EXPECT_EQ(Astra::LevelName(static_cast<Astra::LogLevel>(999)), "unknown");
 }
+
+// ---- Task 2: log macros + gating -------------------------------------------
+
+TEST(Log, MacroRoutesToSinkAtOrAboveRuntimeLevel)
+{
+    Capture cap;
+    Astra::SetLogSink(&CapturingSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Warn);
+
+    ASTRA_LOG_INFO("below threshold");   // Info < Warn: filtered at runtime
+    EXPECT_EQ(cap.count, 0);
+
+    ASTRA_LOG_ERROR("at or above");      // Error >= Warn: delivered
+    EXPECT_EQ(cap.count, 1);
+    EXPECT_EQ(cap.level, Astra::LogLevel::Error);
+    EXPECT_EQ(cap.message, "at or above");
+    EXPECT_EQ(cap.category, "Astra");    // default ASTRA_LOG_CATEGORY
+
+    Astra::SetLogSink(nullptr);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
+}
+
+TEST(Log, MacroCapturesCallSiteLine)
+{
+    Capture cap;
+    Astra::SetLogSink(&CapturingSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Trace);
+    const unsigned expected = __LINE__ + 1;
+    ASTRA_LOG_WARN("here");
+    EXPECT_EQ(cap.line, expected);
+    Astra::SetLogSink(nullptr);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
+}
