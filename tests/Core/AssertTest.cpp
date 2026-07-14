@@ -117,6 +117,9 @@ TEST(Assert, EnsureAlwaysReportsEveryTime)
 // Regression: a failing ENSURE on the DEFAULT handler (which returns Break) must not
 // halt a process with no debugger attached. Before the debugger-gated break, this
 // executed a bare __debugbreak() and killed the test process (Release/Dist exit 3).
+//
+// Under an attached debugger this test WILL break once (by design -- it drives the
+// default Break decision). Hit continue. CI has no debugger, so it never fires there.
 TEST(Assert, DefaultEnsureFailureRecoversWithoutDebugger)
 {
     Astra::SetAssertHandler(nullptr);   // default handler: reports, returns Break

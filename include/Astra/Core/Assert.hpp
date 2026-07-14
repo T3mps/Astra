@@ -6,6 +6,7 @@
 
 #include "Base.hpp"         // ASTRA_HAS_BUILTIN, ASTRA_COMPILER_* (see note below)
 #include "Log.hpp"          // detail::Emit, LogLevel
+#include "Platform.hpp"     // ASTRA_PLATFORM_WINDOWS (do not rely on Base.hpp's include order)
 
 // --- Portable, CONTINUABLE debugger break ------------------------------------
 // Never __builtin_trap(): that is SIGILL/non-continuable and GCC has no
@@ -75,18 +76,6 @@ namespace Astra
             return DefaultAssertHandler(ctx, nullptr);
         }
 
-        // VERIFY failure path: report; on Break → break + abort; always yields false.
-        inline bool FailFatal(const char* expr, const char* msg,
-                              const std::source_location& loc) noexcept
-        {
-            if (ReportAssertFailure(AssertContext{expr, msg, loc}) == AssertAction::Break)
-            {
-                ASTRA_DEBUG_BREAK();
-                std::abort();
-            }
-            return false;
-        }
-
         // Best-effort: on platforms with no cheap query we report "no debugger",
         // which errs toward never halting an unattended process.
         [[nodiscard]] inline bool IsDebuggerAttached() noexcept
@@ -94,8 +83,31 @@ namespace Astra
         #if defined(ASTRA_PLATFORM_WINDOWS)
             return ::IsDebuggerPresent() != 0;
         #else
+            // Windows-only for now. Returning false elsewhere is the safe default: it can
+            // only ever cost us a missed break, never an unattended crash -- which is the
+            // property this whole gate exists to guarantee. Linux CAN be supported (read
+            // TracerPid: from /proc/self/status, as UE's FLinuxPlatformMisc does); it is
+            // deferred only to keep POSIX headers out of a header included by every TU.
             return false;
         #endif
+        }
+
+        // Fatal failure path (ASSERT/VERIFY): report; break ONLY into an attached
+        // debugger, then ALWAYS abort. The break is gated because an unattended
+        // process would otherwise die at an unhandled EXCEPTION_BREAKPOINT and never
+        // reach abort() -- no CRT abort report, no SIGABRT, a confusing exit code.
+        inline bool FailFatal(const char* expr, const char* msg,
+                              const std::source_location& loc) noexcept
+        {
+            if (ReportAssertFailure(AssertContext{expr, msg, loc}) == AssertAction::Break)
+            {
+                if (IsDebuggerAttached())
+                {
+                    ASTRA_DEBUG_BREAK();
+                }
+                std::abort();
+            }
+            return false;
         }
 
         // ENSURE failure path (recoverable): report; break ONLY into an attached
@@ -135,7 +147,9 @@ namespace Astra
                         ::Astra::AssertContext{#cond, (message),                            \
                                                std::source_location::current()})            \
                     == ::Astra::AssertAction::Break) [[unlikely]] {                         \
-                    ASTRA_DEBUG_BREAK();                                                    \
+                    if (::Astra::detail::IsDebuggerAttached()) [[unlikely]] {              \
+                        ASTRA_DEBUG_BREAK();                                               \
+                    }                                                                      \
                     std::abort();                                                          \
                 }                                                                          \
             }                                                                              \
