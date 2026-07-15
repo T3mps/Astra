@@ -131,14 +131,28 @@ namespace Astra
         /**
          * Check if 'ancestor' is an ancestor of 'entity' in the parent hierarchy.
          * Used to detect cycles before setting a parent relationship.
+         *
+         * Cycle-safe by construction: SetParent() normally can't create a cycle
+         * (it calls this function first and refuses if one would result), but a
+         * corrupt/crafted save loads m_parents directly via Deserialize() with no
+         * cycle check, so a cyclic map (e.g. A->B->A) can reach this traversal at
+         * runtime. The step cap below bounds the walk to at most m_parents.Size()
+         * hops: a valid (acyclic) chain can't revisit a node, so it can't exceed
+         * the number of parent entries, meaning the cap never rejects a real
+         * ancestor query -- it only terminates a walk that has cycled past every
+         * possible entry, which is impossible without a cycle.
          */
         bool IsAncestorOf(Entity ancestor, Entity entity) const
         {
             Entity current = GetParent(entity);
+            size_t steps = 0;
+            const size_t limit = m_parents.Size();
             while (current.IsValid())
             {
                 if (current == ancestor)
                     return true;
+                if (++steps > limit)
+                    return false;   // cycle in the parent map -- bail with a defined result
                 current = GetParent(current);
             }
             return false;

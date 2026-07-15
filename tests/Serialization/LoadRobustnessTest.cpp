@@ -280,3 +280,68 @@ TEST(LoadRobustness, RelationshipGraphParentCountOverBufferIsRejected)
     auto result = Astra::RelationshipGraph::Deserialize(reader);
     EXPECT_TRUE(result.IsErr());   // must fail cleanly -- no multi-GB reserve
 }
+
+// RelationshipGraph::Deserialize writes m_parents directly with no cycle
+// check (unlike runtime SetParent, which calls IsAncestorOf to reject a
+// cycle BEFORE writing). A corrupted/crafted save can therefore install a
+// cyclic parent map; IsAncestorOf must not hang when a later runtime call
+// (e.g. the next SetParent) walks such a map.
+//
+// Rationale for how this is built: same self-contained-wire-format reasoning
+// as the other RelationshipGraph tests above. This test hand-builds a buffer
+// mirroring RelationshipGraph::Serialize's format for two entities, A and B,
+// with m_parents = { A -> B, B -> A } (a 2-cycle: child A's parent is B,
+// child B's parent is A), followed by zero children-map entries and zero
+// link-map entries (IsAncestorOf only ever walks m_parents, so nothing else
+// is needed). It calls RelationshipGraph::Deserialize directly -- the exact
+// load path a corrupt save would take -- confirms the cycle was actually
+// installed (GetParent(A)==B and GetParent(B)==A, i.e. not a vacuous test),
+// then calls IsAncestorOf with an ancestor C that is NOT part of the cycle,
+// so the walk can never short-circuit on the first or second step: without a
+// cycle guard, current alternates B,A,B,A,... forever and never equals C or
+// becomes invalid. With the guard, the call must still RETURN a defined bool.
+TEST(LoadRobustness, CyclicParentMapDoesNotHangIsAncestorOf)
+{
+    const Astra::Entity a(1, 1);
+    const Astra::Entity b(2, 1);
+    const Astra::Entity c(3, 1);   // not part of the cycle -- can never match
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+
+        writer(static_cast<uint32_t>(2));   // parentCount = 2
+        writer(a.GetValue());                // child = A
+        writer(b.GetValue());                // parent = B   (A's parent is B)
+        writer(b.GetValue());                // child = B
+        writer(a.GetValue());                // parent = A   (B's parent is A -- cycle!)
+
+        writer(static_cast<uint32_t>(0));   // parentWithChildrenCount = 0
+        writer(static_cast<uint32_t>(0));   // linkedEntityCount = 0
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    auto result = Astra::RelationshipGraph::Deserialize(reader);
+    ASSERT_TRUE(result.IsOk());
+
+    auto& graph = *result.GetValue();
+
+    // Confirm the cyclic parent map was actually installed by the load path
+    // (proves the crafted buffer is real, not vacuous).
+    ASSERT_EQ(graph.GetParent(a), b);
+    ASSERT_EQ(graph.GetParent(b), a);
+
+    // Must RETURN (not hang), even though the parent chain from A never
+    // reaches C and never naturally terminates.
+    const bool ancestorResult = graph.IsAncestorOf(c, a);
+    SUCCEED();   // reaching here proves the traversal did not infinite-loop
+    EXPECT_FALSE(ancestorResult);   // C is never actually an ancestor of A
+
+    // The same hazard is reachable through the public runtime API: the next
+    // SetParent on an entity in the cycle calls IsAncestorOf internally.
+    const Astra::Entity d(4, 1);
+    graph.SetParent(d, a);   // must also RETURN, not hang
+    EXPECT_EQ(graph.GetParent(d), a);
+}
