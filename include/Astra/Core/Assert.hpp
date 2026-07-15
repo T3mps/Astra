@@ -1,223 +1,60 @@
 #pragma once
 
-#include <cstdio>           // std::fprintf, std::fflush (no-sink stderr fallback)
-#include <cstdlib>          // std::abort
-#include <atomic>
-#include <source_location>
-#include <string_view>
+// Re-export shim. The assert seam MOVED TO MOSAIC, the shared Starworks core, where it
+// is the single canonical copy (this file was its move origin). Astra keeps its
+// ASTRA_* / Astra:: vocabulary via the aliases below, so every call site is unchanged:
+// the ~134 ASTRA_ASSERT / ASTRA_VERIFY / ASTRA_ENSURE sites in production, and
+// Astra::AssertAction / Astra::SetAssertHandler / Astra::detail::ReportAssertFailure /
+// Astra::detail::FailEnsure in the tests.
+//
+// The "checked release" knob is forwarded BEFORE Mosaic's header is parsed:
+//   ASTRA_ENABLE_ASSERTS -> MOSAIC_ENABLE_ASSERTS
+// so a Release/Dist TU that opts back in keeps ASTRA_ASSERT/VERIFY active. In the
+// standard configs the two gates already coincide: Astra keys "active" off
+// ASTRA_BUILD_DEBUG, Mosaic off !NDEBUG, and an Astra Debug build defines the former
+// while leaving NDEBUG undefined (Release/Dist is the reverse), so ASTRA_ASSERT is
+// active in exactly the same builds it always was.
+//
+// One accepted behavior change (Log/Assert host-adoption decision): with NEITHER an
+// assert handler NOR a log sink installed, the stderr fallback tags category "Mosaic",
+// not "Astra". It only surfaces in that degenerate no-sink case; an installed handler
+// or sink never sees it (and the Astra tests check level/message/condition, not that
+// category).
 
-#include "Base.hpp"         // ASTRA_HAS_BUILTIN, ASTRA_COMPILER_* (see note below)
-#include "Log.hpp"          // LogLevel, LogRecord, LogSink, StderrSink, g_logSink, g_logUser
-#include "Platform.hpp"     // ASTRA_PLATFORM_WINDOWS (do not rely on Base.hpp's include order)
-
-// --- Portable, CONTINUABLE debugger break ------------------------------------
-// Never __builtin_trap(): that is SIGILL/non-continuable and GCC has no
-// __builtin_debugtrap (GCC bug #99299). We want a breakpoint you can step past.
-#if defined(ASTRA_COMPILER_MSVC)
-    #include <intrin.h>
-    #define ASTRA_DEBUG_BREAK() __debugbreak()
-#elif ASTRA_HAS_BUILTIN(__builtin_debugtrap)
-    #define ASTRA_DEBUG_BREAK() __builtin_debugtrap()
-#elif defined(__i386__) || defined(__x86_64__)
-    #define ASTRA_DEBUG_BREAK() __asm__ __volatile__("int3")
-#elif defined(__aarch64__)
-    #define ASTRA_DEBUG_BREAK() __asm__ __volatile__("brk #0xF000")
-#elif defined(__arm__)
-    #define ASTRA_DEBUG_BREAK() __asm__ __volatile__("bkpt #0")
-#else
-    #include <csignal>
-    #define ASTRA_DEBUG_BREAK() std::raise(SIGTRAP)
+#if defined(ASTRA_ENABLE_ASSERTS) && !defined(MOSAIC_ENABLE_ASSERTS)
+#  define MOSAIC_ENABLE_ASSERTS
 #endif
 
-// --- Debugger detection (gates the recoverable ENSURE break) ------------------
-// A recoverable guard must break ONLY into an attached debugger (this mirrors
-// Unreal's UE_DEBUG_BREAK / IsDebuggerPresent): an unattended process must never
-// execute a bare int3, which would raise an unhandled EXCEPTION_BREAKPOINT and
-// kill it. We forward-declare the Win32 entry point instead of including
-// <windows.h>: Base.hpp includes this header, so <windows.h> here would leak into
-// every single Astra TU. The signature matches <debugapi.h> exactly
-// (WINBASEAPI BOOL WINAPI IsDebuggerPresent(VOID)), so a TU that also includes
-// <windows.h> — e.g. anything pulling Memory.hpp — sees a compatible redeclaration.
-#if defined(ASTRA_PLATFORM_WINDOWS)
-extern "C" __declspec(dllimport) int __stdcall IsDebuggerPresent(void);
-#endif
+#include "Log.hpp"           // Astra:: log aliases (Mosaic's Assert uses the log seam)
+#include <Mosaic/Assert.hpp>
+
+// A continuable debugger break, for callers that want it directly.
+#define ASTRA_DEBUG_BREAK() MOSAIC_DEBUG_BREAK()
 
 namespace Astra
 {
-    enum class AssertAction { Break, Continue };
+    using Mosaic::AssertAction;
+    using Mosaic::AssertContext;
+    using Mosaic::AssertHandler;
 
-    struct AssertContext
-    {
-        const char*          expression;  // stringized condition
-        const char*          message;     // plain string
-        std::source_location location;
-    };
-
-    // Same fn-ptr + void* shape as the log sink. Set-once-before-work.
-    using AssertHandler = AssertAction (*)(const AssertContext& ctx, void* user) noexcept;
+    using Mosaic::SetAssertHandler;
 
     namespace detail
     {
-        inline std::atomic<AssertHandler> g_assertHandler{nullptr};
-        inline std::atomic<void*>         g_assertUser{nullptr};
-
-        // A fatal condition must never die silently -- plain assert() always printed before
-        // aborting, and the 134 ASTRA_ASSERT sites inherited that. If the host installed a
-        // sink, route through it (they may forward to a crash reporter). Otherwise fall back
-        // to printing the failure ourselves, because there is no sink to delegate to.
-        // The category is hard-coded: ASTRA_LOG_CATEGORY is redefinable per-TU, and baking a
-        // per-TU token into this inline function's body would be an ODR violation.
-        inline AssertAction DefaultAssertHandler(const AssertContext& ctx, void* /*user*/) noexcept
-        {
-            const std::string_view text = ctx.message != nullptr ? ctx.message : ctx.expression;
-            const LogSink sink = g_logSink.load(std::memory_order_acquire);
-            if (sink != nullptr)
-            {
-                sink(LogRecord{LogLevel::Critical, "Astra", text, ctx.location},
-                     g_logUser.load(std::memory_order_acquire));
-                return AssertAction::Break;
-            }
-
-            // No sink: print the failure ourselves, including the stringized condition.
-            // LogRecord has no expression field (a log line has no business with one), so
-            // routing this through StderrSink would silently drop the condition -- exactly
-            // what plain assert() always printed. A host that wants the expression as well
-            // installs an AssertHandler and gets the whole AssertContext.
-            std::fprintf(stderr, "[critical] %s:%u - assertion failed: %s (%s)\n",
-                         ctx.location.file_name(),
-                         static_cast<unsigned>(ctx.location.line()),
-                         ctx.expression != nullptr ? ctx.expression : "<expression>",
-                         ctx.message != nullptr ? ctx.message : "");
-            std::fflush(stderr);
-            return AssertAction::Break;
-        }
-
-        inline AssertAction ReportAssertFailure(const AssertContext& ctx) noexcept
-        {
-            const AssertHandler h = g_assertHandler.load(std::memory_order_acquire);
-            if (h != nullptr)
-                return h(ctx, g_assertUser.load(std::memory_order_acquire));
-            return DefaultAssertHandler(ctx, nullptr);
-        }
-
-        // Best-effort: on platforms with no cheap query we report "no debugger",
-        // which errs toward never halting an unattended process.
-        [[nodiscard]] inline bool IsDebuggerAttached() noexcept
-        {
-        #if defined(ASTRA_PLATFORM_WINDOWS)
-            return ::IsDebuggerPresent() != 0;
-        #else
-            // Windows-only for now. Returning false elsewhere is the safe default: it can
-            // only ever cost us a missed break, never an unattended crash -- which is the
-            // property this whole gate exists to guarantee. Linux CAN be supported (read
-            // TracerPid: from /proc/self/status, as UE's FLinuxPlatformMisc does); it is
-            // deferred only to keep POSIX headers out of a header included by every TU.
-            return false;
-        #endif
-        }
-
-        // Fatal failure path (ASSERT/VERIFY): report; break ONLY into an attached
-        // debugger, then ALWAYS abort. The break is gated because an unattended
-        // process would otherwise die at an unhandled EXCEPTION_BREAKPOINT and never
-        // reach abort() -- no CRT abort report, no SIGABRT, a confusing exit code.
-        inline bool FailFatal(const char* expr, const char* msg,
-                              const std::source_location& loc) noexcept
-        {
-            if (ReportAssertFailure(AssertContext{expr, msg, loc}) == AssertAction::Break)
-            {
-                if (IsDebuggerAttached())
-                {
-                    ASTRA_DEBUG_BREAK();
-                }
-                std::abort();
-            }
-            return false;
-        }
-
-        // ENSURE failure path (recoverable): report; break ONLY into an attached
-        // debugger; NEVER abort; always yield false so the caller runs its recovery.
-        inline bool FailEnsure(const char* expr, const char* msg,
-                               const std::source_location& loc) noexcept
-        {
-            if (ReportAssertFailure(AssertContext{expr, msg, loc}) == AssertAction::Break
-                && IsDebuggerAttached())
-            {
-                ASTRA_DEBUG_BREAK();
-            }
-            return false;
-        }
-    }
-
-    inline void SetAssertHandler(AssertHandler handler, void* user = nullptr) noexcept
-    {
-        detail::g_assertUser.store(user, std::memory_order_release);
-        detail::g_assertHandler.store(handler, std::memory_order_release);
+        using Mosaic::detail::ReportAssertFailure;
+        using Mosaic::detail::FailFatal;
+        using Mosaic::detail::FailEnsure;
+        using Mosaic::detail::DefaultAssertHandler;
+        using Mosaic::detail::IsDebuggerAttached;
     }
 }
 
-// =============================================================================
-// Guard macros. ASSERT is statement-form and compiles out in Release/Dist
-// (condition NOT evaluated) unless ASTRA_ENABLE_ASSERTS. VERIFY is an
-// expression that ALWAYS evaluates its condition and yields it; it only HANDLES
-// a failure when active. (cond, message) — message is a plain string.
-// =============================================================================
-
-// ASTRA_ENABLE_ASSERTS must be defined BUILD-WIDE (a project-level define), never per-TU in
-// an individual .cpp. It changes how the ASTRA_ASSERT/ASTRA_VERIFY macros below expand, so an
-// inline or template function containing either -- Registry::Get<T>, say -- compiles to a
-// genuinely different body in a TU that defines the knob than in one that does not. Both
-// bodies claim to define the same inline function, which the One Definition Rule requires to
-// be identical; the linker does not diagnose the mismatch, it just keeps one arbitrarily, and
-// every caller silently gets whichever body won. Defining it build-wide means every TU agrees,
-// so there is only ever one body to link.
-//
-// tests/Core/CheckedAssertsTest.cpp is the one deliberate exception: it #defines the knob for
-// itself alone. That is safe there, and only there, because it includes nothing from Astra but
-// this header -- and this header (plus everything it pulls in: Base.hpp, Platform.hpp,
-// Log.hpp) contains zero assert sites of its own, so there is no inline function for the two
-// expansions to diverge on.
-#if defined(ASTRA_BUILD_DEBUG) || defined(ASTRA_ENABLE_ASSERTS)
-
-    #define ASTRA_ASSERT(cond, message)                                                  \
-        do {                                                                               \
-            if (!(cond)) [[unlikely]] {                                                    \
-                (void)::Astra::detail::FailFatal(#cond, (message),                         \
-                                                 std::source_location::current());          \
-            }                                                                              \
-        } while (0)
-
-    #define ASTRA_VERIFY(cond, message)                                                    \
-        ( (cond) ||                                                                         \
-          ::Astra::detail::FailFatal(#cond, (message), std::source_location::current()) )
-
-#else
-
-    // Compiled out: keep `cond` compiler-checked at zero runtime cost. Do NOT insert an
-    // unreachable-hint here (that would mask a recoverable Condition — see release-safety spec).
-    #define ASTRA_ASSERT(cond, message) do { (void)sizeof(bool(cond)); (void)sizeof(message); } while (0)
-
-    // VERIFY still EVALUATES cond in Release/Dist (side effects preserved), discards the result.
-    #define ASTRA_VERIFY(cond, message) ( (cond) ? true : (((void)(message)), false) )
-
-#endif
-
-// ENSURE — recoverable guard, ALL configs, non-fatal, returns cond. Fires once
-// per call-site via a call-site-local static (each macro expansion is a distinct
-// lambda type → its own `static`). Best-effort under threads (documented). The
-// immediately-invoked lambda takes cond/message/location as ARGUMENTS so cond is
-// evaluated exactly once and source_location is captured at the call site.
-#define ASTRA_ENSURE(cond, message)                                                        \
-    ([](bool astra_ok, const char* astra_msg,                                              \
-        const std::source_location& astra_loc) noexcept -> bool {                          \
-        if (astra_ok) [[likely]] return true;                                              \
-        static std::atomic<bool> astra_ensure_fired{false};                                \
-        if (!astra_ensure_fired.exchange(true, std::memory_order_relaxed)) {               \
-            (void)::Astra::detail::FailEnsure(#cond, astra_msg, astra_loc);                \
-        }                                                                                  \
-        return false;                                                                      \
-    }(static_cast<bool>(cond), (message), std::source_location::current()))
-
-// ENSURE_ALWAYS — reports on every failure (no per-site dedup). Plain expression.
-#define ASTRA_ENSURE_ALWAYS(cond, message)                                                 \
-    ( (cond) ||                                                                             \
-      ::Astra::detail::FailEnsure(#cond, (message), std::source_location::current()) )
+// Guard macros -- Astra's names for Mosaic's. ASTRA_ASSERT is statement-form and
+// compiles out in Release/Dist (condition not evaluated) unless ASTRA_ENABLE_ASSERTS;
+// ASTRA_VERIFY always evaluates its condition and yields it; ASTRA_ENSURE is the
+// recoverable, all-configs, never-fatal guard. The active-config gate was forwarded
+// above.
+#define ASTRA_ASSERT(cond, message)        MOSAIC_ASSERT(cond, message)
+#define ASTRA_VERIFY(cond, message)        MOSAIC_VERIFY(cond, message)
+#define ASTRA_ENSURE(cond, message)        MOSAIC_ENSURE(cond, message)
+#define ASTRA_ENSURE_ALWAYS(cond, message) MOSAIC_ENSURE_ALWAYS(cond, message)
