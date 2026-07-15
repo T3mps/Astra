@@ -8,6 +8,7 @@
 #include "Astra/Archetype/ArchetypeManager.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
 #include "Astra/Entity/EntityManager.hpp"
+#include "Astra/Registry/Relations.hpp"
 #include "Astra/Registry/RelationshipGraph.hpp"
 #include "Astra/Serialization/BinaryReader.hpp"
 #include "../TestComponents.hpp"
@@ -344,4 +345,66 @@ TEST(LoadRobustness, CyclicParentMapDoesNotHangIsAncestorOf)
     const Astra::Entity d(4, 1);
     graph.SetParent(d, a);   // must also RETURN, not hang
     EXPECT_EQ(graph.GetParent(d), a);
+}
+
+// BuildAncestorCache() has its own, independent cycle-detection branch (it walks
+// m_parents directly rather than calling IsAncestorOf), so a cyclic parent map
+// must be shown not to abort *that* traversal too. Same crafted buffer as
+// CyclicParentMapDoesNotHangIsAncestorOf (A's parent is B, B's parent is A), but
+// this test drives the cache-building path through the public entry point:
+// Relations<>::ForEachAncestor(), which calls GetAncestorsCached() ->
+// BuildAncestorCache() before it ever touches the ArchetypeManager, so a null
+// ArchetypeManager still exercises the code under test. BuildAncestorCache()'s
+// cycle-detection branch used to be `ASTRA_ASSERT(false, ...)`, which is fatal
+// (aborts the process via std::abort) in Debug and any checked-release with no
+// custom handler installed -- unlike IsAncestorOf's step-capped walk, it would
+// NOT fall through to the break. This test's only assertion is that execution
+// reaches SUCCEED(): before the fix, the process aborts partway through
+// ForEachAncestor() and the test never gets there.
+TEST(LoadRobustness, CyclicParentMapDoesNotAbortForEachAncestor)
+{
+    const Astra::Entity a(1, 1);
+    const Astra::Entity b(2, 1);
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+
+        writer(static_cast<uint32_t>(2));   // parentCount = 2
+        writer(a.GetValue());                // child = A
+        writer(b.GetValue());                // parent = B   (A's parent is B)
+        writer(b.GetValue());                // child = B
+        writer(a.GetValue());                // parent = A   (B's parent is A -- cycle!)
+
+        writer(static_cast<uint32_t>(0));   // parentWithChildrenCount = 0
+        writer(static_cast<uint32_t>(0));   // linkedEntityCount = 0
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    auto result = Astra::RelationshipGraph::Deserialize(reader);
+    ASSERT_TRUE(result.IsOk());
+
+    // Relations<> needs a std::shared_ptr<const RelationshipGraph>; move the
+    // deserialized graph out of the Result into one (mirrors Registry::Load's
+    // own std::make_shared<RelationshipGraph>(std::move(*graphResult.GetValue()))).
+    auto graph = std::make_shared<Astra::RelationshipGraph>(std::move(*result.GetValue()));
+
+    // Confirm the cyclic parent map was actually installed by the load path
+    // (proves the crafted buffer is real, not vacuous).
+    ASSERT_EQ(graph->GetParent(a), b);
+    ASSERT_EQ(graph->GetParent(b), a);
+
+    // No ArchetypeManager needed -- ForEachAncestor() unconditionally builds the
+    // ancestor cache (the code under test) before it would ever dereference one.
+    Astra::Relations<> relations(nullptr, a, graph);
+
+    // Must RETURN (not abort), even though BuildAncestorCache's walk up the
+    // parent chain from A never terminates naturally. The callback takes
+    // (Entity, depth) -- ForEachAncestor's unfiltered instantiation always
+    // calls func(entity, depth), even though it's unreachable here since
+    // m_archetypeManager is null.
+    relations.ForEachAncestor([](Astra::Entity, size_t) {});
+    SUCCEED();   // reaching here proves the traversal did not abort the process
 }

@@ -715,11 +715,12 @@ namespace Astra
             while (it != m_parents.end())
             {
                 current = it->second;
-                
-                // Cycle detection
-                if (!visited.Insert(current).second)
+
+                // Cycle detection. A corrupt save can install a cyclic parent map (Deserialize
+                // writes it directly, unlike SetParent which rejects cycles), so this is a
+                // recoverable condition, not a fatal invariant: report once, then bail gracefully.
+                if (!ASTRA_ENSURE(visited.Insert(current).second, "Cycle detected in parent-child relationships"))
                 {
-                    ASTRA_ASSERT(false, "Cycle detected in parent-child relationships");
                     break;
                 }
                 
