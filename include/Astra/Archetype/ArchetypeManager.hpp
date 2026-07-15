@@ -798,10 +798,37 @@ namespace Astra
             // Read storage metadata
             uint32_t archetypeCount, entityCount;
             reader(archetypeCount)(entityCount);
-            
+
             if (reader.HasError())
                 return false;
-            
+
+            // Bound archetypeCount against the remaining buffer: the same "count <=
+            // remaining/minBytesPerElement" rule as BinaryReader::ReadBoundedCount,
+            // applied inline rather than by calling that helper directly, because
+            // ReadBoundedCount reads a uint64_t and archetypeCount is a uint32_t on
+            // disk (Serialize above writes it via writer(static_cast<uint32_t>(
+            // m_archetypes.size()))). Each archetype record's guaranteed fixed
+            // prefix: a uint32_t index, the ComponentMask words,
+            // Archetype::Serialize's own unconditional fixed fields (entityCount,
+            // entitiesPerChunk, chunkCount, descriptorCount), and the trailing
+            // per-archetype entityCount written after it; the chunks/descriptors
+            // themselves are variable-length.
+            constexpr uint64_t kMinBytesPerArchetype =
+                sizeof(uint32_t) +                                        // archetype index
+                ComponentMask::WORD_COUNT * sizeof(ComponentMask::Word) + // mask
+                sizeof(uint64_t) + sizeof(uint64_t) +                     // entityCount, entitiesPerChunk
+                sizeof(uint32_t) + sizeof(uint32_t) +                     // chunkCount, descriptorCount
+                sizeof(uint64_t);                                         // trailing per-archetype entity count
+            if (static_cast<uint64_t>(archetypeCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerArchetype)
+                return false;
+
+            // Same bound for entityCount, sized to an entity-map record's fixed
+            // on-disk fields: entity + archetypeIndex(4) + chunkIndex(4) +
+            // entityIndex(4), all written unconditionally per entity below.
+            constexpr uint64_t kMinBytesPerEntityRecord = sizeof(Entity) + sizeof(uint32_t) * 3;
+            if (static_cast<uint64_t>(entityCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerEntityRecord)
+                return false;
+
             // Reserve space
             m_archetypes.reserve(archetypeCount);
             m_entityMap.reserve(entityCount);
@@ -876,17 +903,29 @@ namespace Astra
                 uint32_t entityIndex;
                 
                 reader(entity)(archetypeIndex)(chunkIndex)(entityIndex);
-                
+
                 if (reader.HasError())
                     return false;
-                
-                if (archetypeIndex < m_archetypes.size())
-                {
-                    EntityRecord location;
-                    location.archetype = m_archetypes[archetypeIndex].archetype.get();
-                    location.location = EntityLocation(chunkIndex, entityIndex);
-                    m_entityMap[entity] = location;
-                }
+
+                // By this point every archetype (and its chunks) from the loop
+                // above already exists, so chunkIndex/entityIndex can be validated
+                // against the real chunk layout instead of stored raw - a corrupt
+                // index here would otherwise make a later GetComponent/iteration
+                // index a chunk or slot out of bounds (OOB read/write). A bad
+                // archetypeIndex used to be silently skipped; now it fails the
+                // whole load like any other corrupted record.
+                if (archetypeIndex >= m_archetypes.size())
+                    return false;
+
+                Archetype* arch = m_archetypes[archetypeIndex].archetype.get();
+                if (chunkIndex >= arch->GetChunkCount() ||
+                    entityIndex >= arch->GetChunkEntityCount(chunkIndex))
+                    return false;
+
+                EntityRecord location;
+                location.archetype = arch;
+                location.location = EntityLocation(chunkIndex, entityIndex);
+                m_entityMap[entity] = location;
             }
             
             return !reader.HasError();

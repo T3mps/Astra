@@ -5,6 +5,7 @@
 #include <span>
 #include <vector>
 #include "Astra/Archetype/Archetype.hpp"
+#include "Astra/Archetype/ArchetypeManager.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
 #include "Astra/Serialization/BinaryReader.hpp"
 #include "../TestComponents.hpp"
@@ -138,4 +139,79 @@ TEST(LoadRobustness, ChunkEntityCountOverCapacityIsRejected)
     Astra::BinaryReader reader{std::span<const std::byte>(buf)};
     auto result = Astra::Archetype::Deserialize(reader, registryDescriptors, &pool);
     EXPECT_TRUE(result.IsErr());   // must fail cleanly -- no crash, no OOB
+}
+
+// ArchetypeManager::Deserialize's entity-to-archetype-map loop must validate a
+// record's chunkIndex/entityIndex against the archetype's real chunk layout
+// before storing the entity location. By the time this loop runs, every
+// archetype (and its chunks) from the archetype loop above it already exists,
+// so a corrupted chunkIndex would otherwise be stored raw -- later making a
+// GetComponent/iteration index a chunk out of bounds (OOB read/write). A bad
+// archetypeIndex used to be silently skipped rather than rejected; that is
+// also covered here indirectly (this test corrupts chunkIndex, not
+// archetypeIndex, but both paths share the same "return false" convention).
+//
+// Rationale for how this is built: pinning a stable byte offset into a real
+// Registry::Save() (header + EntityManager + ArchetypeManager + Archetype +
+// RelationshipGraph) to flip one chunkIndex byte is brittle, for the same
+// reason noted above ChunkEntityCountOverCapacityIsRejected. ArchetypeManager
+// has its own well-defined wire format (visible directly above Deserialize,
+// in ArchetypeManager::Serialize, which itself calls Archetype::Serialize per
+// archetype), so this test builds a minimal single-archetype (root/empty
+// mask), single-chunk, single-entity buffer by hand with BinaryWriter --
+// mirroring that field order -- and calls ArchetypeManager::Deserialize
+// directly. Using the empty-mask root archetype means descriptorCount == 0,
+// so no component payload needs to be hand-encoded (no compression, no
+// per-component serializer to mimic) -- keeping the buffer anchored purely to
+// ArchetypeManager's + Archetype's fixed-field wire format.
+TEST(LoadRobustness, EntityMapChunkIndexOutOfRangeIsRejected)
+{
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+
+        writer(static_cast<uint32_t>(1));   // archetypeCount = 1 (root only)
+        writer(static_cast<uint32_t>(1));   // entityCount = 1
+
+        // Archetype record 0: the root archetype (empty mask), one chunk,
+        // one entity, no components.
+        writer(static_cast<uint32_t>(0));   // archetype index
+
+        Astra::ComponentMask mask;          // default-constructed -> all-zero (empty) mask
+        for (size_t i = 0; i < Astra::ComponentMask::WORD_COUNT; ++i)
+        {
+            writer(mask.Data()[i]);
+        }
+
+        writer(static_cast<uint64_t>(1));   // archetype entityCount
+        writer(static_cast<uint64_t>(4));   // entitiesPerChunk (real chunk capacity)
+        writer(static_cast<uint32_t>(1));   // chunkCount = 1
+
+        writer(static_cast<uint32_t>(0));   // descriptorCount = 0 (no components)
+
+        // Chunk 0: one entity, no component arrays to follow (descriptorCount == 0).
+        writer(static_cast<uint32_t>(1));   // chunkEntityCount
+        writer(Astra::Entity(1, 1));        // entities[0]
+
+        // Trailing per-archetype entity count (ArchetypeManager::Serialize
+        // writes this immediately after Archetype::Serialize returns).
+        writer(static_cast<uint64_t>(1));
+
+        // Entity-to-archetype mapping: valid archetypeIndex (0), but the
+        // archetype above has only one chunk (index 0) -- chunkIndex here is
+        // corrupted to reference a chunk that does not exist.
+        writer(Astra::Entity(1, 1));                  // entity
+        writer(static_cast<uint32_t>(0));              // archetypeIndex - valid
+        writer(static_cast<uint32_t>(0xFFFFFFFFu));     // chunkIndex - out of range
+        writer(static_cast<uint32_t>(0));              // entityIndex
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::ArchetypeManager manager(cr);
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    const bool ok = manager.Deserialize(reader);
+    EXPECT_FALSE(ok);   // must fail cleanly -- no OOB store, no crash
 }
