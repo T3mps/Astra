@@ -7,6 +7,8 @@
 #include "Astra/Archetype/Archetype.hpp"
 #include "Astra/Archetype/ArchetypeManager.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
+#include "Astra/Entity/EntityManager.hpp"
+#include "Astra/Registry/RelationshipGraph.hpp"
 #include "Astra/Serialization/BinaryReader.hpp"
 #include "../TestComponents.hpp"
 
@@ -214,4 +216,67 @@ TEST(LoadRobustness, EntityMapChunkIndexOutOfRangeIsRejected)
     Astra::BinaryReader reader{std::span<const std::byte>(buf)};
     const bool ok = manager.Deserialize(reader);
     EXPECT_FALSE(ok);   // must fail cleanly -- no OOB store, no crash
+}
+
+// EntityManager::Deserialize must not let a corrupted recycledCount drive a
+// multi-GB std::vector::reserve.
+//
+// Rationale for how this is built: same as the tests above -- pinning a byte
+// offset into a full Registry::Save() is brittle because it depends on the
+// header + EntityManager's own layout together. EntityManager::Deserialize is
+// a self-contained static method with its own well-defined wire format
+// (visible directly above it, in EntityManager::Serialize), so this test
+// hand-builds just that method's prefix by hand with BinaryWriter --
+// mirroring Serialize's field order and types exactly through recycledCount
+// -- and calls EntityManager::Deserialize directly. Nothing follows the
+// corrupted count, so Remaining() is 0 and no count could justify it.
+TEST(LoadRobustness, EntityManagerRecycledCountOverBufferIsRejected)
+{
+    using IDType = Astra::EntityManager::IDType;
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+
+        // Table config fields, in EntityManager::Serialize's exact order/types.
+        writer(static_cast<IDType>(1024));           // entitiesPerSegment
+        writer(static_cast<IDType>(10));              // entitiesPerSegmentShift
+        writer(static_cast<IDType>(1023));             // entitiesPerSegmentMask
+        writer(0.1f);                                   // releaseThreshold
+        writer(true);                                    // autoRelease
+        writer(static_cast<uint64_t>(2));                 // maxEmptySegments
+
+        writer(static_cast<IDType>(5));                    // ID stack nextFreshID
+
+        // Corrupted: claims ~4 billion recycled entries; nothing follows.
+        writer(static_cast<uint32_t>(0xFFFFFFFFu));          // recycledCount
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    auto result = Astra::EntityManager::Deserialize(reader);
+    EXPECT_TRUE(result.IsErr());   // must fail cleanly -- no multi-GB reserve
+}
+
+// RelationshipGraph::Deserialize must not let a corrupted parentCount drive a
+// multi-GB FlatMap::Reserve.
+//
+// Rationale for how this is built: same self-contained-wire-format reasoning
+// as EntityManagerRecycledCountOverBufferIsRejected above.
+// RelationshipGraph::Serialize's wire format opens with parentCount as a
+// uint32_t, followed by that many (child, parent) Entity::StorageType pairs;
+// this test hand-builds just the corrupted count with nothing following it.
+TEST(LoadRobustness, RelationshipGraphParentCountOverBufferIsRejected)
+{
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+        writer(static_cast<uint32_t>(0xFFFFFFFFu));   // parentCount, corrupted
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    auto result = Astra::RelationshipGraph::Deserialize(reader);
+    EXPECT_TRUE(result.IsErr());   // must fail cleanly -- no multi-GB reserve
 }
