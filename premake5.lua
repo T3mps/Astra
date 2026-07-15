@@ -8,6 +8,7 @@ workspace "Astra"
     
     IncludeDir = {}
     IncludeDir["Astra"] = "include"
+    IncludeDir["Mosaic"] = "ThirdParty/Mosaic/include"
     IncludeDir["GoogleTest"] = "vendor/GoogleTest/googletest/include"
     IncludeDir["GoogleMock"] = "vendor/GoogleTest/googlemock/include"
     IncludeDir["GoogleBenchmark"] = "vendor/GoogleBenchmark/include"
@@ -58,6 +59,7 @@ workspace "Astra"
             includedirs
             {
                 "%{IncludeDir.Astra}",
+                "%{IncludeDir.Mosaic}",
                 "%{IncludeDir.GoogleTest}",
                 "%{IncludeDir.GoogleMock}"
             }
@@ -145,6 +147,7 @@ workspace "Astra"
             includedirs
             {
                 "%{IncludeDir.Astra}",
+                "%{IncludeDir.Mosaic}",
                 "%{IncludeDir.GoogleBenchmark}",
                 "benchmark",  -- For local includes
                 "tests"       -- Reference pool reuse in benchmark tasks
@@ -265,7 +268,7 @@ workspace "Astra"
                 targetdir ("bin/" .. outputdir .. "/%{prj.name}")
                 objdir ("bin-int/" .. outputdir .. "/%{prj.name}")
                 files { sourceFile }
-                includedirs { "%{IncludeDir.Astra}" }
+                includedirs { "%{IncludeDir.Astra}", "%{IncludeDir.Mosaic}" }
                 filter "system:windows"
                     systemversion "latest"
                     buildoptions { "/Zc:__cplusplus", "/arch:AVX", "/bigobj" }

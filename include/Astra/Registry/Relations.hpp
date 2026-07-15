@@ -225,7 +225,7 @@ namespace Astra
             }
 
             constexpr size_t kBatchSize = 64;
-            m_scheduler->ParallelFor(count, kBatchSize, [&](size_t begin, size_t end)
+            m_scheduler->ParallelFor(count, kBatchSize, [&](size_t begin, size_t end, uint32_t /*worker*/)
             {
                 for (size_t i = begin; i < end; ++i)
                 {

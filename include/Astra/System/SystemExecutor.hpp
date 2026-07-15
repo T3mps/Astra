@@ -57,7 +57,7 @@ namespace Astra
                         context.registry->GetArchetypeManager()->GetStructuralChangeCounter();
 #endif
                     // Dispatch each system in the group as its own unit of work.
-                    m_scheduler->ParallelFor(group.size(), 1, [&](size_t begin, size_t end)
+                    m_scheduler->ParallelFor(group.size(), 1, [&](size_t begin, size_t end, uint32_t /*worker*/)
                     {
                         for (size_t i = begin; i < end; ++i)
                             context.systems[group[i]](*context.registry);

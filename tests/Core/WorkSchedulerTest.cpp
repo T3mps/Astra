@@ -14,7 +14,7 @@ namespace
         TestWorkerPool pool;
         constexpr size_t kCount = 100'000;
         std::vector<std::atomic<int>> hits(kCount);
-        pool.ParallelFor(kCount, 64, [&](size_t begin, size_t end)
+        pool.ParallelFor(kCount, 64, [&](size_t begin, size_t end, uint32_t)
         {
             for (size_t i = begin; i < end; ++i)
                 hits[i].fetch_add(1, std::memory_order_relaxed);
@@ -29,7 +29,7 @@ namespace
         for (int iter = 0; iter < 200; ++iter)
         {
             std::atomic<size_t> sum{0};
-            pool.ParallelFor(1000, 16, [&](size_t b, size_t e)
+            pool.ParallelFor(1000, 16, [&](size_t b, size_t e, uint32_t)
             {
                 sum.fetch_add(e - b, std::memory_order_relaxed);
             });
@@ -42,7 +42,7 @@ namespace
         TestWorkerPool pool;
         const auto caller = std::this_thread::get_id();
         std::atomic<bool> sameThread{true};
-        pool.ParallelFor(8, 64, [&](size_t, size_t)  // count <= minBatch
+        pool.ParallelFor(8, 64, [&](size_t, size_t, uint32_t)  // count <= minBatch
         {
             if (std::this_thread::get_id() != caller) sameThread = false;
         });
@@ -53,7 +53,7 @@ namespace
     {
         TestWorkerPool pool;
         bool called = false;
-        pool.ParallelFor(0, 16, [&](size_t, size_t) { called = true; });
+        pool.ParallelFor(0, 16, [&](size_t, size_t, uint32_t) { called = true; });
         EXPECT_FALSE(called);
     }
 
@@ -61,10 +61,10 @@ namespace
     {
         TestWorkerPool pool;
         std::atomic<size_t> inner{0};
-        pool.ParallelFor(4 * pool.WorkerCount() + 4, 1, [&](size_t b, size_t e)
+        pool.ParallelFor(4 * pool.WorkerCount() + 4, 1, [&](size_t b, size_t e, uint32_t)
         {
             for (size_t i = b; i < e; ++i)
-                pool.ParallelFor(10, 1, [&](size_t b2, size_t e2)  // must not deadlock
+                pool.ParallelFor(10, 1, [&](size_t b2, size_t e2, uint32_t)  // must not deadlock
                 {
                     inner.fetch_add(e2 - b2, std::memory_order_relaxed);
                 });
@@ -81,7 +81,7 @@ namespace
             callers.emplace_back([&]
             {
                 for (int i = 0; i < 50; ++i)
-                    pool.ParallelFor(500, 8, [&](size_t b, size_t e)
+                    pool.ParallelFor(500, 8, [&](size_t b, size_t e, uint32_t)
                     {
                         total.fetch_add(e - b, std::memory_order_relaxed);
                     });
@@ -93,9 +93,9 @@ namespace
     TEST(WorkerPool, ExplicitThreadCount)
     {
         TestWorkerPool pool(2);
-        EXPECT_EQ(pool.WorkerCount(), 2u);
+        EXPECT_EQ(pool.WorkerCount(), 3u);
         std::atomic<size_t> sum{0};
-        pool.ParallelFor(10'000, 64, [&](size_t b, size_t e) { sum += e - b; });
+        pool.ParallelFor(10'000, 64, [&](size_t b, size_t e, uint32_t) { sum += e - b; });
         EXPECT_EQ(sum.load(), 10'000u);
     }
 }

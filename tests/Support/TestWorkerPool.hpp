@@ -3,7 +3,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -25,7 +24,7 @@ namespace Astra::Testing
             }
             m_threads.reserve(threadCount);
             for (size_t i = 0; i < threadCount; ++i)
-                m_threads.emplace_back([this] { WorkerLoop(); });
+                m_threads.emplace_back([this, i] { WorkerLoop(static_cast<uint32_t>(i)); });
         }
 
         ~TestWorkerPool() override
@@ -42,7 +41,7 @@ namespace Astra::Testing
         TestWorkerPool& operator=(const TestWorkerPool&) = delete;
 
         void ParallelFor(size_t count, size_t minBatch,
-                         const std::function<void(size_t, size_t)>& fn) override
+                         Mosaic::FunctionRef<void(size_t, size_t, uint32_t)> fn) override
         {
             if (count == 0)
                 return;
@@ -54,14 +53,17 @@ namespace Astra::Testing
             // so cross-pool nesting also inlines — acceptable for a test pool.
             if (count <= minBatch || m_threads.empty() || t_insideWorker)
             {
-                fn(0, count);
+                // Worker id: this thread's own lane if we are a pool worker, else
+                // the caller lane (== m_threads.size(), the id reserved for the
+                // participating caller in WorkerCount()'s inclusive count).
+                fn(0, count, t_insideWorker ? t_workerId : static_cast<uint32_t>(m_threads.size()));
                 return;
             }
 
             std::lock_guard submitLock(m_submitMutex);
 
             auto job = std::make_shared<Job>();
-            job->fn = &fn;
+            job->fn = fn;                 // a non-owning view; the caller's callable outlives this blocking call
             job->count = count;
             job->batch = minBatch;
 
@@ -72,6 +74,7 @@ namespace Astra::Testing
             }
             m_wakeCv.notify_all();
 
+            t_workerId = static_cast<uint32_t>(m_threads.size());  // caller runs as the reserved caller lane
             t_insideWorker = true;   // nested ParallelFor from the caller's own batches must inline
             RunJob(*job);            // caller participates
             t_insideWorker = false;
@@ -88,23 +91,26 @@ namespace Astra::Testing
             }
         }
 
-        ASTRA_NODISCARD size_t WorkerCount() const noexcept override
+        // Inclusive of the participating caller (>= 1), per the reconciled Mosaic
+        // contract: N pool threads + the caller lane.
+        ASTRA_NODISCARD uint32_t WorkerCount() const noexcept override
         {
-            return m_threads.size();
+            return static_cast<uint32_t>(m_threads.size()) + 1u;
         }
 
     private:
         struct Job
         {
-            const std::function<void(size_t, size_t)>* fn = nullptr;
+            Mosaic::FunctionRef<void(size_t, size_t, uint32_t)> fn{};
             size_t count = 0;
             size_t batch = 1;
             std::atomic<size_t> next{0};
             std::atomic<size_t> active{0};
         };
 
-        void WorkerLoop()
+        void WorkerLoop(uint32_t workerId)
         {
+            t_workerId = workerId;
             t_insideWorker = true;
             uint64_t seen = 0;
             for (;;)
@@ -130,7 +136,7 @@ namespace Astra::Testing
             while ((i = job.next.fetch_add(job.batch, std::memory_order_relaxed)) < job.count)
             {
                 const size_t end = i + job.batch < job.count ? i + job.batch : job.count;
-                (*job.fn)(i, end);
+                job.fn(i, end, t_workerId);
             }
             if (job.active.fetch_sub(1, std::memory_order_acq_rel) == 1)
             {
@@ -140,6 +146,7 @@ namespace Astra::Testing
         }
 
         inline static thread_local bool t_insideWorker = false;
+        inline static thread_local uint32_t t_workerId = 0;   // pool threads: 0..N-1; caller lane: N
 
         std::vector<std::thread> m_threads;
         std::mutex m_mutex;

@@ -1,0 +1,23 @@
+# Build outputs
+bin/
+bin-int/
+
+# Generated project files (premake output)
+ide/
+ide-md/
+.vs/
+*.sln
+*.slnx
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.user
+
+# gmake2 output (Part B / Linux)
+Makefile
+*.make
+
+# Editor / OS
+.idea/
+.DS_Store
+Thumbs.db

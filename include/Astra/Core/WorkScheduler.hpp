@@ -1,42 +1,31 @@
 #pragma once
 
-#include <cstddef>
-#include <functional>
+// Astra::IWorkScheduler -- the shared Mosaic data-parallel seam.
+//
+// The threading interface Astra iterates through was reconciled with the sibling
+// Starworks libraries (Manifold2D, the Arcane engine) into ONE canonical
+// contract that now lives in Mosaic, the zero-dependency shared-core library.
+// Astra consumes it here as Astra::IWorkScheduler -- a using-alias, NOT a second
+// copy: one definition, no drift. Astra deliberately creates NO threads; when no
+// scheduler is provided (Registry::Config::workScheduler is null) every
+// Parallel* API executes sequentially inline. Hook up the job system of your
+// choice in the host application (e.g. an enkiTS-backed adapter).
+//
+// The reconciled ParallelFor differs from Astra's prior local seam in two ways,
+// both strict upgrades: (1) the callback gained a per-lane `worker` id -- in
+// [0, WorkerCount()), distinct for each concurrently-running sub-range, so a
+// callback may index per-worker scratch without locking; and (2) it takes the
+// callback by zero-alloc Mosaic::FunctionRef instead of const std::function&.
+// See Mosaic/Jobs/WorkScheduler.hpp for the full memory-model + worker-id
+// contract (happens-before in both directions, no-throw, no OS-thread migration
+// mid-fn, re-entrancy). WorkerCount() is now inclusive of the calling thread
+// (always >= 1) -- the batch-size denominator.
+
+#include <Mosaic/Jobs/WorkScheduler.hpp>
 
 #include "Base.hpp"
 
 namespace Astra
 {
-    // Astra deliberately creates NO threads. Every Parallel* API accepts an
-    // implementation of this seam (see Registry::Config::workScheduler);
-    // when none is provided, the API executes sequentially inline. Hook up
-    // the job system of your choice in the host application (e.g. an
-    // enkiTS-backed adapter) -- Astra itself stays scheduler-agnostic.
-    class IWorkScheduler
-    {
-    public:
-        virtual ~IWorkScheduler() = default;
-
-        // Partition [0, count) into batches of at least minBatch and invoke
-        // fn(begin, end) for each batch, possibly concurrently. Blocks until
-        // all batches complete. Must be safe to call from multiple threads
-        // and re-entrantly from inside fn (implementations may degrade to
-        // inline execution in either case).
-        // Memory model: implementations MUST establish a happens-before edge in
-        // BOTH directions: (1) from the ParallelFor call site to the start of
-        // every fn invocation (writes made before ParallelFor are visible inside
-        // fn), and (2) from the completion of every fn invocation to the return
-        // of ParallelFor (writes made inside fn are visible to the caller after).
-        // Every conforming scheduler (std::execution::par, TBB parallel_for, a
-        // task pool) already provides both; Astra's correctness depends on it.
-        // fn must not throw (Astra is exception-free), and must not suspend
-        // or migrate OS threads mid-invocation: Astra uses thread identity
-        // (thread_local) for per-thread state such as ParallelCommandBuffer.
-        // Fiber-based schedulers must pin tasks for the duration of fn.
-        virtual void ParallelFor(size_t count, size_t minBatch,
-                                 const std::function<void(size_t, size_t)>& fn) = 0;
-
-        // Number of scheduler-owned threads; the calling thread may additionally participate in ParallelFor.
-        ASTRA_NODISCARD virtual size_t WorkerCount() const noexcept = 0;
-    };
+    using Mosaic::IWorkScheduler;
 }

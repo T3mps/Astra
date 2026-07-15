@@ -165,7 +165,7 @@ namespace Astra
             }
 
             m_scheduler->ParallelFor(chunkWork.size(), MIN_CHUNKS_PER_THREAD,
-                [&](size_t begin, size_t end)
+                [&](size_t begin, size_t end, uint32_t /*worker*/)
                 {
                     for (size_t w = begin; w < end; ++w)
                     {

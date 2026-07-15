@@ -56,12 +56,12 @@ namespace
                 std::make_shared<Astra::Testing::TestWorkerPool>();
             std::atomic<int> calls{0};
             void ParallelFor(size_t count, size_t minBatch,
-                             const std::function<void(size_t, size_t)>& fn) override
+                             Mosaic::FunctionRef<void(size_t, size_t, uint32_t)> fn) override
             {
                 calls.fetch_add(1);
                 inner->ParallelFor(count, minBatch, fn);
             }
-            size_t WorkerCount() const noexcept override { return inner->WorkerCount(); }
+            uint32_t WorkerCount() const noexcept override { return inner->WorkerCount(); }
         };
 
         auto sched = std::make_shared<CountingScheduler>();
