@@ -347,6 +347,60 @@ namespace Astra
                 return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(reader.GetError());
             }
 
+            // Validate the segment-config trio BEFORE anything derives sizing or
+            // indexing from it. EntityTable::GetOrCreateSegment computes
+            // `segIdx = id >> entitiesPerSegmentShift` and then resizes
+            // m_segmentIndex to segIdx + 1, and Segment allocates
+            // `versions[entitiesPerSegment]` with ToLocal(id) = id - baseID guarded
+            // only by an ASTRA_ASSERT (compiled out in Release/Dist). A valid save
+            // (EntityManager::Serialize above) always writes a mutually consistent
+            // triple: entitiesPerSegment is a power of two, shift ==
+            // log2(entitiesPerSegment), and mask == entitiesPerSegment - 1.
+            // Corrupting any one of the three decouples segment sizing from
+            // indexing and can otherwise drive a multi-GB m_segmentIndex resize, a
+            // heap OOB write into Segment::versions[], or the ToLocal fail-fast --
+            // none of which is recoverable once reached. Reject unless all of the
+            // following hold, mirroring the reader's existing failure convention.
+            {
+                const IDType entitiesPerSegment = manager->m_config.tableConfig.entitiesPerSegment;
+                const IDType entitiesPerSegmentShift = manager->m_config.tableConfig.entitiesPerSegmentShift;
+                const IDType entitiesPerSegmentMask = manager->m_config.tableConfig.entitiesPerSegmentMask;
+
+                // (1) entitiesPerSegment must be nonzero and a power of two.
+                const bool isPowerOfTwo = entitiesPerSegment != 0 &&
+                    (entitiesPerSegment & static_cast<IDType>(entitiesPerSegment - 1)) == 0;
+
+                // (2) entitiesPerSegmentShift must be a valid shift amount for
+                // IDType (otherwise `1 << shift` and `id >> shift` are UB) and must
+                // reproduce entitiesPerSegment exactly. Short-circuits before the
+                // shift so an out-of-range amount is never evaluated.
+                constexpr size_t kIDTypeBits = sizeof(IDType) * 8;
+                const bool shiftInRange = entitiesPerSegmentShift < kIDTypeBits;
+                const bool shiftMatches = shiftInRange &&
+                    static_cast<IDType>(IDType{1} << entitiesPerSegmentShift) == entitiesPerSegment;
+
+                // (3) entitiesPerSegmentMask must be entitiesPerSegment - 1.
+                const bool maskMatches = entitiesPerSegmentMask == static_cast<IDType>(entitiesPerSegment - 1);
+
+                // (4) Absolute sanity cap so a consistent-but-absurd triple can't
+                // drive a huge per-segment allocation (entitiesPerSegment *
+                // sizeof(VersionType) bytes for Segment::versions[]).
+                // EntityTable::Config::DEFAULT_ENTITIES_PER_SEGMENT is 65536 (64K,
+                // the default 32-bit-ID/8-bit-version build); this cap leaves
+                // comfortable headroom above that (and above any smaller ID-space
+                // clamp for narrower ID configurations) while still keeping the
+                // resulting allocation sane. Widened to uint64_t for the
+                // comparison so this is correct across every IDType width the
+                // library supports (16/32/64-bit), not just the default 32-bit one.
+                constexpr uint64_t kMaxEntitiesPerSegment = uint64_t{1} << 22; // 4,194,304
+                const bool withinSanityCap = static_cast<uint64_t>(entitiesPerSegment) <= kMaxEntitiesPerSegment;
+
+                if (!isPowerOfTwo || !shiftMatches || !maskMatches || !withinSanityCap)
+                {
+                    return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(SerializationError::CorruptedData);
+                }
+            }
+
             // Read ID stack state
             IDType nextFreshID;
             reader(nextFreshID);
