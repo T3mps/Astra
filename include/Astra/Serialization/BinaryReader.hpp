@@ -203,6 +203,11 @@ namespace Astra
             if (compressedSize == 0)
             {
                 // Data is uncompressed
+                if (originalSize > Remaining())
+                {
+                    m_error = SerializationError::CorruptedData;
+                    return Result<std::vector<uint8_t>, SerializationError>::Err(SerializationError::CorruptedData);
+                }
                 std::vector<uint8_t> data(originalSize);
                 ReadBytes(data.data(), originalSize);
                 
@@ -301,7 +306,7 @@ namespace Astra
             // For non-POD types, just check that we have some data left
             if constexpr (std::is_trivially_copyable_v<T>)
             {
-                if (size * sizeof(T) > (m_size - m_position))
+                if (size > (m_size - m_position) / sizeof(T))
                 {
                     m_error = SerializationError::CorruptedData;
                     return *this;
@@ -531,6 +536,27 @@ namespace Astra
             return *this;
         }
         
+        // Bytes not yet consumed. Invariant m_position <= m_size (ReadBytes enforces it) → no underflow.
+        [[nodiscard]] size_t Remaining() const noexcept { return m_size - m_position; }
+
+        // Read a uint64 element-count, rejecting it if it exceeds what the remaining buffer could hold:
+        // N elements need at least N*minBytesPerElement bytes downstream, so N > Remaining()/per cannot be
+        // real. Bounds every reserve/loop against input size (the standard "length <= remaining" rule) and
+        // doubles as a truncation detector. On rejection: m_error = CorruptedData, returns 0.
+        [[nodiscard]] uint64_t ReadBoundedCount(size_t minBytesPerElement)
+        {
+            uint64_t count = 0;
+            (*this)(count);
+            if (HasError()) return 0;
+            const size_t per = (minBytesPerElement == 0) ? 1 : minBytesPerElement;
+            if (count > static_cast<uint64_t>(Remaining() / per))
+            {
+                m_error = SerializationError::CorruptedData;
+                return 0;
+            }
+            return count;
+        }
+
         /**
          * Read a component hash
          */
