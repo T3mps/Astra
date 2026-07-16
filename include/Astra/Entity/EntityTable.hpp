@@ -440,7 +440,13 @@ namespace Astra
 
             bool Contains(IDType id) const noexcept
             {
-                return id >= baseID && id < baseID + capacity;
+                // id - baseID (not baseID + capacity) avoids overflow-wrapping
+                // when baseID is near IDType max: the short-circuited id >=
+                // baseID guarantees id - baseID cannot itself underflow, so
+                // this is equivalent to the old check for every id/baseID
+                // pair that doesn't overflow, and correct for the pairs that
+                // would have.
+                return id >= baseID && (id - baseID) < capacity;
             }
 
             size_t ToLocal(IDType id) const noexcept

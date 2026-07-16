@@ -437,6 +437,22 @@ namespace Astra
                 VersionType nextVersion;
                 reader(id);
                 reader(nextVersion);
+
+                // Reject a corrupted id before it can be handed back out by a
+                // later Allocate() and flow into EntityTable::SetVersion /
+                // GetOrCreateSegment: those compute segIdx = id >> shift and
+                // index/resize m_segmentIndex by it, and Segment::ToLocal's
+                // bounds check is only an ASTRA_ASSERT (compiled out in
+                // Release/Dist). A legitimately-recycled id is always <
+                // Entity::ID_MASK -- Allocate()/AllocateBatch() never hand out
+                // ID_MASK itself, it's reserved as the "IDs exhausted"
+                // sentinel -- so anything >= ID_MASK cannot come from a valid
+                // save.
+                if (id >= Entity::ID_MASK)
+                {
+                    return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(SerializationError::CorruptedData);
+                }
+
                 recycledEntries.push_back({id, nextVersion});
             }
 
@@ -479,7 +495,20 @@ namespace Astra
                 {
                     return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(reader.GetError());
                 }
-                
+
+                // Reject before SetVersion(id, ...) resolves/creates a segment
+                // and indexes into it -- see the recycled-entry check above
+                // for why a legitimate id must be < Entity::ID_MASK. Without
+                // this, a corrupted id near IDType max makes
+                // Segment::Contains's `id < baseID + capacity` overflow-wrap,
+                // firing Segment::ToLocal's ASTRA_ASSERT (an uncatchable abort
+                // in Debug) or, if it happened to pass, driving an enormous
+                // m_segmentIndex resize.
+                if (id >= Entity::ID_MASK)
+                {
+                    return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(SerializationError::CorruptedData);
+                }
+
                 manager->m_table.SetVersion(id, version);
             }
             
