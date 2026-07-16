@@ -220,7 +220,22 @@ namespace Astra
             }
             else
             {
-                // Data is compressed
+                // Data is compressed. Bound compressedSize against the remaining
+                // buffer BEFORE allocating -- unlike the uncompressed branch above,
+                // this branch used to allocate std::vector<uint8_t>(compressedSize)
+                // first and only let the ReadBytes call below discover the
+                // truncation. compressedSize is a raw uint32_t straight off the
+                // wire, so a corrupted save can claim up to ~4GB: the allocation
+                // (and its zero-init) happened regardless of how few bytes actually
+                // remained, before any bounds check got a chance to reject it. The
+                // compressed bytes must be present in the buffer for a valid save,
+                // so this can never false-reject a legitimate one.
+                if (compressedSize > Remaining())
+                {
+                    m_error = SerializationError::CorruptedData;
+                    return Result<std::vector<uint8_t>, SerializationError>::Err(SerializationError::CorruptedData);
+                }
+
                 std::vector<uint8_t> compressedData(compressedSize);
                 ReadBytes(compressedData.data(), compressedSize);
                 

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -65,6 +66,60 @@ TEST(LoadRobustness, VectorReadRejectsOverflowingSize)
     std::vector<uint64_t> v;
     reader(v);                              // must set error, NOT resize(2^61)
     EXPECT_TRUE(reader.HasError());
+}
+
+// BinaryReader::ReadCompressedBlock's COMPRESSED branch allocates
+// `std::vector<uint8_t> compressedData(compressedSize)` BEFORE calling
+// ReadBytes to actually read that many bytes -- unlike the sibling
+// UNCOMPRESSED branch a few lines above it, which already checks
+// `originalSize > Remaining()` before allocating. compressedSize is a raw
+// uint32_t read straight off the wire, so a corrupted save can claim up to
+// ~4GB: the allocation (and its zero-init) happens regardless of how few
+// bytes actually remain in the buffer, before ReadBytes' own bounds check
+// ever gets a chance to reject it. That is an uncontrolled multi-GB
+// allocation attempt (and, since Astra is built with exceptions off, a
+// std::bad_alloc from it is not a catchable Result -- it is a process abort)
+// reachable from a hand-corrupted save, not just a theoretical concern.
+//
+// Rationale for how this is built: ReadCompressedBlock is a small,
+// self-contained BinaryReader method with its own well-defined two-field
+// wire prefix (originalSize, then compressedSize, both uint32_t -- see the
+// method just above BinaryReader's Serialize-side counterpart,
+// WriteCompressedBlock, in BinaryWriter.hpp), so this test hand-builds just
+// that prefix and calls ReadCompressedBlock directly rather than routing
+// through a full Registry::Save()/Load() (which would need to be coaxed into
+// actually emitting a compressed block in the first place). Nothing follows
+// the corrupted compressedSize, so Remaining() is 0 once it's read.
+TEST(LoadRobustness, ReadCompressedBlockRejectsOversizedCompressedSize)
+{
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+        writer(static_cast<uint32_t>(64));           // originalSize -- irrelevant once compressedSize is rejected
+        writer(static_cast<uint32_t>(0xFFFFFFF0u));  // compressedSize, corrupted: ~4GB, nothing follows it
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+
+    const auto start = std::chrono::steady_clock::now();
+    auto result = reader.ReadCompressedBlock();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    EXPECT_TRUE(result.IsErr());     // must fail cleanly -- no bad_alloc/abort
+    EXPECT_TRUE(reader.HasError());
+    EXPECT_EQ(reader.GetError(), Astra::SerializationError::CorruptedData);
+
+    // The functional Err/Ok result alone cannot distinguish "rejected before
+    // allocating" from "allocated ~4GB, zero-initialized it, THEN rejected
+    // when ReadBytes' own bounds check catches the truncation" -- both paths
+    // return Err (confirmed: without the fix below, this test's Err/HasError
+    // assertions above already pass, taking ~1.2s locally to allocate and
+    // zero-init the ~4GB vector first). The compressedSize > Remaining()
+    // guard must reject BEFORE any allocation, so the whole call is
+    // submillisecond; this bound is two orders of magnitude below the
+    // unguarded cost, so it isn't sensitive to normal scheduling jitter.
+    EXPECT_LT(elapsed, std::chrono::milliseconds(250));
 }
 
 // A chunk claiming more entities than its capacity must be rejected before
