@@ -1473,6 +1473,11 @@ namespace Astra
                 Result<std::vector<std::byte>, SerializationError>::Ok(std::move(buffer));
         }
 
+        // Load validates structural integrity enough to fail cleanly -- returning
+        // Err(SerializationError) -- on truncated, corrupt, or version-skewed input, without
+        // out-of-bounds access, unbounded allocation, or hangs. It is NOT a security boundary:
+        // it does not guarantee rejection of every maliciously-crafted archive, and callers must
+        // not load saves from untrusted sources without their own validation.
         static Result<std::unique_ptr<Registry>, SerializationError> Load(const std::filesystem::path& path, std::shared_ptr<ComponentRegistry> componentRegistry)
         {
             BinaryReader reader(path);

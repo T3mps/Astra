@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <span>
 #include <vector>
@@ -8,6 +9,7 @@
 #include "Astra/Archetype/ArchetypeManager.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
 #include "Astra/Entity/EntityManager.hpp"
+#include "Astra/Registry/Registry.hpp"
 #include "Astra/Registry/Relations.hpp"
 #include "Astra/Registry/RelationshipGraph.hpp"
 #include "Astra/Serialization/BinaryReader.hpp"
@@ -407,4 +409,323 @@ TEST(LoadRobustness, CyclicParentMapDoesNotAbortForEachAncestor)
     // m_archetypeManager is null.
     relations.ForEachAncestor([](Astra::Entity, size_t) {});
     SUCCEED();   // reaching here proves the traversal did not abort the process
+}
+
+// Task 6: the offset-agnostic integration net over the whole robustness floor
+// (Tasks 1-5b). Rather than pinning to one field's byte offset the way the
+// tests above do, this builds one real, rich Registry::Save() -- several
+// entities, multiple component types (trivial and non-trivial/Name), a
+// parent/child relationship, and a recycled entity slot (destroy then create
+// again so the free list is exercised) -- and truncates it at every possible
+// prefix length. Every prefix, from empty to full, must make Registry::Load
+// return Ok or Err; it must never crash, read/write out of bounds, or hang.
+// Reaching the next loop iteration (and eventually SUCCEED()) is the
+// assertion -- there is no meaningful expectation on the Result itself,
+// since most prefixes are legitimately corrupt and are expected to Err.
+TEST(LoadRobustness, TruncationSweepNeverCrashes)
+{
+    using namespace Astra::Test;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<Position, Velocity, Health, Name>();
+    auto a = reg.CreateEntityWith(Position{1, 2, 3}, Velocity{4, 5, 6});
+    auto b = reg.CreateEntityWith(Health{100, 100}, Name{"child"});
+    reg.SetParent(b, a);
+    reg.DestroyEntity(reg.CreateEntity());   // create a recycled slot
+
+    auto saved = reg.Save();
+    ASSERT_TRUE(saved.IsOk());
+    const std::vector<std::byte> full = std::move(*saved.GetValue());
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+    cr->RegisterComponents<Position, Velocity, Health, Name>();
+
+    // Every truncation prefix must return Ok or Err -- never crash/OOB/hang.
+    for (size_t len = 0; len <= full.size(); ++len)
+    {
+        std::vector<std::byte> t(full.begin(), full.begin() + len);
+        auto r = Astra::Registry::Load(t, cr);
+        (void)r;   // reaching the next iteration is the assertion
+    }
+    SUCCEED();
+}
+
+// Task 6, part two: same reasoning as TruncationSweepNeverCrashes above, but
+// instead of truncating, this corrupts a real Registry::Save() in place --
+// every aligned 4-byte window is overwritten with 0xFFFFFFFF (the pattern
+// most likely to turn a count/index field into a huge or out-of-range value)
+// and separately with 0x00000000 -- and asserts Load still only ever returns
+// Ok or Err for each corrupted copy. Together with the truncation sweep this
+// exercises every buffer-derived bound and OOB guard added across Tasks 1-5b
+// without depending on any single field's byte offset.
+TEST(LoadRobustness, ByteCorruptionSweepNeverCrashes)
+{
+    using namespace Astra::Test;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<Position, Velocity, Health, Name>();
+    reg.CreateEntityWith(Position{1, 2, 3}, Velocity{4, 5, 6});
+    reg.CreateEntityWith(Health{9, 100}, Name{"x"});
+
+    auto saved = reg.Save();
+    ASSERT_TRUE(saved.IsOk());
+    const std::vector<std::byte> full = std::move(*saved.GetValue());
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+    cr->RegisterComponents<Position, Velocity, Health, Name>();
+
+    // Overwrite each aligned 4-byte window with 0xFFFFFFFF and with 0x00000000.
+    for (size_t off = 0; off + 4 <= full.size(); off += 4)
+    {
+        for (std::byte fill : { std::byte{0xFF}, std::byte{0x00} })
+        {
+            std::vector<std::byte> c = full;
+            for (int i = 0; i < 4; ++i) c[off + i] = fill;
+            auto r = Astra::Registry::Load(c, cr);
+            (void)r;
+        }
+    }
+    SUCCEED();
+}
+
+// EntityManager::Deserialize must validate that entitiesPerSegment,
+// entitiesPerSegmentShift, and entitiesPerSegmentMask form a mutually
+// consistent power-of-two triple BEFORE EntityTable ever sizes or indexes a
+// segment from them (GetOrCreateSegment / Segment::ToLocal). A valid save
+// always writes entitiesPerSegment as a power of two, shift ==
+// log2(entitiesPerSegment), and mask == entitiesPerSegment - 1; corrupting
+// any one of the three in isolation breaks that relationship and can
+// otherwise drive a multi-GB m_segmentIndex resize, a heap OOB write into
+// Segment::versions[], or the ASTRA_ASSERT fail-fast inside Segment::ToLocal
+// (compiled out in Release/Dist, but an uncatchable process abort in Debug).
+//
+// Rationale for how this is built: unlike the self-contained-wire-format
+// tests above, this test corrupts a REAL Registry::Save() buffer in place,
+// because the byte offset of EntityManager's config block is only stable
+// relative to the WHOLE-Registry format: a fixed 32-byte BinaryHeader
+// (static_assert'd to exactly 32 bytes -- see BinaryArchive.hpp), followed
+// immediately by EntityManager::Serialize's field order, which starts with
+// entitiesPerSegment, then entitiesPerSegmentShift, then
+// entitiesPerSegmentMask (each IDType-sized, back to back with no padding --
+// BinaryWriter's POD path writes exactly sizeof(T) bytes per field).
+TEST(LoadRobustness, EntityManagerSegmentConfigInconsistencyIsRejected)
+{
+    using namespace Astra::Test;
+    using IDType = Astra::EntityManager::IDType;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<Position, Velocity>();
+    reg.CreateEntityWith(Position{1, 2, 3}, Velocity{4, 5, 6});
+    reg.CreateEntityWith(Position{7, 8, 9}, Velocity{1, 1, 1});
+
+    auto saved = reg.Save();
+    ASSERT_TRUE(saved.IsOk());
+    const std::vector<std::byte> full = std::move(*saved.GetValue());
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+    cr->RegisterComponents<Position, Velocity>();
+
+    constexpr size_t kHeaderSize = 32;   // BinaryHeader is static_assert'd to exactly 32 bytes.
+    constexpr size_t kEntitiesPerSegmentOffset = kHeaderSize;
+    constexpr size_t kEntitiesPerSegmentShiftOffset = kHeaderSize + sizeof(IDType);
+    constexpr size_t kEntitiesPerSegmentMaskOffset = kHeaderSize + 2 * sizeof(IDType);
+
+    auto corruptedCopy = [&](size_t offset, IDType value)
+    {
+        std::vector<std::byte> c = full;
+        std::memcpy(c.data() + offset, &value, sizeof(value));
+        return c;
+    };
+
+    // entitiesPerSegment corrupted to 0 -- fails the nonzero-power-of-two check.
+    {
+        auto c = corruptedCopy(kEntitiesPerSegmentOffset, IDType{0});
+        auto r = Astra::Registry::Load(c, cr);
+        EXPECT_TRUE(r.IsErr());   // must fail cleanly -- no crash, no OOB
+    }
+
+    // entitiesPerSegment corrupted to an all-ones value -- nonzero, but not a
+    // power of two (multiple bits set).
+    {
+        auto c = corruptedCopy(kEntitiesPerSegmentOffset, static_cast<IDType>(~IDType{0}));
+        auto r = Astra::Registry::Load(c, cr);
+        EXPECT_TRUE(r.IsErr());
+    }
+
+    // entitiesPerSegmentShift corrupted -- entitiesPerSegment is untouched
+    // (still a valid power of two), but 1 << shift no longer reproduces it.
+    {
+        auto c = corruptedCopy(kEntitiesPerSegmentShiftOffset, IDType{31});
+        auto r = Astra::Registry::Load(c, cr);
+        EXPECT_TRUE(r.IsErr());
+    }
+
+    // entitiesPerSegmentMask corrupted -- entitiesPerSegment/shift are
+    // untouched, but mask no longer equals entitiesPerSegment - 1.
+    {
+        auto c = corruptedCopy(kEntitiesPerSegmentMaskOffset, static_cast<IDType>(~IDType{0}));
+        auto r = Astra::Registry::Load(c, cr);
+        EXPECT_TRUE(r.IsErr());
+    }
+}
+
+// Archetype::Deserialize's per-chunk sanity guard
+// (`entitiesPerChunk * perEntitySize + alignmentOverhead > poolChunkSize`) is
+// vacuous for the root (zero-component) archetype every registry always has:
+// perEntitySize is always 0 for it, so the product is always 0 and the guard
+// never rejects any entitiesPerChunk value. A corrupted entitiesPerChunk then
+// reaches ArchetypeChunkPool::Chunk's constructor, which unconditionally does
+// `m_entities.reserve(entitiesPerChunk)` with no bound against the pool's
+// actual chunk size -- an uncaught std::bad_alloc that violates the
+// never-throw / Result contract Registry::Load is built on.
+//
+// Rationale for how this is built: same reasoning as
+// EntityManagerSegmentConfigInconsistencyIsRejected above -- this corrupts a
+// REAL Registry::Save() buffer in place, because the byte offset of the root
+// archetype's entitiesPerChunk field is only stable relative to the WHOLE
+// on-disk format (BinaryHeader, then EntityManager::Serialize, then
+// ArchetypeManager::Serialize, then Archetype::Serialize for the root
+// archetype). An empty Registry (zero entities) is used so EntityManager's
+// variable-length alive/recycled sections contribute a fixed, known size,
+// making the offset arithmetic below exact rather than approximate.
+TEST(LoadRobustness, RootArchetypeEntitiesPerChunkUnboundedIsRejected)
+{
+    using IDType = Astra::EntityManager::IDType;
+
+    Astra::Registry reg;   // No entities created -- ArchetypeManager's
+                            // constructor still always creates the root
+                            // (zero-component) archetype, and it always
+                            // round-trips through Save/Load even when empty.
+
+    auto saved = reg.Save();
+    ASSERT_TRUE(saved.IsOk());
+    const std::vector<std::byte> full = std::move(*saved.GetValue());
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+
+    // Byte layout for an empty Registry::Save(), field-by-field from
+    // Registry::Save / EntityManager::Serialize / ArchetypeManager::Serialize
+    // / Archetype::Serialize (all POD fields, written back-to-back with no
+    // padding -- BinaryWriter::operator()(const T&) does
+    // WriteBytes(&value, sizeof(T))):
+    //   [0, 32)    BinaryHeader (static_assert'd to exactly 32 bytes)
+    //   EntityManager::Serialize (0 alive entities, 0 recycled entries):
+    //     entitiesPerSegment(IDType) + entitiesPerSegmentShift(IDType) +
+    //     entitiesPerSegmentMask(IDType) + releaseThreshold(float) +
+    //     autoRelease(bool) + maxEmptySegments(uint64_t) + nextFreshID(IDType)
+    //     + recycledCount(uint32_t)=0 + aliveCount(uint32_t)=0
+    //   ArchetypeManager::Serialize:
+    //     archetypeCount(uint32_t)=1 (root only) + entityMapCount(uint32_t)=0
+    //   Archetype record 0 (the root archetype):
+    //     archetype index(uint32_t)=0, then Archetype::Serialize:
+    //       ComponentMask (Astra::ComponentMask::WORD_COUNT * uint64_t words,
+    //       all zero for the root archetype) + m_entityCount(uint64_t)=0 +
+    //       m_entitiesPerChunk(uint64_t)  <-- target field
+    constexpr size_t kHeaderSize = 32;
+    constexpr size_t kEntityManagerBlockSize =
+        3 * sizeof(IDType) + sizeof(float) + sizeof(bool) + sizeof(uint64_t) +
+        sizeof(IDType) + sizeof(uint32_t) + sizeof(uint32_t);
+    constexpr size_t kArchetypeManagerHeaderSize = sizeof(uint32_t) + sizeof(uint32_t);
+    constexpr size_t kArchetypeIndexSize = sizeof(uint32_t);
+    constexpr size_t kMaskSize = Astra::ComponentMask::WORD_COUNT * sizeof(uint64_t);
+    constexpr size_t kEntitiesPerChunkOffset =
+        kHeaderSize + kEntityManagerBlockSize + kArchetypeManagerHeaderSize +
+        kArchetypeIndexSize + kMaskSize + sizeof(uint64_t) /* m_entityCount */;
+
+    ASSERT_GE(full.size(), kEntitiesPerChunkOffset + sizeof(uint64_t));
+
+    // Sanity-check the offset actually lands on the real field before
+    // corrupting it: the legitimate value there for the root
+    // (zero-component) archetype is always 256 (Archetype::Initialize's
+    // perEntitySize==0 fallback, already a power of two) -- this confirms
+    // the test isn't silently corrupting the wrong bytes if the wire format
+    // ever shifts.
+    uint64_t existing;
+    std::memcpy(&existing, full.data() + kEntitiesPerChunkOffset, sizeof(existing));
+    ASSERT_EQ(existing, 256u);
+
+    // Corrupt to a huge value -- same order of magnitude as the sweep's
+    // original repro (~1.1 TB in entity-count terms). perEntitySize is 0 for
+    // the root archetype, so the OLD guard's product term is always 0 and
+    // never rejects this, no matter how large entitiesPerChunk is.
+    const uint64_t corrupted = uint64_t{1} << 40;
+    std::vector<std::byte> c = full;
+    std::memcpy(c.data() + kEntitiesPerChunkOffset, &corrupted, sizeof(corrupted));
+
+    auto r = Astra::Registry::Load(c, cr);
+    EXPECT_TRUE(r.IsErr());   // must fail cleanly -- no std::bad_alloc thrown
+}
+
+// EntityManager::Deserialize's alive-entity restore loop reads each entity's
+// raw id and passes it straight to EntityTable::SetVersion, which resolves
+// (and may create) a segment via `segIdx = id >> shift` and then indexes into
+// it via Segment::ToLocal -- guarded only by an ASTRA_ASSERT, which compiles
+// out in Release/Dist. A corrupted id near IDType max makes
+// Segment::Contains's bounds check overflow-wrap, firing that assert as an
+// uncatchable process abort in Debug builds.
+//
+// Rationale for how this is built: same reasoning as
+// EntityManagerSegmentConfigInconsistencyIsRejected -- corrupts a REAL
+// Registry::Save() buffer in place, since the byte offset of an alive
+// entity's id field is only stable relative to the whole EntityManager
+// block, which itself is only stable relative to the fixed 32-byte
+// BinaryHeader. Two entities with no destroys keeps recycledCount at 0, so
+// the alive-entity records immediately follow aliveCount with no variable-
+// length recycled section in between.
+TEST(LoadRobustness, AliveEntityIdOutOfRangeIsRejected)
+{
+    using namespace Astra::Test;
+    using IDType = Astra::EntityManager::IDType;
+    using VersionType = Astra::EntityManager::VersionType;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<Position, Velocity>();
+    reg.CreateEntityWith(Position{1, 2, 3}, Velocity{4, 5, 6});
+    reg.CreateEntityWith(Position{7, 8, 9}, Velocity{1, 1, 1});
+
+    auto saved = reg.Save();
+    ASSERT_TRUE(saved.IsOk());
+    const std::vector<std::byte> full = std::move(*saved.GetValue());
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+    cr->RegisterComponents<Position, Velocity>();
+
+    constexpr size_t kHeaderSize = 32;   // BinaryHeader is static_assert'd to exactly 32 bytes.
+    constexpr size_t kEntitiesPerSegmentOffset = kHeaderSize;
+    constexpr size_t kEntitiesPerSegmentShiftOffset = kHeaderSize + sizeof(IDType);
+    constexpr size_t kEntitiesPerSegmentMaskOffset = kHeaderSize + 2 * sizeof(IDType);
+    constexpr size_t kReleaseThresholdOffset = kHeaderSize + 3 * sizeof(IDType);
+    constexpr size_t kAutoReleaseOffset = kReleaseThresholdOffset + sizeof(float);
+    constexpr size_t kMaxEmptySegmentsOffset = kAutoReleaseOffset + sizeof(bool);
+    constexpr size_t kNextFreshIDOffset = kMaxEmptySegmentsOffset + sizeof(uint64_t);
+    constexpr size_t kRecycledCountOffset = kNextFreshIDOffset + sizeof(IDType);
+    constexpr size_t kAliveCountOffset = kRecycledCountOffset + sizeof(uint32_t);
+    constexpr size_t kAliveEntitiesOffset = kAliveCountOffset + sizeof(uint32_t);
+    constexpr size_t kAliveEntityRecordSize = sizeof(IDType) + sizeof(VersionType);
+    // The second alive entity's id field -- matches where the byte-corruption
+    // sweep originally found this hole (offset ~76 for a similarly-shaped
+    // save; see task-7-report.md).
+    constexpr size_t kSecondAliveEntityIdOffset = kAliveEntitiesOffset + kAliveEntityRecordSize;
+
+    ASSERT_GE(full.size(), kSecondAliveEntityIdOffset + sizeof(IDType));
+
+    // Sanity-check the offset actually lands on a real, legitimate id before
+    // corrupting it (must be well under Entity::ID_MASK for a 2-entity save).
+    IDType existingId;
+    std::memcpy(&existingId, full.data() + kSecondAliveEntityIdOffset, sizeof(existingId));
+    ASSERT_LT(existingId, Astra::Entity::ID_MASK);
+
+    // Corrupt to IDType's max value -- mirrors the sweep's original repro
+    // (flipping an id's high 16 bits landed it near IDType max), which is
+    // what makes Segment::Contains's `id < baseID + capacity` overflow-wrap
+    // and fire the ASTRA_ASSERT fail-fast pre-fix. Also well past
+    // Entity::ID_MASK, the "IDs exhausted" sentinel Allocate()/
+    // AllocateBatch() never legitimately hand out, so the new bound must
+    // reject it regardless.
+    const IDType corrupted = std::numeric_limits<IDType>::max();
+    std::vector<std::byte> c = full;
+    std::memcpy(c.data() + kSecondAliveEntityIdOffset, &corrupted, sizeof(corrupted));
+
+    auto r = Astra::Registry::Load(c, cr);
+    EXPECT_TRUE(r.IsErr());   // must fail cleanly -- no abort, no OOB
 }
