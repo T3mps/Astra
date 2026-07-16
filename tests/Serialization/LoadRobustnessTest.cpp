@@ -784,3 +784,103 @@ TEST(LoadRobustness, AliveEntityIdOutOfRangeIsRejected)
     auto r = Astra::Registry::Load(c, cr);
     EXPECT_TRUE(r.IsErr());   // must fail cleanly -- no abort, no OOB
 }
+
+// EntityManager::Deserialize's segment-config validation (added in 36ee6a6)
+// checks that entitiesPerSegment/Shift/Mask form a mutually consistent
+// power-of-two triple, and caps entitiesPerSegment from above -- but has no
+// LOWER bound. {entitiesPerSegment=1, shift=0, mask=0} is internally
+// consistent (1 is a power of two, 1<<0==1, mask==1-1==0) and passes that
+// check untouched. With shift==0, EntityTable::GetOrCreateSegment's
+// `segIdx = id >> shift` becomes `segIdx = id`, so restoring even one
+// legitimate (well under Entity::ID_MASK, so it also passes the existing
+// id >= ID_MASK check) alive entity with a several-million id drives
+// `m_segmentIndex.resize(segIdx + 1)` to a several-million-entry
+// std::vector<size_t> -- tens of MB for one entity, unbounded as the id
+// grows. This must be rejected before EntityTable::SetVersion ever resolves
+// a segment from it.
+//
+// Rationale for how this is built: same self-contained-wire-format
+// reasoning as EntityManagerRecycledCountOverBufferIsRejected -- this
+// hand-builds EntityManager::Serialize's exact field order/types directly
+// with BinaryWriter rather than corrupting a real Registry::Save(), because
+// what matters here is the (config, id) pairing, not any particular save's
+// byte offsets.
+TEST(LoadRobustness, EntityManagerAliveIdSegmentIndexExplosionIsRejected)
+{
+    using IDType = Astra::EntityManager::IDType;
+    using VersionType = Astra::EntityManager::VersionType;
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+
+        // Table config fields, in EntityManager::Serialize's exact order/types.
+        writer(static_cast<IDType>(1));               // entitiesPerSegment -- corrupted: below the Config clamp floor (1024)
+        writer(static_cast<IDType>(0));               // entitiesPerSegmentShift -- consistent with entitiesPerSegment=1 (1<<0==1)
+        writer(static_cast<IDType>(0));               // entitiesPerSegmentMask -- consistent (1-1==0)
+        writer(0.1f);                                  // releaseThreshold
+        writer(true);                                   // autoRelease
+        writer(static_cast<uint64_t>(2));                // maxEmptySegments
+
+        writer(static_cast<IDType>(15'000'001));          // ID stack nextFreshID
+
+        writer(static_cast<uint32_t>(0));                  // recycledCount = 0
+
+        writer(static_cast<uint32_t>(1));                   // aliveCount = 1
+
+        // The one alive entity: id is legitimate (well under Entity::ID_MASK,
+        // ~16.7M for the default 32-bit-ID/8-bit-version build), so it passes
+        // the existing id >= Entity::ID_MASK check untouched -- the only thing
+        // wrong here is what the corrupted config turns it into (segIdx == id).
+        writer(static_cast<IDType>(15'000'000));            // id
+        writer(static_cast<VersionType>(1));                 // version
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    auto result = Astra::EntityManager::Deserialize(reader);
+    EXPECT_TRUE(result.IsErr());   // must fail cleanly -- no multi-MB m_segmentIndex resize
+}
+
+// Same hazard as EntityManagerAliveIdSegmentIndexExplosionIsRejected above,
+// but through the recycled-entry restore loop instead of the alive-entity
+// one. RestoreRecycledEntries() itself never touches EntityTable/segments
+// during Load -- the danger is deferred: the next legitimate Create() call
+// after Load hands this id back out via EntityIDStack::Allocate(), which
+// flows straight into EntityTable::SetVersion(id, ...) and the same
+// `segIdx = id >> shift` explosion, just outside of Load's own Result-based
+// error contract and far harder to trace back to the corrupted save. The
+// recycled-entry loop must reject this at Load time, before the id ever
+// re-enters circulation.
+TEST(LoadRobustness, EntityManagerRecycledIdSegmentIndexExplosionIsRejected)
+{
+    using IDType = Astra::EntityManager::IDType;
+    using VersionType = Astra::EntityManager::VersionType;
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+
+        writer(static_cast<IDType>(1));                // entitiesPerSegment -- corrupted: below the Config clamp floor (1024)
+        writer(static_cast<IDType>(0));                // entitiesPerSegmentShift
+        writer(static_cast<IDType>(0));                // entitiesPerSegmentMask
+        writer(0.1f);                                   // releaseThreshold
+        writer(true);                                    // autoRelease
+        writer(static_cast<uint64_t>(2));                 // maxEmptySegments
+
+        writer(static_cast<IDType>(15'000'001));           // ID stack nextFreshID
+
+        writer(static_cast<uint32_t>(1));                   // recycledCount = 1
+        writer(static_cast<IDType>(15'000'000));             // recycled id -- legitimate (< Entity::ID_MASK)
+        writer(static_cast<VersionType>(2));                  // recycled entry's nextVersion
+
+        writer(static_cast<uint32_t>(0));                      // aliveCount = 0
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    auto result = Astra::EntityManager::Deserialize(reader);
+    EXPECT_TRUE(result.IsErr());   // must fail cleanly -- no id re-enters circulation to explode later
+}
