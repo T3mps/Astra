@@ -554,22 +554,16 @@ namespace Astra
         // Bytes not yet consumed. Invariant m_position <= m_size (ReadBytes enforces it) → no underflow.
         [[nodiscard]] size_t Remaining() const noexcept { return m_size - m_position; }
 
-        // Read a uint64 element-count, rejecting it if it exceeds what the remaining buffer could hold:
+        // True if a count of `count` elements, each at least `minBytesPerElement` on disk, cannot fit in
+        // what remains -- i.e. the count is impossible for this buffer. Overflow-safe (divide, not multiply).
         // N elements need at least N*minBytesPerElement bytes downstream, so N > Remaining()/per cannot be
-        // real. Bounds every reserve/loop against input size (the standard "length <= remaining" rule) and
-        // doubles as a truncation detector. On rejection: m_error = CorruptedData, returns 0.
-        [[nodiscard]] uint64_t ReadBoundedCount(size_t minBytesPerElement)
+        // real; this is the standard "length <= remaining" length-prefix validation rule, applied at
+        // whatever width the on-disk count field actually is (every real count on the wire is a uint32_t,
+        // not the uint64_t this used to force via a dedicated read) after the caller has already read it.
+        [[nodiscard]] bool CountExceedsRemaining(uint64_t count, size_t minBytesPerElement) const noexcept
         {
-            uint64_t count = 0;
-            (*this)(count);
-            if (HasError()) return 0;
             const size_t per = (minBytesPerElement == 0) ? 1 : minBytesPerElement;
-            if (count > static_cast<uint64_t>(Remaining() / per))
-            {
-                m_error = SerializationError::CorruptedData;
-                return 0;
-            }
-            return count;
+            return count > static_cast<uint64_t>(Remaining() / per);
         }
 
         /**

@@ -473,16 +473,14 @@ namespace Astra
                 return Result<RelationshipGraph, SerializationError>::Err(reader.GetError());
             }
 
-            // Bound parentCount against the remaining buffer: the same "count <=
-            // remaining/minBytesPerElement" rule as BinaryReader::ReadBoundedCount,
-            // applied inline rather than by calling that helper directly, because
-            // ReadBoundedCount reads a uint64_t and parentCount is a uint32_t on
-            // disk (Serialize above writes it via writer(static_cast<uint32_t>(
+            // Bound parentCount against the remaining buffer via the reader's
+            // width-agnostic count-bound helper (parentCount is a uint32_t on
+            // disk; Serialize above writes it via writer(static_cast<uint32_t>(
             // m_parents.Size()))). Each parent-child pair's fixed on-disk
             // footprint is child.GetValue() + parent.GetValue(), both
             // Entity::StorageType, written unconditionally per pair below.
             constexpr uint64_t kMinBytesPerParentRecord = sizeof(Entity::StorageType) * 2;
-            if (static_cast<uint64_t>(parentCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerParentRecord)
+            if (reader.CountExceedsRemaining(parentCount, kMinBytesPerParentRecord))
             {
                 return Result<RelationshipGraph, SerializationError>::Err(SerializationError::CorruptedData);
             }
@@ -515,13 +513,13 @@ namespace Astra
             }
 
             // Bound parentWithChildrenCount against the remaining buffer using the
-            // same rule; it is a uint32_t on disk (Serialize writes
+            // same helper; it is a uint32_t on disk (Serialize writes
             // static_cast<uint32_t>(m_children.Size())). Each entry's guaranteed
             // fixed prefix is parent.GetValue() (Entity::StorageType) + childCount
             // (uint32_t); the children themselves are variable-length (including
             // possibly zero).
             constexpr uint64_t kMinBytesPerChildrenRecord = sizeof(Entity::StorageType) + sizeof(uint32_t);
-            if (static_cast<uint64_t>(parentWithChildrenCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerChildrenRecord)
+            if (reader.CountExceedsRemaining(parentWithChildrenCount, kMinBytesPerChildrenRecord))
             {
                 return Result<RelationshipGraph, SerializationError>::Err(SerializationError::CorruptedData);
             }
@@ -542,12 +540,12 @@ namespace Astra
                 }
 
                 // Bound childCount against the remaining buffer using the same
-                // rule; it is a uint32_t on disk (Serialize writes
+                // helper; it is a uint32_t on disk (Serialize writes
                 // static_cast<uint32_t>(children.size())). Each child's fixed
                 // on-disk footprint is child.GetValue() (Entity::StorageType),
                 // written unconditionally per child in the loop below.
                 constexpr uint64_t kMinBytesPerChild = sizeof(Entity::StorageType);
-                if (static_cast<uint64_t>(childCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerChild)
+                if (reader.CountExceedsRemaining(childCount, kMinBytesPerChild))
                 {
                     return Result<RelationshipGraph, SerializationError>::Err(SerializationError::CorruptedData);
                 }
@@ -580,13 +578,13 @@ namespace Astra
             }
 
             // Bound linkedEntityCount against the remaining buffer using the same
-            // rule; it is a uint32_t on disk (Serialize writes
+            // helper; it is a uint32_t on disk (Serialize writes
             // static_cast<uint32_t>(m_links.Size())). Each entry's guaranteed
             // fixed prefix is entity.GetValue() (Entity::StorageType) + linkCount
             // (uint32_t); the links themselves are variable-length (including
             // possibly zero).
             constexpr uint64_t kMinBytesPerLinkedEntityRecord = sizeof(Entity::StorageType) + sizeof(uint32_t);
-            if (static_cast<uint64_t>(linkedEntityCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerLinkedEntityRecord)
+            if (reader.CountExceedsRemaining(linkedEntityCount, kMinBytesPerLinkedEntityRecord))
             {
                 return Result<RelationshipGraph, SerializationError>::Err(SerializationError::CorruptedData);
             }
@@ -607,12 +605,12 @@ namespace Astra
                 }
 
                 // Bound linkCount against the remaining buffer using the same
-                // rule; it is a uint32_t on disk (Serialize writes
+                // helper; it is a uint32_t on disk (Serialize writes
                 // static_cast<uint32_t>(links.size())). Each link's fixed
                 // on-disk footprint is linked.GetValue() (Entity::StorageType),
                 // written unconditionally per link in the loop below.
                 constexpr uint64_t kMinBytesPerLink = sizeof(Entity::StorageType);
-                if (static_cast<uint64_t>(linkCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerLink)
+                if (reader.CountExceedsRemaining(linkCount, kMinBytesPerLink))
                 {
                     return Result<RelationshipGraph, SerializationError>::Err(SerializationError::CorruptedData);
                 }

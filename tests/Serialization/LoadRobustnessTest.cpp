@@ -29,8 +29,8 @@ namespace
     }
 }
 
-// ReadBoundedCount rejects a count larger than the remaining buffer could hold.
-TEST(LoadRobustness, ReadBoundedCountRejectsOversizedCount)
+// CountExceedsRemaining rejects a count larger than the remaining buffer could hold.
+TEST(LoadRobustness, CountExceedsRemainingRejectsOversizedCount)
 {
     std::vector<std::byte> buf;
     AppendU64(buf, 1'000'000'000ull);   // claims a billion elements...
@@ -39,22 +39,23 @@ TEST(LoadRobustness, ReadBoundedCountRejectsOversizedCount)
     // `BinaryReader reader(std::span<const std::byte>(buf))` parses as a
     // function declaration for `reader`, not an object definition.
     Astra::BinaryReader reader{std::span<const std::byte>(buf)};
-    const uint64_t n = reader.ReadBoundedCount(8);
-    EXPECT_TRUE(reader.HasError());
-    EXPECT_EQ(reader.GetError(), Astra::SerializationError::CorruptedData);
-    EXPECT_EQ(n, 0u);
+    uint64_t count;
+    reader(count);
+    ASSERT_FALSE(reader.HasError());
+    EXPECT_TRUE(reader.CountExceedsRemaining(count, 8));
 }
 
-// ReadBoundedCount accepts a count the remaining buffer can justify.
-TEST(LoadRobustness, ReadBoundedCountAcceptsFeasibleCount)
+// CountExceedsRemaining accepts a count the remaining buffer can justify.
+TEST(LoadRobustness, CountExceedsRemainingAcceptsFeasibleCount)
 {
     std::vector<std::byte> buf;
     AppendU64(buf, 2);                   // 2 elements...
     AppendBytes(buf, 16);                // ...16 bytes follow (8 each)
     Astra::BinaryReader reader{std::span<const std::byte>(buf)};
-    const uint64_t n = reader.ReadBoundedCount(8);
-    EXPECT_FALSE(reader.HasError());
-    EXPECT_EQ(n, 2u);
+    uint64_t count;
+    reader(count);
+    ASSERT_FALSE(reader.HasError());
+    EXPECT_FALSE(reader.CountExceedsRemaining(count, 8));
 }
 
 // The POD-vector read must not integer-overflow its bounds check (size * sizeof(T)).

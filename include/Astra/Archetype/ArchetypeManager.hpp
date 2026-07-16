@@ -802,11 +802,9 @@ namespace Astra
             if (reader.HasError())
                 return false;
 
-            // Bound archetypeCount against the remaining buffer: the same "count <=
-            // remaining/minBytesPerElement" rule as BinaryReader::ReadBoundedCount,
-            // applied inline rather than by calling that helper directly, because
-            // ReadBoundedCount reads a uint64_t and archetypeCount is a uint32_t on
-            // disk (Serialize above writes it via writer(static_cast<uint32_t>(
+            // Bound archetypeCount against the remaining buffer via the reader's
+            // width-agnostic count-bound helper (archetypeCount is a uint32_t on
+            // disk; Serialize above writes it via writer(static_cast<uint32_t>(
             // m_archetypes.size()))). Each archetype record's guaranteed fixed
             // prefix: a uint32_t index, the ComponentMask words,
             // Archetype::Serialize's own unconditional fixed fields (entityCount,
@@ -819,14 +817,14 @@ namespace Astra
                 sizeof(uint64_t) + sizeof(uint64_t) +                     // entityCount, entitiesPerChunk
                 sizeof(uint32_t) + sizeof(uint32_t) +                     // chunkCount, descriptorCount
                 sizeof(uint64_t);                                         // trailing per-archetype entity count
-            if (static_cast<uint64_t>(archetypeCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerArchetype)
+            if (reader.CountExceedsRemaining(archetypeCount, kMinBytesPerArchetype))
                 return false;
 
             // Same bound for entityCount, sized to an entity-map record's fixed
             // on-disk fields: entity + archetypeIndex(4) + chunkIndex(4) +
             // entityIndex(4), all written unconditionally per entity below.
             constexpr uint64_t kMinBytesPerEntityRecord = sizeof(Entity) + sizeof(uint32_t) * 3;
-            if (static_cast<uint64_t>(entityCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerEntityRecord)
+            if (reader.CountExceedsRemaining(entityCount, kMinBytesPerEntityRecord))
                 return false;
 
             // Reserve space
@@ -854,13 +852,15 @@ namespace Astra
             // the read loop at 1 for those archives reproduces the pre-v3 reader
             // exactly (root stays empty, same as when it was written), instead of
             // misreading the first non-root record's bytes as a root record.
-            std::vector<uint32_t> archetypeIndices;
             const uint32_t firstArchetypeIndex = (reader.GetVersion() >= 3) ? 0u : 1u;
             for (uint32_t i = firstArchetypeIndex; i < archetypeCount; ++i)
             {
+                // The on-disk archetype index isn't otherwise used by this loop
+                // (i drives it, and the root-vs-non-root branch below keys off
+                // i == 0) -- read it only to stay in sync with the wire format
+                // Archetype::Serialize's caller writes it against.
                 uint32_t index;
                 reader(index);
-                archetypeIndices.push_back(index);
 
                 // Deserialize the archetype
                 auto archetypeResult = Archetype::Deserialize(reader, registryDescriptors, &m_chunkPool);

@@ -453,16 +453,14 @@ namespace Astra
                 return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(reader.GetError());
             }
 
-            // Bound recycledCount against the remaining buffer: the same "count <=
-            // remaining/minBytesPerElement" rule as BinaryReader::ReadBoundedCount,
-            // applied inline rather than by calling that helper directly, because
-            // ReadBoundedCount reads a uint64_t and recycledCount is a uint32_t on
-            // disk (Serialize above writes it via writer(static_cast<uint32_t>(
+            // Bound recycledCount against the remaining buffer via the reader's
+            // width-agnostic count-bound helper (recycledCount is a uint32_t on
+            // disk; Serialize above writes it via writer(static_cast<uint32_t>(
             // recycledEntries.size()))). Each recycled entry's fixed on-disk
             // footprint is id(IDType) + nextVersion(VersionType), written
             // unconditionally per entry in the loop below.
             constexpr uint64_t kMinBytesPerRecycledEntry = sizeof(IDType) + sizeof(VersionType);
-            if (static_cast<uint64_t>(recycledCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerRecycledEntry)
+            if (reader.CountExceedsRemaining(recycledCount, kMinBytesPerRecycledEntry))
             {
                 return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(SerializationError::CorruptedData);
             }
@@ -520,13 +518,13 @@ namespace Astra
                 return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(reader.GetError());
             }
 
-            // Bound aliveCount against the remaining buffer using the same rule;
+            // Bound aliveCount against the remaining buffer using the same helper;
             // aliveCount is a uint32_t on disk (Serialize writes
             // static_cast<uint32_t>(m_table.AliveCount())) and each alive-entity
             // record's fixed on-disk footprint is id(IDType) + version(VersionType),
             // written unconditionally per entity in the loop below.
             constexpr uint64_t kMinBytesPerAliveEntity = sizeof(IDType) + sizeof(VersionType);
-            if (static_cast<uint64_t>(aliveCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerAliveEntity)
+            if (reader.CountExceedsRemaining(aliveCount, kMinBytesPerAliveEntity))
             {
                 return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(SerializationError::CorruptedData);
             }

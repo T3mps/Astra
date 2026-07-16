@@ -770,14 +770,12 @@ namespace Astra
                 return ResultType::Err(reader.GetError());
             }
 
-            // Bound chunkCount against the remaining buffer: the same "count <=
-            // remaining/minBytesPerElement" rule as BinaryReader::ReadBoundedCount,
-            // applied inline rather than by calling that helper directly, because
-            // ReadBoundedCount reads a uint64_t and chunkCount is a uint32_t on disk
-            // (Archetype::Serialize writes it via writer(static_cast<uint32_t>(...))).
+            // Bound chunkCount against the remaining buffer via the reader's
+            // width-agnostic count-bound helper (chunkCount is a uint32_t on disk;
+            // Archetype::Serialize writes it via writer(static_cast<uint32_t>(...))).
             // Each chunk's only guaranteed fixed prefix is its 4-byte chunkEntityCount
             // field; everything after it is variable-length.
-            if (static_cast<uint64_t>(chunkCount) > static_cast<uint64_t>(reader.Remaining()) / sizeof(uint32_t))
+            if (reader.CountExceedsRemaining(chunkCount, sizeof(uint32_t)))
             {
                 return ResultType::Err(SerializationError::CorruptedData);
             }
@@ -795,7 +793,7 @@ namespace Astra
             // hash(8) + size(8) + alignment(8) + version(4) = 28 bytes, written
             // unconditionally by Archetype::Serialize for every descriptor.
             constexpr uint64_t kMinBytesPerDescriptor = sizeof(uint64_t) * 3 + sizeof(uint32_t);
-            if (static_cast<uint64_t>(descriptorCount) > static_cast<uint64_t>(reader.Remaining()) / kMinBytesPerDescriptor)
+            if (reader.CountExceedsRemaining(descriptorCount, kMinBytesPerDescriptor))
             {
                 return ResultType::Err(SerializationError::CorruptedData);
             }
