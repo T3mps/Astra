@@ -851,6 +851,22 @@ namespace Astra
                 {
                     return ResultType::Err(SerializationError::SizeMismatch);
                 }
+
+                // The guard above is vacuous for a zero-component (or all-empty-
+                // component) archetype: perEntitySize == 0 makes the product 0
+                // regardless of entitiesPerChunk, so it never rejects anything.
+                // Every registry always carries such a root archetype, so this is
+                // not an edge case. Chunk::Chunk unconditionally does
+                // m_entities.reserve(entitiesPerChunk) for the entity-handle array,
+                // independent of component count, so bound entitiesPerChunk against
+                // that array's own footprint fitting in the chunk regardless of
+                // perEntitySize -- otherwise a corrupted entitiesPerChunk drives an
+                // unbounded reserve() that throws std::bad_alloc uncaught out of
+                // Registry::Load.
+                if (static_cast<uint64_t>(entitiesPerChunk) > static_cast<uint64_t>(poolChunkSize) / std::max<size_t>(1, sizeof(Entity)))
+                {
+                    return ResultType::Err(SerializationError::SizeMismatch);
+                }
             }
 
             // Create new archetype
