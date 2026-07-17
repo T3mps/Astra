@@ -55,6 +55,20 @@ namespace Astra
     static_assert(offsetof(CommandHeader, flags) == 2, "CommandHeader::flags offset");
     static_assert(offsetof(CommandHeader, totalSize) == 4, "CommandHeader::totalSize offset");
 
+    // Composite key that makes deferred-command flush order deterministic (spec §6/§14).
+    struct SortKey
+    {
+        uint32_t insertionOrder = 0;  // recording system's plan order (high bits)
+        uint32_t iterationIndex = 0;  // 0 for ordinary deferral; chunk index under ParallelForEach (Phase B)
+        uint32_t recordSequence = 0;  // per-(system,iterationIndex) monotonic tiebreak = exact record order
+        friend bool operator<(const SortKey& a, const SortKey& b) noexcept
+        {
+            if (a.insertionOrder != b.insertionOrder) return a.insertionOrder < b.insertionOrder;
+            if (a.iterationIndex != b.iterationIndex) return a.iterationIndex < b.iterationIndex;
+            return a.recordSequence < b.recordSequence;
+        }
+    };
+
     // ============= Command Payloads =============
 
     /**

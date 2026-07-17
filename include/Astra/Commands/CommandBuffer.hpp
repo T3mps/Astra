@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <memory>
@@ -7,6 +8,7 @@
 #include <span>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "../Container/SmallVector.hpp"
@@ -148,6 +150,35 @@ namespace Astra
             CleanupPendingCommands();
         }
 
+        // ============= Sort Key Control =============
+
+        /**
+         * Sets the SortKey to stamp on the next-recorded command AND every
+         * command recorded after it, until this is called again (STICKY, not
+         * one-shot). This lets a single call site tag every command belonging
+         * to one logical recording unit -- e.g. all commands a deferred system
+         * records into a buffer shared across systems -- with that unit's key,
+         * so a multi-command system doesn't have its 2nd+ command silently
+         * fall back to a default key.
+         *
+         * Commands recorded before the first call to this method (or after
+         * Clear()/a successful Execute()/ExecuteSorted()) use the default key
+         * {0, 0, seq}, where seq auto-increments per recorded command in this
+         * buffer, preserving simple arrival order for callers that never opt
+         * into explicit keys.
+         *
+         * See ParallelCommandBuffer::ExecuteSorted() for where the key is
+         * consumed: it stable-sorts every recorded command (across every
+         * worker buffer) by SortKey before applying them, so this is only
+         * relevant to sorted flushes -- Execute() always applies in physical
+         * (arrival) order regardless of any key set here.
+         */
+        void SetNextSortKey(SortKey key) noexcept
+        {
+            m_currentSortKey = key;
+            m_hasCustomSortKey = true;
+        }
+
         // ============= Entity Commands =============
 
         /**
@@ -177,6 +208,7 @@ namespace Astra
             size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntityPayload);
             size_t alignedSize = 0;
             std::byte* ptr = m_buffer.Allocate(totalSize, &alignedSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::CreateEntity, 0, static_cast<uint32_t>(alignedSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntityPayload{entity};
@@ -195,6 +227,7 @@ namespace Astra
             size_t totalSize = sizeof(CommandHeader) + sizeof(DestroyEntityPayload);
             size_t alignedSize = 0;
             std::byte* ptr = m_buffer.Allocate(totalSize, &alignedSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::DestroyEntity, 0, static_cast<uint32_t>(alignedSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) DestroyEntityPayload{entity};
@@ -230,6 +263,7 @@ namespace Astra
             // Calculate total size
             size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntitiesPayload) + created * sizeof(Entity);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::CreateEntities, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntitiesPayload{static_cast<uint32_t>(created)};
@@ -253,6 +287,7 @@ namespace Astra
             size_t count = entities.size();
             size_t totalSize = sizeof(CommandHeader) + sizeof(DestroyEntitiesPayload) + count * sizeof(Entity);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::DestroyEntities, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) DestroyEntitiesPayload{static_cast<uint32_t>(count)};
@@ -291,6 +326,7 @@ namespace Astra
             size_t totalSize = dataOffset + dataSize;
 
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             // Write header
             auto* header = new (ptr) CommandHeader{CommandType::AddComponent, 0, static_cast<uint32_t>(totalSize)};
@@ -331,6 +367,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveComponentPayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::RemoveComponent, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) RemoveComponentPayload{entity, TypeID<T>::Value()};
@@ -368,6 +405,7 @@ namespace Astra
             size_t totalSize = dataOffset + dataSize;
 
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             // Write header
             auto* header = new (ptr) CommandHeader{CommandType::AddComponentBatch, 0, static_cast<uint32_t>(totalSize)};
@@ -414,6 +452,7 @@ namespace Astra
             size_t entityCount = entities.size();
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveComponentBatchPayload) + entityCount * sizeof(Entity);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::RemoveComponentBatch, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) RemoveComponentBatchPayload{
@@ -439,6 +478,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(SetParentPayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::SetParent, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) SetParentPayload{child, parent};
@@ -463,6 +503,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveParentPayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::RemoveParent, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) RemoveParentPayload{child};
@@ -479,6 +520,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveChildPayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::RemoveChild, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) RemoveChildPayload{parent, child};
@@ -495,6 +537,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveAllChildrenPayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::RemoveAllChildren, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) RemoveAllChildrenPayload{parent};
@@ -511,6 +554,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(AddLinkPayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::AddLink, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) AddLinkPayload{a, b};
@@ -527,6 +571,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveLinkPayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::RemoveLink, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) RemoveLinkPayload{a, b};
@@ -561,6 +606,7 @@ namespace Astra
             size_t totalSize = dataOffset + dataSize;
 
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             // Write header
             auto* header = new (ptr) CommandHeader{CommandType::SetResource, 0, static_cast<uint32_t>(totalSize)};
@@ -600,6 +646,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveResourcePayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::RemoveResource, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) RemoveResourcePayload{TypeID<T>::Value()};
@@ -616,6 +663,7 @@ namespace Astra
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(ClearResourcesPayload);
             std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
 
             auto* header = new (ptr) CommandHeader{CommandType::ClearResources, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) ClearResourcesPayload{};
@@ -669,6 +717,7 @@ namespace Astra
                     CleanupPendingCommands();
                     m_buffer.Clear();
                     m_commandCount = 0;
+                    m_commandKeys.clear();
                     return Result<void, ExecutionError>::Err(ExecutionError::ExecutionFailed);
                 }
 
@@ -696,6 +745,39 @@ namespace Astra
         [[nodiscard]] size_t GetLastExecutedCount() const noexcept { return m_lastExecutedCount; }
 
         /**
+         * Get the {SortKey, byte offset} descriptor recorded for every command
+         * currently in this buffer, in the same order they were recorded
+         * (i.e. in the same order their offsets appear walking the byte
+         * buffer). Consumed by ParallelCommandBuffer::ExecuteSorted() to build
+         * a cross-buffer, globally-sorted apply order; never used by the
+         * physical-order Execute() path.
+         */
+        [[nodiscard]] const std::vector<std::pair<SortKey, size_t>>& CommandKeys() const noexcept
+        {
+            return m_commandKeys;
+        }
+
+        /**
+         * Apply the single command whose header starts at the given byte
+         * offset into this buffer, via the same per-command dispatch Execute()
+         * uses. This is the public entry point ParallelCommandBuffer::
+         * ExecuteSorted() uses to apply commands out of physical order without
+         * reaching into CommandBuffer's private execution internals.
+         *
+         * @param offset Byte offset of a CommandHeader previously returned via
+         *               CommandKeys(); must belong to THIS buffer.
+         * @return true if the command applied successfully (same semantics as
+         *         each per-command Execute*() helper).
+         */
+        bool ApplyCommandAt(size_t offset)
+        {
+            std::byte* ptr = m_buffer.Data() + offset;
+            auto* header = reinterpret_cast<CommandHeader*>(ptr);
+            std::byte* payloadPtr = ptr + sizeof(CommandHeader);
+            return ExecuteCommand(header->type, payloadPtr);
+        }
+
+        /**
          * Clear all pending commands without executing them.
          * Also cleans up any component data destructors.
          */
@@ -706,6 +788,9 @@ namespace Astra
             m_allocatedEntities.clear();
             m_committedCount = 0;
             m_commandCount = 0;
+            m_commandKeys.clear();
+            m_hasCustomSortKey = false;
+            m_autoSeq = 0;
         }
 
         /**
@@ -719,6 +804,13 @@ namespace Astra
         /**
          * Merge commands from another buffer into this one.
          * The other buffer is left empty after the merge.
+         *
+         * NOTE: this does not carry the other buffer's SortKey descriptors
+         * over into this buffer's CommandKeys() -- MergeFrom predates
+         * ExecuteSorted() and nothing routes a merged-into buffer through it
+         * today (ExecuteSorted reads each worker buffer directly, never via
+         * MergeInto). other's descriptors are dropped below purely so
+         * CommandKeys() on the now-empty `other` doesn't return stale offsets.
          */
         void MergeFrom(CommandBuffer&& other)
         {
@@ -744,6 +836,9 @@ namespace Astra
             other.m_allocatedEntities.clear();
             other.m_committedCount = 0;
             other.m_commandCount = 0;
+            other.m_commandKeys.clear();
+            other.m_hasCustomSortKey = false;
+            other.m_autoSeq = 0;
         }
 
         /**
@@ -795,6 +890,22 @@ namespace Astra
         }
 
     private:
+        /**
+         * Record the {SortKey, offset} descriptor for the command whose header
+         * was just allocated at commandPtr. Must be called immediately after
+         * m_buffer.Allocate() returns, before any further allocation on this
+         * buffer, so the offset is computed from the current (possibly just-
+         * reallocated) base pointer -- storing an offset rather than the raw
+         * pointer keeps the descriptor valid across future buffer growth.
+         */
+        void StampCommand(const std::byte* commandPtr)
+        {
+            size_t offset = static_cast<size_t>(commandPtr - m_buffer.Data());
+            SortKey key = m_hasCustomSortKey ? m_currentSortKey : SortKey{0, 0, m_autoSeq};
+            ++m_autoSeq;
+            m_commandKeys.emplace_back(key, offset);
+        }
+
         /**
          * Destructor function for component cleanup.
          */
@@ -1109,6 +1220,12 @@ namespace Astra
         size_t m_committedCount = 0;
         size_t m_commandCount = 0;
         size_t m_lastExecutedCount = 0;  // For debugging partial execution failures
+
+        // Sort-key bookkeeping, parallel to m_buffer (see StampCommand/SetNextSortKey).
+        std::vector<std::pair<SortKey, size_t>> m_commandKeys;
+        SortKey m_currentSortKey{};
+        bool m_hasCustomSortKey = false;
+        uint32_t m_autoSeq = 0;  // stamped as recordSequence when no explicit key was set
     };
 
     /**
@@ -1175,6 +1292,88 @@ namespace Astra
                     }
                 }
             }
+            return Result<void, CommandBuffer::ExecutionError>::Ok();
+        }
+
+        /**
+         * Execute every recorded command from every thread buffer in
+         * deterministic SortKey order rather than physical arrival order.
+         *
+         * Gathers a {SortKey, CommandBuffer*, offset} descriptor for every
+         * command across every worker buffer (via CommandBuffer::CommandKeys()),
+         * stable-sorts by key (so commands with equal keys keep their original
+         * gather order -- which is arrival order within a buffer, and
+         * worker-registration order across buffers), then applies each command
+         * single-threaded, in that order, via CommandBuffer::ApplyCommandAt().
+         * The result is identical regardless of how many threads recorded
+         * commands or in what order they happened to run.
+         *
+         * Rollback semantics mirror CommandBuffer::Execute()'s whole-buffer
+         * abandonment shape (refining this to a precise per-command rollback
+         * is deferred to a later task): on the first failed command, every
+         * worker buffer has its allocated-but-not-yet-committed entities
+         * destroyed and is then cleared. Commands that already applied
+         * successfully are NOT rolled back, matching Execute()'s documented
+         * contract.
+         */
+        Result<void, CommandBuffer::ExecutionError> ExecuteSorted()
+        {
+            struct Item
+            {
+                SortKey key;
+                CommandBuffer* buf;
+                size_t offset;
+            };
+
+            std::vector<Item> items;
+            for (auto& b : m_buffers)
+            {
+                if (b)
+                {
+                    for (const auto& [key, offset] : b->CommandKeys())
+                    {
+                        items.push_back({key, b.get(), offset});
+                    }
+                }
+            }
+
+            std::stable_sort(items.begin(), items.end(),
+                [](const Item& a, const Item& b) { return a.key < b.key; });
+
+            for (const auto& it : items)
+            {
+                if (!it.buf->ApplyCommandAt(it.offset))
+                {
+                    // Partial execution occurred - mirror CommandBuffer::Execute()'s
+                    // rollback shape across every worker buffer touched by this
+                    // flush: destroy uncommitted allocated entities, then clear
+                    // (which also cleans up any not-yet-applied inline component
+                    // data). Already-applied commands are NOT rolled back.
+                    for (auto& b : m_buffers)
+                    {
+                        if (b)
+                        {
+                            b->RollbackAllocatedEntities();
+                            b->Clear();
+                        }
+                    }
+                    return Result<void, CommandBuffer::ExecutionError>::Err(CommandBuffer::ExecutionError::ExecutionFailed);
+                }
+            }
+
+            // Success - every applied command's buffer must still be cleared:
+            // ApplyCommandAt() bypasses CommandBuffer::Execute(), so nothing
+            // else clears the byte buffer or destructs inline component data
+            // (e.g. AddComponent/SetResource payloads) that Execute() would
+            // normally clean up via Clear() at the end of a successful run.
+            for (auto& b : m_buffers)
+            {
+                if (b)
+                {
+                    b->Clear();
+                }
+            }
+
             return Result<void, CommandBuffer::ExecutionError>::Ok();
         }
 

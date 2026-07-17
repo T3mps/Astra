@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <thread>
 #include <Astra/Astra.hpp>
 #include "../TestComponents.hpp"
 
@@ -369,6 +370,54 @@ TEST_F(CommandBufferTest, RollbackPreservesCommittedEntities)
     // touch it, so it must remain a live, valid entity with its component.
     EXPECT_TRUE(registry->IsValid(e));
     EXPECT_TRUE(registry->HasComponent<Position>(e));
+}
+
+TEST_F(CommandBufferTest, ExecuteSortedAppliesInKeyOrderNotRecordOrder)
+{
+    // Entities are created directly on the registry-owning thread (CreateEntity
+    // must not be recorded from worker threads); only the deferred re-parent
+    // commands below are recorded from worker threads.
+    Entity child = registry->CreateEntity();
+    Entity parentA = registry->CreateEntity();
+    Entity parentB = registry->CreateEntity();
+
+    ParallelCommandBuffer parallelBuffer(registry.get());
+
+    // Worker thread 1 records SetParent(child, parentA) FIRST (record order 0,
+    // its buffer's own arrival order) but stamps it with a HIGHER sort key ->
+    // under key-order flush this must apply SECOND.
+    std::thread t1([&]()
+    {
+        auto& buf = parallelBuffer.GetThreadBuffer();
+        buf.SetNextSortKey(SortKey{5, 0, 0});
+        buf.SetParent(child, parentA);
+    });
+    t1.join();
+
+    // Worker thread 2 records SetParent(child, parentB) SECOND (a later wall-
+    // clock record, and a distinct worker buffer) but stamps it with a LOWER
+    // sort key -> under key-order flush this must apply FIRST.
+    std::thread t2([&]()
+    {
+        auto& buf = parallelBuffer.GetThreadBuffer();
+        buf.SetNextSortKey(SortKey{1, 0, 0});
+        buf.SetParent(child, parentB);
+    });
+    t2.join();
+
+    ASSERT_EQ(parallelBuffer.GetThreadCount(), 2u);
+
+    auto result = parallelBuffer.ExecuteSorted();
+    ASSERT_TRUE(result.IsOk());
+
+    // Key order (ascending insertionOrder) applies the key=1 command
+    // (SetParent parentB) first, then the key=5 command (SetParent parentA)
+    // second -- last-write-wins means parentA is the final parent. Plain
+    // record/arrival order would have applied parentA first and parentB
+    // second, leaving parentB as the final parent instead. Asserting parentA
+    // therefore distinguishes a genuine key-order flush from a record-order
+    // flush.
+    EXPECT_EQ(registry->GetParent(child), parentA);
 }
 
 TEST_F(CommandBufferTest, RollbackDestroysOnlyUncommittedEntities)
