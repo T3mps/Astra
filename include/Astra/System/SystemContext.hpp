@@ -47,8 +47,22 @@ namespace Astra
             return m_commands;
         }
 
-        // ReportError(SystemError) is Task 4's error sink -- deliberately not
-        // added here (YAGNI: Task 2 only needs recording, not reporting).
+        /**
+         * Report a deferred-command error attributed to THIS system, via its
+         * insertionOrder (the same attribution ExecuteSorted() uses when it
+         * skips a command whose target entity/component state no longer
+         * permits the op -- see DeferredCommandError's doc comment).
+         *
+         * Pushes into this system's OWN per-worker CommandBuffer (same-
+         * thread write, exactly like Commands()' recording), so no
+         * synchronization is needed even when many systems on different
+         * worker threads call this concurrently on their own buffers.
+         * Gathered after the flush via SystemScheduler::GetLastDeferredErrors().
+         */
+        void ReportError(DeferredCommandError::Reason reason)
+        {
+            m_commands.ReportError(DeferredCommandError{m_insertionOrder, reason});
+        }
 
     private:
         Registry& m_registry;

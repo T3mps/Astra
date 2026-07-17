@@ -179,6 +179,37 @@ namespace Astra
             m_hasCustomSortKey = true;
         }
 
+        // ============= Deferred-Command Error Reporting (Task 4) =============
+
+        /**
+         * Push a Task-4 deferred-command error into THIS buffer's own error
+         * list. Called from two places: ParallelCommandBuffer::ExecuteSorted()
+         * when a command this buffer recorded fails to apply (see
+         * DeferredCommandError's doc comment for why every such failure is a
+         * logical, not fatal, one), and SystemContext::ReportError() when a
+         * system explicitly reports a domain-specific failure mid-execution.
+         *
+         * A worker only ever calls this on ITS OWN per-worker buffer (same
+         * contract as Commands()' recording), so no synchronization is
+         * needed even when many workers call this concurrently on their own
+         * buffers.
+         */
+        void ReportError(DeferredCommandError error)
+        {
+            m_reportedErrors.push_back(error);
+        }
+
+        /**
+         * Errors reported into this buffer via ReportError(), in report
+         * order. Gathered single-threaded by ParallelCommandBuffer::
+         * ExecuteSorted() (via GetDeferredErrors()) after every worker has
+         * joined -- see that function's comment.
+         */
+        [[nodiscard]] const std::vector<DeferredCommandError>& GetReportedErrors() const noexcept
+        {
+            return m_reportedErrors;
+        }
+
         // ============= Entity Commands =============
 
         /**
@@ -793,6 +824,7 @@ namespace Astra
             m_commandKeys.clear();
             m_hasCustomSortKey = false;
             m_autoSeq = 0;
+            m_reportedErrors.clear();
         }
 
         /**
@@ -1228,6 +1260,9 @@ namespace Astra
         SortKey m_currentSortKey{};
         bool m_hasCustomSortKey = false;
         uint32_t m_autoSeq = 0;  // stamped as recordSequence when no explicit key was set
+
+        // Task 4: this buffer's own deferred-command errors (see ReportError()).
+        std::vector<DeferredCommandError> m_reportedErrors;
     };
 
     /**
@@ -1323,13 +1358,20 @@ namespace Astra
          * The result is identical regardless of how many threads recorded
          * commands or in what order they happened to run.
          *
-         * Rollback semantics mirror CommandBuffer::Execute()'s whole-buffer
-         * abandonment shape (refining this to a precise per-command rollback
-         * is deferred to a later task): on the first failed command, every
-         * worker buffer has its allocated-but-not-yet-committed entities
-         * destroyed and is then cleared. Commands that already applied
-         * successfully are NOT rolled back, matching Execute()'s documented
-         * contract.
+         * FAILURE HANDLING (Task 4): a command that fails to apply (target
+         * entity/component state doesn't permit the op -- see
+         * DeferredCommandError's doc comment for why this is always a
+         * LOGICAL failure, never a "fatal" one the bool could express) is
+         * SKIPPED and recorded into GetDeferredErrors(), and the flush
+         * CONTINUES -- it does NOT abort or roll back. This is a deliberate
+         * change from the whole-buffer-abandonment policy CommandBuffer::
+         * Execute() still uses: a system's deferred op can legitimately
+         * target an entity an EARLIER system's deferred op destroyed in the
+         * same flush (they don't see each other's effects until the sync
+         * point), and that must not nuke every other system's unrelated
+         * work. The skip is attributed to the failed command's own
+         * SortKey::insertionOrder (== the recording system's insertionOrder)
+         * and surfaced to the caller via GetDeferredErrors().
          *
          * DETERMINISM PRECONDITION: the sort below is a std::stable_sort, so
          * commands with EQUAL keys fall back to their gather order, which is
@@ -1348,6 +1390,10 @@ namespace Astra
          */
         Result<void, CommandBuffer::ExecutionError> ExecuteSorted()
         {
+            // Task 4: this flush's error list starts empty every call --
+            // errors from a PRIOR flush must not leak into this one's result.
+            m_deferredErrors.clear();
+
             struct Item
             {
                 SortKey key;
@@ -1374,28 +1420,41 @@ namespace Astra
             {
                 if (!it.buf->ApplyCommandAt(it.offset))
                 {
-                    // Partial execution occurred - mirror CommandBuffer::Execute()'s
-                    // rollback shape across every worker buffer touched by this
-                    // flush: destroy uncommitted allocated entities, then clear
-                    // (which also cleans up any not-yet-applied inline component
-                    // data). Already-applied commands are NOT rolled back.
-                    for (auto& b : m_buffers)
-                    {
-                        if (b)
-                        {
-                            b->RollbackAllocatedEntities();
-                            b->Clear();
-                        }
-                    }
-                    return Result<void, CommandBuffer::ExecutionError>::Err(CommandBuffer::ExecutionError::ExecutionFailed);
+                    // Task 4: logical failure -- skip and record, do NOT abort
+                    // or roll back the flush. See this function's class-level
+                    // FAILURE HANDLING comment and DeferredCommandError's doc
+                    // comment for why every ApplyCommandAt() false is a
+                    // logical (never fatal) failure in this exception-free
+                    // build.
+                    m_deferredErrors.push_back(
+                        DeferredCommandError{it.key.insertionOrder, DeferredCommandError::Reason::InvalidTargetEntity});
+                    continue;
                 }
             }
 
-            // Success - every applied command's buffer must still be cleared:
-            // ApplyCommandAt() bypasses CommandBuffer::Execute(), so nothing
-            // else clears the byte buffer or destructs inline component data
-            // (e.g. AddComponent/SetResource payloads) that Execute() would
-            // normally clean up via Clear() at the end of a successful run.
+            // Gather every worker buffer's explicitly-reported errors
+            // (SystemContext::ReportError()) BEFORE clearing the buffers
+            // below (Clear() empties each buffer's own reported-errors list).
+            // Safe single-threaded here: this runs at the Task 3 depth==0
+            // sync point, so every worker has already joined and nothing can
+            // be concurrently writing to any buffer.
+            for (auto& b : m_buffers)
+            {
+                if (b)
+                {
+                    const auto& reported = b->GetReportedErrors();
+                    m_deferredErrors.insert(m_deferredErrors.end(), reported.begin(), reported.end());
+                }
+            }
+
+            // Every touched buffer must still be cleared, regardless of
+            // whether any command was skipped above: ApplyCommandAt() bypasses
+            // CommandBuffer::Execute(), so nothing else clears the byte buffer
+            // or destructs inline component data (e.g. AddComponent/
+            // SetResource payloads) that Execute() would normally clean up via
+            // Clear() at the end of a run. This also matches Task 3's
+            // established contract that Execute() always leaves the buffer
+            // empty afterward.
             for (auto& b : m_buffers)
             {
                 if (b)
@@ -1404,7 +1463,23 @@ namespace Astra
                 }
             }
 
+            // Task 4: a flush that skipped some commands is still an overall
+            // success -- the skips are surfaced as errors via
+            // GetDeferredErrors(), not as a Result failure. There is no
+            // remaining path that returns Err() from this function.
             return Result<void, CommandBuffer::ExecutionError>::Ok();
+        }
+
+        /**
+         * Every deferred-command error from the most recent ExecuteSorted()
+         * call: commands skipped because their target entity/component state
+         * didn't permit the op, PLUS anything systems explicitly reported via
+         * SystemContext::ReportError(). Cleared at the start of every
+         * ExecuteSorted() call (see above); empty before the first call.
+         */
+        [[nodiscard]] const std::vector<DeferredCommandError>& GetDeferredErrors() const noexcept
+        {
+            return m_deferredErrors;
         }
 
         /**
@@ -1514,6 +1589,12 @@ namespace Astra
         mutable std::mutex m_mutex;
         mutable std::vector<std::unique_ptr<CommandBuffer>> m_buffers;
         mutable std::atomic<size_t> m_nextIndex{0};
+
+        // Task 4: gathered errors from the most recent ExecuteSorted() flush
+        // (see ExecuteSorted()/GetDeferredErrors()). Single-threaded: only
+        // ever touched from ExecuteSorted() itself, after every worker has
+        // joined at the Task 3 depth==0 sync point.
+        std::vector<DeferredCommandError> m_deferredErrors;
 
         inline static std::atomic<uint64_t> s_nextInstanceId{1};  // 0 is never assigned; ThreadCache's default contextInstanceId is 0 so a never-populated cache can't accidentally match
 

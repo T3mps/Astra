@@ -69,6 +69,34 @@ namespace Astra
         }
     };
 
+    /**
+     * Theme B2 Task 4: attributes a deferred-command failure to the system
+     * that recorded (or explicitly reported) it, via SortKey::insertionOrder.
+     *
+     * `ApplyCommandAt()` returning false is ALWAYS a LOGICAL failure -- the
+     * op's target entity/component state doesn't permit it (e.g. the entity
+     * was destroyed by an earlier command in the same sorted flush). This
+     * build is exception-free and RTTI-off, so a genuinely unrecoverable
+     * failure (operator new(std::nothrow) aside, an allocation failure that
+     * escapes as bad_alloc) is uncatchable and terminates the process
+     * outright rather than returning false through this path -- there is no
+     * separate "fatal" bool value ApplyCommandAt could express. Every false
+     * is therefore a logical, skippable failure: ExecuteSorted() skips it,
+     * records one of these, and continues the flush rather than aborting it.
+     */
+    struct DeferredCommandError
+    {
+        // SortKey::insertionOrder of the system that recorded the failed
+        // command (or called SystemContext::ReportError() directly).
+        uint32_t systemInsertionOrder = 0;
+
+        enum class Reason : uint8_t
+        {
+            InvalidTargetEntity  // target entity was invalid/already destroyed when the op was applied
+        };
+        Reason reason = Reason::InvalidTargetEntity;
+    };
+
     // ============= Command Payloads =============
 
     /**

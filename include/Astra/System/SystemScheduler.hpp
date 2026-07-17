@@ -236,6 +236,11 @@ namespace Astra
         
         void Execute(Registry& registry, ISystemExecutor* executor)
         {
+            // Task 4: this call's deferred-command errors start empty --
+            // GetLastDeferredErrors() must never return a PRIOR call's
+            // errors, including on the early-return paths below.
+            m_lastDeferredErrors.clear();
+
             if (!ASTRA_ENSURE(executor != nullptr, "Executor cannot be null"))
                 return;
 
@@ -309,8 +314,16 @@ namespace Astra
             // monotonic recordSequence} -- see ParallelCommandBuffer::
             // ExecuteSorted()'s documented precondition.
             auto flushResult = m_commandBuffer->ExecuteSorted();
-            // Task 4: surface deferred-flush errors via the per-system error channel.
+            // Task 4: surface this flush's deferred-command errors (commands
+            // skipped because their target entity/component state no longer
+            // permitted the op, plus anything reported via SystemContext::
+            // ReportError()) through the scheduler's own accessor. ExecuteSorted()
+            // itself always returns Ok() now -- a skipped command is reported,
+            // not treated as a flush failure -- so flushResult carries no
+            // additional information; kept only so a future genuine flush-level
+            // failure mode has somewhere to be checked.
             (void)flushResult;
+            m_lastDeferredErrors = m_commandBuffer->GetDeferredErrors();
 
             // Start the next frame's recording from empty regardless of
             // outcome. ExecuteSorted() already clears every worker buffer on
@@ -336,6 +349,21 @@ namespace Astra
             return m_commandBuffer ? m_commandBuffer->GetCommandCount() : 0;
         }
 
+        /**
+         * Deferred-command errors from the most recent Execute() call's
+         * flush (Task 4): commands skipped because their target entity/
+         * component state no longer permitted the op (e.g. an earlier
+         * system's deferred command destroyed the entity first), plus
+         * anything a system explicitly reported via SystemContext::
+         * ReportError(). Cleared at the start of every Execute() call --
+         * empty before the first call and after any Execute() that flushed
+         * cleanly.
+         */
+        ASTRA_NODISCARD const std::vector<DeferredCommandError>& GetLastDeferredErrors() const noexcept
+        {
+            return m_lastDeferredErrors;
+        }
+
         void Clear()
         {
             // Prevent modification during execution to avoid use-after-free.
@@ -346,6 +374,9 @@ namespace Astra
             m_systemIndices.Clear();
             m_executionPlan.clear();
             m_needsRebuild = true;
+            // Stale errors from a since-cleared set of systems must not
+            // outlive the scheduler state that produced them.
+            m_lastDeferredErrors.clear();
 
             // M2 (Task 2 review fix): Clear() used to leave any pending-but-
             // unflushed deferred commands sitting in m_commandBuffer, so a
@@ -599,5 +630,9 @@ namespace Astra
         // whichever Registry Execute() is called with (see Execute() above).
         std::unique_ptr<ParallelCommandBuffer> m_commandBuffer;
         Registry* m_commandBufferRegistry = nullptr;                    // registry m_commandBuffer is currently bound to
+
+        // Task 4: this scheduler's per-system error channel -- see
+        // GetLastDeferredErrors().
+        std::vector<DeferredCommandError> m_lastDeferredErrors;
     };
 } // namespace Astra

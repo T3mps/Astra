@@ -272,3 +272,50 @@ TEST(SystemContext, DeferredCommandsFlushDeterministicallyByInsertionOrderAcross
         EXPECT_EQ(s.PendingCommandCount(), 0u) << "run " << run;
     }
 }
+
+// ---- Task 4: a flush-time logical failure is skipped + reported, not ------
+// ---- aborted -- the world stays consistent and the error is surfaced. -----
+
+TEST(SystemContext, DeferredCommandTargetingEntityDestroyedEarlierInSameFlushIsSkippedAndReported)
+{
+    Astra::Registry reg;
+    Astra::Entity e = reg.CreateEntity<Position>();
+    ASSERT_TRUE(reg.IsValid(e));
+
+    Astra::SystemScheduler s;
+
+    // System A (insertionOrder 0): defers DestroyEntity(e).
+    auto addedA = s.AddSystem([e](Astra::SystemContext& ctx)
+    {
+        ctx.Commands().DestroyEntity(e);
+    });
+    ASSERT_TRUE(addedA.IsOk());
+
+    // System B (insertionOrder 1, added second): defers AddComponent<Velocity>
+    // on the SAME entity e. SortKey compares insertionOrder first, so the
+    // sorted flush always applies A's destroy BEFORE B's add, regardless of
+    // execution order -- B's add then targets an already-destroyed entity,
+    // so ApplyCommandAt() returns false for it. That must be skipped and
+    // reported, NOT abort the whole flush (which would leave A's destroy's
+    // fate -- and the rest of the world -- in question).
+    auto addedB = s.AddSystem([e](Astra::SystemContext& ctx)
+    {
+        ctx.Commands().AddComponent<Velocity>(e, Velocity{1.0f, 2.0f, 3.0f});
+    });
+    ASSERT_TRUE(addedB.IsOk());
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+
+    // The world is consistent: A's destroy took effect, no crash, and B's
+    // skipped add left no trace (impossible -- the entity is gone).
+    EXPECT_FALSE(reg.IsValid(e));
+    EXPECT_EQ(s.PendingCommandCount(), 0u);  // flush still drains regardless of skips
+
+    // B's failed op is surfaced, attributed to B's insertionOrder (1) -- NOT
+    // A's, and NOT silently dropped.
+    const auto& errors = s.GetLastDeferredErrors();
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors[0].systemInsertionOrder, 1u);
+    EXPECT_EQ(errors[0].reason, Astra::DeferredCommandError::Reason::InvalidTargetEntity);
+}
