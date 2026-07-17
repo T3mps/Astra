@@ -718,6 +718,8 @@ namespace Astra
                     m_buffer.Clear();
                     m_commandCount = 0;
                     m_commandKeys.clear();
+                    m_hasCustomSortKey = false;
+                    m_autoSeq = 0;
                     return Result<void, ExecutionError>::Err(ExecutionError::ExecutionFailed);
                 }
 
@@ -1315,6 +1317,21 @@ namespace Astra
          * destroyed and is then cleared. Commands that already applied
          * successfully are NOT rolled back, matching Execute()'s documented
          * contract.
+         *
+         * DETERMINISM PRECONDITION: the sort below is a std::stable_sort, so
+         * commands with EQUAL keys fall back to their gather order, which is
+         * arrival order within a buffer and worker-registration (buffer
+         * slot) order across buffers -- and buffer slot assignment is
+         * scheduling-dependent, not deterministic. A fully deterministic
+         * cross-buffer apply order therefore requires every recorded
+         * SortKey to be globally unique. In real use this holds: the system
+         * scheduler stamps each system with a unique insertionOrder and a
+         * monotonic recordSequence, so no two systems' commands ever share a
+         * key. It does NOT hold for the all-default key path ({0, 0,
+         * perBufferSeq}, set when SetNextSortKey() is never called): default
+         * keys are only unique within a single buffer, so the relative order
+         * of equal-keyed commands recorded on different worker buffers is
+         * unspecified.
          */
         Result<void, CommandBuffer::ExecutionError> ExecuteSorted()
         {

@@ -383,6 +383,12 @@ TEST_F(CommandBufferTest, ExecuteSortedAppliesInKeyOrderNotRecordOrder)
 
     ParallelCommandBuffer parallelBuffer(registry.get());
 
+    // Both threads are launched before either is joined so their OS thread
+    // identities are guaranteed to be live simultaneously -- if t1 were
+    // joined before t2 started, the OS would be free to recycle t1's thread
+    // id for t2, collapsing both into the same per-worker buffer slot and
+    // spuriously failing the GetThreadCount()==2 assertion below.
+
     // Worker thread 1 records SetParent(child, parentA) FIRST (record order 0,
     // its buffer's own arrival order) but stamps it with a HIGHER sort key ->
     // under key-order flush this must apply SECOND.
@@ -392,7 +398,6 @@ TEST_F(CommandBufferTest, ExecuteSortedAppliesInKeyOrderNotRecordOrder)
         buf.SetNextSortKey(SortKey{5, 0, 0});
         buf.SetParent(child, parentA);
     });
-    t1.join();
 
     // Worker thread 2 records SetParent(child, parentB) SECOND (a later wall-
     // clock record, and a distinct worker buffer) but stamps it with a LOWER
@@ -403,6 +408,8 @@ TEST_F(CommandBufferTest, ExecuteSortedAppliesInKeyOrderNotRecordOrder)
         buf.SetNextSortKey(SortKey{1, 0, 0});
         buf.SetParent(child, parentB);
     });
+
+    t1.join();
     t2.join();
 
     ASSERT_EQ(parallelBuffer.GetThreadCount(), 2u);
