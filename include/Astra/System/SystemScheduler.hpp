@@ -248,7 +248,6 @@ namespace Astra
                 "Reentrant SystemScheduler::Execute is unsupported; if a system must "
                 "re-run systems, do it from an Astra::Exclusive system. (The depth "
                 "counter keeps this safe, but nesting is almost always a design error.)");
-            ExecutionGuard guard(m_executionDepth);
 
             if (m_needsRebuild)
             {
@@ -260,42 +259,76 @@ namespace Astra
             // has no rebind API, so a change of registry between Execute()
             // calls requires a fresh ParallelCommandBuffer; ordinary usage
             // (and every test) calls Execute() repeatedly with the SAME
-            // registry, so in practice this allocates once. Task-2-scope
-            // note: rebinding drops any commands recorded but not yet
-            // flushed in the old buffer -- Task 3 hasn't wired a flush into
-            // Execute() yet, so nothing today prevents that; not a
-            // regression, just an explicit limitation of this task's slice.
+            // registry, so in practice this allocates once. Since Task 3 (below)
+            // flushes and clears m_commandBuffer before every Execute() call
+            // returns, a caller switching registries between calls never finds
+            // leftover unflushed commands here -- the old buffer is already
+            // empty by the time that would matter.
             if (!m_commandBuffer || m_commandBufferRegistry != &registry)
             {
                 m_commandBuffer = std::make_unique<ParallelCommandBuffer>(&registry);
                 m_commandBufferRegistry = &registry;
             }
 
-            // Build execution context
-            SystemExecutionContext context;
-            context.registry = &registry;
-            context.commandBuffer = m_commandBuffer.get();
-            context.parallelGroups = m_executionPlan;
-            context.systems.reserve(m_systems.size());
-            context.contextSystems.reserve(m_systems.size());
-            context.metadata.reserve(m_systems.size());
-
-            for (const auto& entry : m_systems)
             {
-                context.systems.push_back(entry.execute);
-                context.contextSystems.push_back(entry.executeContext);
-                context.metadata.push_back(entry.metadata);
+                // Scope the ExecutionGuard so m_executionDepth returns to 0
+                // BEFORE the flush below runs, making the class's own
+                // documented contract literal (see ExecutionGuard's doc
+                // comment: "Depth returning to zero is the designated B2
+                // command-buffer sync point") rather than relying on the
+                // guard being about to destruct at function exit anyway.
+                ExecutionGuard guard(m_executionDepth);
+
+                // Build execution context
+                SystemExecutionContext context;
+                context.registry = &registry;
+                context.commandBuffer = m_commandBuffer.get();
+                context.parallelGroups = m_executionPlan;
+                context.systems.reserve(m_systems.size());
+                context.contextSystems.reserve(m_systems.size());
+                context.metadata.reserve(m_systems.size());
+
+                for (const auto& entry : m_systems)
+                {
+                    context.systems.push_back(entry.execute);
+                    context.contextSystems.push_back(entry.executeContext);
+                    context.metadata.push_back(entry.metadata);
+                }
+
+                // Execute via the provided executor
+                executor->Execute(context);
             }
 
-            // Execute via the provided executor
-            executor->Execute(context);
+            // Task 3: the depth==0 sync point. Every context system has now
+            // returned (the ExecutionGuard above just destructed), so no
+            // worker is still recording into m_commandBuffer's per-thread
+            // buffers -- flush every recorded deferred command, across every
+            // worker buffer, in deterministic SortKey order. Determinism
+            // holds because SystemContext::Commands() stamps every command
+            // with {this system's unique insertionOrder, 0, a per-system
+            // monotonic recordSequence} -- see ParallelCommandBuffer::
+            // ExecuteSorted()'s documented precondition.
+            auto flushResult = m_commandBuffer->ExecuteSorted();
+            // Task 4: surface deferred-flush errors via the per-system error channel.
+            (void)flushResult;
+
+            // Start the next frame's recording from empty regardless of
+            // outcome. ExecuteSorted() already clears every worker buffer on
+            // both success and failure (see its rollback comment), so this is
+            // a defensive no-op today -- kept so "Execute() always leaves the
+            // buffer empty" doesn't silently depend on ExecuteSorted's
+            // internals never changing.
+            m_commandBuffer->Clear();
         }
 
         /**
-         * Total number of deferred commands recorded (but, as of Task 2, not
-         * yet flushed/applied -- see Task 3) across every context system's
-         * per-worker CommandBuffer. Exposed so callers/tests can observe that
-         * a void(SystemContext&) system actually recorded something without
+         * Total number of deferred commands recorded across every context
+         * system's per-worker CommandBuffer that have not yet been flushed.
+         * Since Task 3, Execute() flushes and clears m_commandBuffer before
+         * it returns, so this is 0 between Execute() calls; it is only
+         * meaningfully non-zero while inspected from inside a system mid-
+         * Execute(). Exposed so callers/tests can observe that a
+         * void(SystemContext&) system actually recorded something without
          * reaching into the owned ParallelCommandBuffer directly.
          */
         ASTRA_NODISCARD size_t PendingCommandCount() const
@@ -313,6 +346,20 @@ namespace Astra
             m_systemIndices.Clear();
             m_executionPlan.clear();
             m_needsRebuild = true;
+
+            // M2 (Task 2 review fix): Clear() used to leave any pending-but-
+            // unflushed deferred commands sitting in m_commandBuffer, so a
+            // later Execute() with a completely different set of systems
+            // could still flush stale commands recorded by systems Clear()
+            // just removed. Drop them here too, consistent with the Task 3
+            // flush lifecycle (every Execute() call starts and ends with an
+            // empty buffer; Clear() must not be the one path that leaves it
+            // dirty). m_commandBuffer may still be null if Execute() was
+            // never called on this scheduler.
+            if (m_commandBuffer)
+            {
+                m_commandBuffer->Clear();
+            }
         }
         
         ASTRA_NODISCARD size_t Size() const noexcept

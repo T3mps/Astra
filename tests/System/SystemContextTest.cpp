@@ -13,12 +13,8 @@ namespace
 
 // ---- Task 2: void(SystemContext&) systems run, read the registry, and -----
 // ---- record deferred commands into their per-worker CommandBuffer. --------
-//
-// Scope boundary (per the Task 2 brief): the SystemScheduler OWNS the
-// ParallelCommandBuffer and the executors invoke context systems into it, but
-// nothing flushes/applies the recorded commands yet -- that is Task 3. So
-// these tests assert INVOCATION and RECORDING only; they deliberately do NOT
-// assert that the deferred DestroyEntity actually took effect.
+// ---- Task 3 wires the flush: by the time Execute() returns, every ---------
+// ---- recorded command has been applied and the buffer is empty again. -----
 
 TEST(SystemContext, ContextLambdaSystemRunsReadsRegistryAndRecordsCommand)
 {
@@ -43,11 +39,12 @@ TEST(SystemContext, ContextLambdaSystemRunsReadsRegistryAndRecordsCommand)
 
     EXPECT_TRUE(ran);                        // the context system was invoked
     EXPECT_TRUE(sawValidEntity);              // and could read the registry
-    EXPECT_EQ(s.PendingCommandCount(), 1u);   // and recorded exactly one command
 
-    // Task 3 (flush) is not wired in yet: the deferred DestroyEntity has not
-    // been applied. This is the deliberate Task 2/3 scope boundary.
-    EXPECT_TRUE(reg.IsValid(e));
+    // Task 3: Execute() flushes the recorded command (in insertion order for
+    // the sequential/null-scheduler path) and clears the buffer before
+    // returning -- the deferred DestroyEntity has now actually taken effect.
+    EXPECT_EQ(s.PendingCommandCount(), 0u);
+    EXPECT_FALSE(reg.IsValid(e));
 }
 
 TEST(SystemContext, ViewLambdaSystemStillRoutesToViewForEachNotMisroutedAsContext)
@@ -166,7 +163,112 @@ TEST(SystemContext, StructTypedContextSystemsRunConcurrentlyEachRecordingIntoOwn
     s.Execute(reg, &exec);
 
     EXPECT_EQ(recorded.load(), 2);
-    // Total across every per-worker CommandBuffer, regardless of which
-    // worker thread happened to record which command.
-    EXPECT_EQ(s.PendingCommandCount(), 2u);
+    // Task 3: Execute() flushes every per-worker CommandBuffer (regardless of
+    // which worker thread happened to record which command) and clears them
+    // before returning -- both deferred DestroyEntity commands have now
+    // actually taken effect, and nothing is left pending.
+    EXPECT_EQ(s.PendingCommandCount(), 0u);
+    EXPECT_FALSE(reg.IsValid(e1));
+    EXPECT_FALSE(reg.IsValid(e2));
+}
+
+// ---- Task 3: the deterministic flush at the depth==0 sync point -----------
+
+namespace
+{
+    // A tiny non-empty component whose value records WHICH system last wrote
+    // it -- lets the test tell the two systems' deferred writes apart after
+    // the flush without needing to inspect the CommandBuffer internals.
+    struct WinnerTag
+    {
+        int writer = -1;
+    };
+    static_assert(Astra::Component<WinnerTag>, "WinnerTag must satisfy Component concept");
+
+    // Two struct-typed context systems with DISJOINT declared Writes<> masks
+    // (same pattern as DestroyViaContextA/B above) so BuildExecutionPlan
+    // groups them into ONE multi-member parallel group -- exercising
+    // ParallelExecutor's IWorkScheduler::ParallelFor branch, not the
+    // group.size()==1 sequential shortcut. A trait-less context LAMBDA always
+    // gets a solo group and would never exercise this.
+    //
+    // Each system defers an unconditional "overwrite" of WinnerTag on the
+    // SAME target entity: RemoveComponent (always succeeds because the tag
+    // is pre-seeded on the entity before Execute()) immediately followed by
+    // AddComponent with this system's own writer id. WinnerTag itself is NOT
+    // in either system's declared mask -- it's the deferred change, not a
+    // declared read/write, which is exactly why deferring it lets both
+    // systems run concurrently without racing each other's structural
+    // mutation of the shared target entity.
+    //
+    // Determinism: SortKey compares insertionOrder FIRST, so every command
+    // DeferWinnerA (insertionOrder 0) records sorts before every command
+    // DeferWinnerB (insertionOrder 1) records, regardless of which worker
+    // thread recorded them or how the two systems happened to interleave.
+    // The flush therefore always applies A's Remove+Add, then B's Remove+Add
+    // -- B (the higher insertionOrder) always wins.
+    struct DeferWinnerA : Astra::SystemTraits<Astra::Writes<Position>>
+    {
+        Astra::Entity target;
+        explicit DeferWinnerA(Astra::Entity e) : target(e) {}
+        void operator()(Astra::SystemContext& ctx)
+        {
+            ctx.Commands().RemoveComponent<WinnerTag>(target);
+            ctx.Commands().AddComponent<WinnerTag>(target, WinnerTag{0});
+        }
+    };
+
+    struct DeferWinnerB : Astra::SystemTraits<Astra::Writes<Velocity>>
+    {
+        Astra::Entity target;
+        explicit DeferWinnerB(Astra::Entity e) : target(e) {}
+        void operator()(Astra::SystemContext& ctx)
+        {
+            ctx.Commands().RemoveComponent<WinnerTag>(target);
+            ctx.Commands().AddComponent<WinnerTag>(target, WinnerTag{1});
+        }
+    };
+}
+
+TEST(SystemContext, DeferredCommandsFlushDeterministicallyByInsertionOrderAcross20Runs)
+{
+    // One real multi-threaded pool, reused across every run: what's under
+    // test is that the FLUSH is deterministic despite genuine concurrent
+    // recording, not that thread startup/teardown is deterministic.
+    auto pool = std::make_shared<Astra::Testing::TestWorkerPool>();
+
+    for (int run = 0; run < 20; ++run)
+    {
+        Astra::Registry reg;
+        Astra::Entity target = reg.CreateEntity<Position, Velocity>();
+        // Pre-seed directly via the immediate Registry API (not deferred) so
+        // both systems' deferred RemoveComponent<WinnerTag> has something to
+        // remove -- RemoveComponentByID fails if the entity doesn't already
+        // have the component, and a failed command would abort the flush
+        // (ExecuteSorted treats any failed ApplyCommandAt as an error), which
+        // is not what this test is exercising.
+        reg.AddComponent<WinnerTag>(target, WinnerTag{-1});
+
+        Astra::SystemScheduler s;
+        ASSERT_TRUE(s.AddSystem<DeferWinnerA>(target).IsOk());  // insertionOrder 0
+        ASSERT_TRUE(s.AddSystem<DeferWinnerB>(target).IsOk());  // insertionOrder 1
+
+        // Guard the premise: disjoint Writes<> masks must still yield one
+        // group of 2 (not two solo groups), or this test would silently stop
+        // exercising the parallel dispatch path it's designed to cover.
+        const auto& plan = s.GetExecutionPlan();
+        ASSERT_EQ(plan.size(), 1u);
+        ASSERT_EQ(plan[0].size(), 2u);
+
+        Astra::ParallelExecutor exec(pool);
+        s.Execute(reg, &exec);
+
+        ASSERT_TRUE(reg.HasComponent<WinnerTag>(target));
+        EXPECT_EQ(reg.GetComponent<WinnerTag>(target)->writer, 1)
+            << "run " << run << ": the higher-insertionOrder system (B) must "
+               "deterministically win the last-write-wins flush";
+        // The flush must have cleared the buffer -- nothing left pending for
+        // a subsequent frame to (re)apply.
+        EXPECT_EQ(s.PendingCommandCount(), 0u) << "run " << run;
+    }
 }
