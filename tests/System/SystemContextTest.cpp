@@ -319,3 +319,116 @@ TEST(SystemContext, DeferredCommandTargetingEntityDestroyedEarlierInSameFlushIsS
     EXPECT_EQ(errors[0].systemInsertionOrder, 1u);
     EXPECT_EQ(errors[0].reason, Astra::DeferredCommandError::Reason::InvalidTargetEntity);
 }
+
+// ---- Task 5: worker-safe deferred entity creation via placeholder entities, --
+// ---- resolved to DETERMINISTIC real ids at the sync-point flush. ------------
+
+namespace
+{
+    // Two struct-typed context systems with DISJOINT declared Writes<> masks so
+    // BuildExecutionPlan groups them into ONE multi-member parallel group --
+    // ParallelExecutor then dispatches them genuinely concurrently under the
+    // real TestWorkerPool (same pattern as the Task 3 determinism test).
+    //
+    // Each system defers CREATION of a fresh entity plus an AddComponent on
+    // that just-created entity, referencing it by the PLACEHOLDER handle that
+    // ctx.Commands().CreateEntity() returns. No EntityManager allocation
+    // happens at record time (that would race across the two workers); the
+    // placeholder is resolved to a real id single-threaded at the flush, in
+    // sort-key (insertionOrder) order -- so system A (insertionOrder 0) always
+    // resolves before system B (insertionOrder 1), giving deterministic ids.
+    struct SpawnPositionEntity : Astra::SystemTraits<Astra::Writes<Position>>
+    {
+        void operator()(Astra::SystemContext& ctx)
+        {
+            Astra::Entity e = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Position>(e, Position{1.0f, 2.0f, 3.0f});
+        }
+    };
+
+    struct SpawnVelocityEntity : Astra::SystemTraits<Astra::Writes<Velocity>>
+    {
+        void operator()(Astra::SystemContext& ctx)
+        {
+            Astra::Entity e = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Velocity>(e, Velocity{4.0f, 5.0f, 6.0f});
+        }
+    };
+}
+
+TEST(SystemContext, DeferredCreateResolvesToRealEntitiesWithDeterministicIdsAcross20Runs)
+{
+    // One real multi-threaded pool reused across every run: what's under test
+    // is that placeholder RESOLUTION is deterministic despite genuinely
+    // concurrent recording of CreateEntity from two workers, not that thread
+    // startup/teardown is deterministic.
+    auto pool = std::make_shared<Astra::Testing::TestWorkerPool>();
+
+    // Captured from run 0; every later run must reproduce these EXACT resolved
+    // real-entity values -- the B2 determinism contract for deferred creation.
+    Astra::Entity::StorageType posValueRun0 = 0;
+    Astra::Entity::StorageType velValueRun0 = 0;
+
+    for (int run = 0; run < 20; ++run)
+    {
+        Astra::Registry reg;
+
+        // Pre-register Position/Velocity on the main thread. CommandBuffer::
+        // AddComponent registers the component type at RECORD time; the two
+        // systems record concurrently, so a first-ever registration of two
+        // different component types would race the shared ComponentRegistry.
+        // That race is orthogonal to Task 5 (deferred entity CREATION) -- the
+        // Task 3 determinism test avoids it the same way by pre-seeding its
+        // component. Pre-registering leaves each system's record-time
+        // AddComponent a pure lookup, isolating this test to what it tests:
+        // worker-safe placeholder creation + deterministic id resolution.
+        reg.GetComponentRegistry()->RegisterComponent<Position>();
+        reg.GetComponentRegistry()->RegisterComponent<Velocity>();
+
+        Astra::SystemScheduler s;
+        ASSERT_TRUE(s.AddSystem<SpawnPositionEntity>().IsOk());  // insertionOrder 0
+        ASSERT_TRUE(s.AddSystem<SpawnVelocityEntity>().IsOk());  // insertionOrder 1
+
+        // Guard the premise: disjoint Writes<> masks must yield one group of 2
+        // (concurrent dispatch), not two solo groups.
+        const auto& plan = s.GetExecutionPlan();
+        ASSERT_EQ(plan.size(), 1u);
+        ASSERT_EQ(plan[0].size(), 2u);
+
+        Astra::ParallelExecutor exec(pool);
+        s.Execute(reg, &exec);
+
+        // Both placeholders resolved to real entities carrying their component.
+        // The placeholder handles CreateEntity() returned are NOT the real ids,
+        // so query the world by component (view) to find them.
+        EXPECT_EQ(reg.Size(), 2u) << "run " << run;
+
+        auto posView = reg.CreateView<Position>();
+        auto velView = reg.CreateView<Velocity>();
+        ASSERT_EQ(posView.Size(), 1u) << "run " << run;
+        ASSERT_EQ(velView.Size(), 1u) << "run " << run;
+
+        Astra::Entity posEntity = Astra::Entity::Invalid();
+        posView.ForEach([&](Astra::Entity e, Position&) { posEntity = e; });
+        Astra::Entity velEntity = Astra::Entity::Invalid();
+        velView.ForEach([&](Astra::Entity e, Velocity&) { velEntity = e; });
+
+        ASSERT_TRUE(reg.IsValid(posEntity)) << "run " << run;
+        ASSERT_TRUE(reg.IsValid(velEntity)) << "run " << run;
+
+        if (run == 0)
+        {
+            posValueRun0 = posEntity.GetValue();
+            velValueRun0 = velEntity.GetValue();
+        }
+        else
+        {
+            // Deterministic resolution: identical resolved real ids every run.
+            EXPECT_EQ(posEntity.GetValue(), posValueRun0) << "run " << run;
+            EXPECT_EQ(velEntity.GetValue(), velValueRun0) << "run " << run;
+        }
+
+        // The flush drained every recorded command -- nothing left pending.
+        EXPECT_EQ(s.PendingCommandCount(), 0u) << "run " << run;
+    }
+}

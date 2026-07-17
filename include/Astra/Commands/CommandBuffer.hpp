@@ -8,6 +8,7 @@
 #include <span>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -138,8 +139,26 @@ namespace Astra
     public:
         using ExecutionError = CommandError;
 
-        explicit CommandBuffer(Registry* registry) :
-            m_registry(registry)
+        // Placeholder-resolution map (Theme B2 Task 5): maps a deferred-mode
+        // placeholder Entity's raw storage value -> the real Entity it resolved
+        // to. Populated as CreateEntity/CreateEntities commands are applied at
+        // flush; consumed to translate every later command's Entity fields.
+        // Keyed by value (not by Entity) because a placeholder is deliberately
+        // NOT a live entity. ParallelCommandBuffer::ExecuteSorted() keeps ONE
+        // of these per worker buffer (placeholders are per-buffer), so a
+        // placeholder value reused across two buffers never collides.
+        using PlaceholderMap = std::unordered_map<Entity::StorageType, Entity>;
+
+        // deferredCreation: when true, CreateEntity/CreateEntities return a
+        // PLACEHOLDER Entity and record the create command WITHOUT touching the
+        // shared EntityManager (worker-safe); the real id is allocated
+        // single-threaded at flush and back-patched (see ResolvePlaceholders).
+        // Standalone CommandBuffers default to eager (false) -- unchanged
+        // behavior. ParallelCommandBuffer constructs its per-worker buffers
+        // with deferredCreation == true (see InitializeThreadBuffer).
+        explicit CommandBuffer(Registry* registry, bool deferredCreation = false) :
+            m_registry(registry),
+            m_deferredCreation(deferredCreation)
         {
             ASTRA_ASSERT(registry != nullptr, "Registry cannot be null");
         }
@@ -213,20 +232,45 @@ namespace Astra
         // ============= Entity Commands =============
 
         /**
-         * Create a new entity. The entity ID is allocated from the Registry's
-         * EntityManager IMMEDIATELY (at record time); only the archetype
-         * insertion is deferred to Execute().
+         * Create a new entity.
          *
-         * THREADING: because allocation mutates shared Registry state at
-         * record time, CreateEntity/CreateEntities must only be recorded from
-         * the thread that owns the Registry — including when this buffer is a
-         * ParallelCommandBuffer thread buffer. All other commands are safe to
-         * record from worker threads.
+         * EAGER mode (standalone CommandBuffer, the default): the entity ID is
+         * allocated from the Registry's EntityManager IMMEDIATELY (at record
+         * time); only the archetype insertion is deferred to Execute().
+         * THREADING: because allocation mutates shared Registry state at record
+         * time, in this mode CreateEntity/CreateEntities must only be recorded
+         * from the thread that owns the Registry.
+         *
+         * DEFERRED mode (ParallelCommandBuffer per-worker buffers, Task 5):
+         * returns a PLACEHOLDER Entity and records the create command WITHOUT
+         * allocating from the EntityManager -- fully worker-safe. The
+         * placeholder may be used in subsequent deferred ops recorded into the
+         * SAME buffer (AddComponent, SetParent, ...). At flush the placeholder
+         * resolves to a real id (single-threaded, in sort-key order ->
+         * deterministic) and every referencing command is back-patched. See
+         * ResolvePlaceholders / ParallelCommandBuffer::ExecuteSorted.
          */
         Entity CreateEntity()
         {
             if (!m_registry)
                 return Entity::Invalid();
+
+            if (m_deferredCreation)
+            {
+                // Worker-safe: no EntityManager touch at record time.
+                Entity placeholder = MakePlaceholder();
+
+                size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntityPayload);
+                size_t alignedSize = 0;
+                std::byte* ptr = m_buffer.Allocate(totalSize, &alignedSize);
+                StampCommand(ptr);
+
+                new (ptr) CommandHeader{CommandType::CreateEntity, 0, static_cast<uint32_t>(alignedSize)};
+                new (ptr + sizeof(CommandHeader)) CreateEntityPayload{placeholder};
+
+                m_commandCount++;
+                return placeholder;
+            }
 
             auto& manager = m_registry->GetEntityManager();
             Entity entity = manager.Create();
@@ -275,6 +319,26 @@ namespace Astra
         {
             if (!m_registry || count == 0)
                 return;
+
+            if (m_deferredCreation)
+            {
+                // Worker-safe: fill placeholders, record them, allocate at flush.
+                for (size_t i = 0; i < count; ++i)
+                    outEntities[i] = MakePlaceholder();
+
+                size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntitiesPayload) + count * sizeof(Entity);
+                std::byte* ptr = m_buffer.Allocate(totalSize);
+                StampCommand(ptr);
+
+                new (ptr) CommandHeader{CommandType::CreateEntities, 0, static_cast<uint32_t>(totalSize)};
+                auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntitiesPayload{static_cast<uint32_t>(count)};
+
+                Entity* entityDst = reinterpret_cast<Entity*>(payload + 1);
+                std::memcpy(entityDst, outEntities, count * sizeof(Entity));
+
+                m_commandCount++;
+                return;
+            }
 
             auto& manager = m_registry->GetEntityManager();
             size_t created = manager.CreateBatch(count, outEntities);
@@ -733,10 +797,22 @@ namespace Astra
             std::byte* end = ptr + m_buffer.Size();
             m_lastExecutedCount = 0;
 
+            // Deferred-mode buffers (ParallelCommandBuffer's per-worker buffers)
+            // carry placeholder entities from CreateEntity/CreateEntities; a
+            // per-Execute() map resolves them to real ids in physical apply
+            // order (each buffer owns its own placeholders, so a local map is
+            // sufficient here -- the cross-buffer key is only needed by the
+            // sorted flush). Eager buffers never enter this branch, paying
+            // nothing.
+            PlaceholderMap placeholders;
+
             while (ptr < end)
             {
                 auto* header = reinterpret_cast<CommandHeader*>(ptr);
                 std::byte* payloadPtr = ptr + sizeof(CommandHeader);
+
+                if (m_deferredCreation)
+                    ResolvePlaceholders(header->type, payloadPtr, placeholders);
 
                 bool success = ExecuteCommand(header->type, payloadPtr);
 
@@ -751,6 +827,7 @@ namespace Astra
                     m_commandKeys.clear();
                     m_hasCustomSortKey = false;
                     m_autoSeq = 0;
+                    m_nextPlaceholder = 0;
                     return Result<void, ExecutionError>::Err(ExecutionError::ExecutionFailed);
                 }
 
@@ -811,6 +888,33 @@ namespace Astra
         }
 
         /**
+         * Placeholder-resolving variant of ApplyCommandAt, used by the sorted
+         * flush (ParallelCommandBuffer::ExecuteSorted). Before applying, it
+         * translates every placeholder Entity field in the command through
+         * `map`, and -- for a CreateEntity/CreateEntities command -- allocates
+         * the real id THEN (single-threaded at the flush -> worker-safe and,
+         * because ExecuteSorted visits commands in sort-key order,
+         * deterministic) and records placeholder->real in `map` so later
+         * commands referencing it resolve correctly.
+         *
+         * `map` MUST be the per-buffer map for THIS buffer: placeholders are
+         * per-buffer counters, so two buffers can mint the same placeholder
+         * value; ExecuteSorted therefore keys one map per CommandBuffer*.
+         *
+         * @param offset Byte offset of a CommandHeader from CommandKeys().
+         * @param map    This buffer's placeholder->real resolution map.
+         * @return true iff the (translated) command applied successfully.
+         */
+        bool ResolveAndApplyCommandAt(size_t offset, PlaceholderMap& map)
+        {
+            std::byte* ptr = m_buffer.Data() + offset;
+            auto* header = reinterpret_cast<CommandHeader*>(ptr);
+            std::byte* payloadPtr = ptr + sizeof(CommandHeader);
+            ResolvePlaceholders(header->type, payloadPtr, map);
+            return ExecuteCommand(header->type, payloadPtr);
+        }
+
+        /**
          * Clear all pending commands without executing them.
          * Also cleans up any component data destructors.
          */
@@ -824,6 +928,7 @@ namespace Astra
             m_commandKeys.clear();
             m_hasCustomSortKey = false;
             m_autoSeq = 0;
+            m_nextPlaceholder = 0;
             m_reportedErrors.clear();
         }
 
@@ -940,6 +1045,186 @@ namespace Astra
             m_commandKeys.emplace_back(key, offset);
         }
 
+        // ============= Placeholder Entities (deferred creation, Task 5) =======
+
+        /**
+         * Mint the next per-buffer placeholder Entity for deferred creation.
+         *
+         * ENCODING (collision-free by construction): the version field is set
+         * to 0 and the id field holds a per-buffer monotonic counter. A real
+         * entity handed out by EntityManager ALWAYS carries a nonzero version
+         * (INITIAL_VERSION == 1; recycling wraps 255->1, never to NULL_VERSION
+         * == 0; IsValid() rejects version 0), so a version-0 handle can never
+         * equal any real entity -- see IsPlaceholderEntity. It is also never the
+         * all-ones INVALID sentinel (whose version field is all ones, != 0). The
+         * id field is ID_BITS wide (2^24 values in the default build), so a
+         * single buffer would have to defer 16M creations in one flush window to
+         * exhaust the space; the counter resets to 0 every Clear()/flush.
+         */
+        Entity MakePlaceholder() noexcept
+        {
+            Entity placeholder(static_cast<Entity::StorageType>(m_nextPlaceholder),
+                               static_cast<Entity::VersionType>(0));
+            ++m_nextPlaceholder;
+            return placeholder;
+        }
+
+        // True iff `e` is a deferred-creation placeholder (version field == 0).
+        // Real entities never have version 0; the INVALID sentinel has an
+        // all-ones version, so this also excludes it.
+        static constexpr bool IsPlaceholderEntity(Entity e) noexcept
+        {
+            return e.GetVersion() == 0;
+        }
+
+        /**
+         * Translate an entity FIELD of an already-recorded command from a
+         * placeholder to its resolved real id, in place. A non-placeholder
+         * (real) entity passes through untouched. A placeholder with no entry
+         * in `map` -- an unresolved reference (created in a DIFFERENT buffer, or
+         * never created by any CreateEntity in this flush) -- is left as-is: it
+         * is a version-0 handle that IsValid() rejects, so the Registry op will
+         * fail and be reported through the Task 4 error channel
+         * (InvalidTargetEntity). No Registry placeholder-awareness needed.
+         */
+        static void TranslateEntity(Entity& e, const PlaceholderMap& map) noexcept
+        {
+            if (!IsPlaceholderEntity(e))
+                return;
+            auto it = map.find(e.GetValue());
+            if (it != map.end())
+                e = it->second;
+        }
+
+        /**
+         * Resolve a CreateEntity/CreateEntities payload's OWN entity slot: if it
+         * is a placeholder, allocate a real id now (single-threaded at flush)
+         * and record placeholder->real in `map`, back-patching the slot so the
+         * create executor adds the real id. A non-placeholder slot (eager-mode
+         * create, already allocated) passes through unchanged.
+         */
+        void ResolveCreatedEntity(Entity& e, PlaceholderMap& map)
+        {
+            if (!IsPlaceholderEntity(e))
+                return;
+            const Entity::StorageType placeholderValue = e.GetValue();
+            Entity real = m_registry->GetEntityManager().Create();
+            map.emplace(placeholderValue, real);  // real may be Invalid on id-space exhaustion; recorded so refs also see Invalid
+            e = real;
+        }
+
+        /**
+         * Back-patch every placeholder Entity in the command at `payload` (of
+         * the given `type`) through `map`, allocating real ids for
+         * CreateEntity/CreateEntities. Mirrors ExecuteCommand's type switch;
+         * resource commands carry no entities. Called by Execute() (deferred
+         * mode) and ResolveAndApplyCommandAt() (sorted flush) immediately
+         * before the command is applied.
+         */
+        void ResolvePlaceholders(CommandType type, std::byte* payload, PlaceholderMap& map)
+        {
+            switch (type)
+            {
+                case CommandType::CreateEntity:
+                {
+                    auto* cmd = reinterpret_cast<CreateEntityPayload*>(payload);
+                    ResolveCreatedEntity(cmd->entity, map);
+                    break;
+                }
+                case CommandType::CreateEntities:
+                {
+                    auto* cmd = reinterpret_cast<CreateEntitiesPayload*>(payload);
+                    Entity* entities = reinterpret_cast<Entity*>(cmd + 1);
+                    for (uint32_t i = 0; i < cmd->entityCount; ++i)
+                        ResolveCreatedEntity(entities[i], map);
+                    break;
+                }
+                case CommandType::DestroyEntity:
+                {
+                    TranslateEntity(reinterpret_cast<DestroyEntityPayload*>(payload)->entity, map);
+                    break;
+                }
+                case CommandType::DestroyEntities:
+                {
+                    auto* cmd = reinterpret_cast<DestroyEntitiesPayload*>(payload);
+                    Entity* entities = reinterpret_cast<Entity*>(cmd + 1);
+                    for (uint32_t i = 0; i < cmd->entityCount; ++i)
+                        TranslateEntity(entities[i], map);
+                    break;
+                }
+                case CommandType::AddComponent:
+                {
+                    TranslateEntity(reinterpret_cast<AddComponentPayload*>(payload)->entity, map);
+                    break;
+                }
+                case CommandType::RemoveComponent:
+                {
+                    TranslateEntity(reinterpret_cast<RemoveComponentPayload*>(payload)->entity, map);
+                    break;
+                }
+                case CommandType::AddComponentBatch:
+                {
+                    auto* cmd = reinterpret_cast<AddComponentBatchPayload*>(payload);
+                    Entity* entities = cmd->GetEntitiesPtr();
+                    for (uint32_t i = 0; i < cmd->entityCount; ++i)
+                        TranslateEntity(entities[i], map);
+                    break;
+                }
+                case CommandType::RemoveComponentBatch:
+                {
+                    auto* cmd = reinterpret_cast<RemoveComponentBatchPayload*>(payload);
+                    Entity* entities = cmd->GetEntitiesPtr();
+                    for (uint32_t i = 0; i < cmd->entityCount; ++i)
+                        TranslateEntity(entities[i], map);
+                    break;
+                }
+                case CommandType::SetParent:
+                case CommandType::AddChild:  // dispatches to ExecuteSetParent; two Entity fields regardless of order
+                {
+                    auto* cmd = reinterpret_cast<SetParentPayload*>(payload);
+                    TranslateEntity(cmd->child, map);
+                    TranslateEntity(cmd->parent, map);
+                    break;
+                }
+                case CommandType::RemoveParent:
+                {
+                    TranslateEntity(reinterpret_cast<RemoveParentPayload*>(payload)->child, map);
+                    break;
+                }
+                case CommandType::RemoveChild:
+                {
+                    auto* cmd = reinterpret_cast<RemoveChildPayload*>(payload);
+                    TranslateEntity(cmd->parent, map);
+                    TranslateEntity(cmd->child, map);
+                    break;
+                }
+                case CommandType::RemoveAllChildren:
+                {
+                    TranslateEntity(reinterpret_cast<RemoveAllChildrenPayload*>(payload)->parent, map);
+                    break;
+                }
+                case CommandType::AddLink:
+                {
+                    auto* cmd = reinterpret_cast<AddLinkPayload*>(payload);
+                    TranslateEntity(cmd->a, map);
+                    TranslateEntity(cmd->b, map);
+                    break;
+                }
+                case CommandType::RemoveLink:
+                {
+                    auto* cmd = reinterpret_cast<RemoveLinkPayload*>(payload);
+                    TranslateEntity(cmd->a, map);
+                    TranslateEntity(cmd->b, map);
+                    break;
+                }
+                case CommandType::SetResource:
+                case CommandType::RemoveResource:
+                case CommandType::ClearResources:
+                default:
+                    break;  // resource commands carry no entity fields
+            }
+        }
+
         /**
          * Destructor function for component cleanup.
          */
@@ -1002,6 +1287,14 @@ namespace Astra
         bool ExecuteCreateEntity(std::byte* payload)
         {
             auto* cmd = reinterpret_cast<CreateEntityPayload*>(payload);
+            // In eager mode cmd->entity is a real, already-allocated id (never
+            // Invalid -- CreateEntity early-returns before recording on
+            // exhaustion). In deferred mode ResolvePlaceholders has back-patched
+            // this to the real id it allocated at flush; if allocation failed
+            // (id space exhausted) it left Invalid here, which we must not
+            // AddEntity(). Report+skip via the same false-return path.
+            if (cmd->entity == Entity::Invalid())
+                return false;
             m_registry->GetArchetypeManager()->AddEntity(cmd->entity);
             m_registry->GetSignalManager()->Emit<Events::EntityCreated>(cmd->entity);
             // Commit point: cmd->entity now has a live archetype row and must
@@ -1032,6 +1325,13 @@ namespace Astra
 
             for (uint32_t i = 0; i < cmd->entityCount; ++i)
             {
+                // A deferred-mode placeholder whose flush-time allocation failed
+                // (id space exhausted) was left Invalid by ResolvePlaceholders;
+                // skip it rather than AddEntity(Invalid). Eager-mode batches
+                // only ever record successfully-allocated ids, so this never
+                // fires for them.
+                if (entities[i] == Entity::Invalid())
+                    continue;
                 archetypeManager->AddEntity(entities[i]);
                 signalManager->Emit<Events::EntityCreated>(entities[i]);
             }
@@ -1255,6 +1555,16 @@ namespace Astra
         size_t m_commandCount = 0;
         size_t m_lastExecutedCount = 0;  // For debugging partial execution failures
 
+        // Task 5: deferred-creation mode (ParallelCommandBuffer per-worker
+        // buffers). When true, CreateEntity/CreateEntities mint placeholders
+        // instead of touching the shared EntityManager at record time, and the
+        // flush resolves them (see MakePlaceholder/ResolvePlaceholders). Fixed
+        // at construction; standalone buffers are eager (false).
+        const bool m_deferredCreation = false;
+        // Per-buffer placeholder counter (id field of the next placeholder);
+        // reset to 0 on every Clear()/flush, so it stays small frame to frame.
+        Entity::StorageType m_nextPlaceholder = 0;
+
         // Sort-key bookkeeping, parallel to m_buffer (see StampCommand/SetNextSortKey).
         std::vector<std::pair<SortKey, size_t>> m_commandKeys;
         SortKey m_currentSortKey{};
@@ -1295,8 +1605,11 @@ namespace Astra
          * while recording commands, or the buffer of a different thread may
          * be written concurrently.
          *
-         * NOTE: CreateEntity/CreateEntities must not be recorded from worker
-         * threads (they allocate from the shared EntityManager at record time).
+         * These per-worker buffers are DEFERRED-mode (Task 5), so
+         * CreateEntity/CreateEntities ARE safe to record from any worker
+         * thread: they mint a placeholder and record it without touching the
+         * shared EntityManager, and the flush resolves the placeholder to a
+         * real id single-threaded and deterministically.
          */
         CommandBuffer& GetThreadBuffer() const
         {
@@ -1416,9 +1729,20 @@ namespace Astra
             std::stable_sort(items.begin(), items.end(),
                 [](const Item& a, const Item& b) { return a.key < b.key; });
 
+            // Task 5: placeholder entities (from deferred CreateEntity) resolve
+            // to real ids HERE, as each CreateEntity command applies -- so real
+            // ids are allocated in sort-key order (deterministic) on this single
+            // thread. Placeholders are per-buffer counters, so keep one
+            // resolution map PER buffer: buffer A's placeholder value and buffer
+            // B's identical placeholder value must not alias. A command carrying
+            // a placeholder created in a DIFFERENT buffer finds no entry in its
+            // own map, passes through unresolved, and fails the op -> reported
+            // below as InvalidTargetEntity (the documented cross-buffer rule).
+            std::unordered_map<CommandBuffer*, CommandBuffer::PlaceholderMap> perBufferMaps;
+
             for (const auto& it : items)
             {
-                if (!it.buf->ApplyCommandAt(it.offset))
+                if (!it.buf->ResolveAndApplyCommandAt(it.offset, perBufferMaps[it.buf]))
                 {
                     // Task 4: logical failure -- skip and record, do NOT abort
                     // or roll back the flush. See this function's class-level
@@ -1564,10 +1888,14 @@ namespace Astra
                 m_buffers.resize(index + 1);
             }
 
-            // Create the buffer if it doesn't exist
+            // Create the buffer if it doesn't exist. Per-worker buffers are
+            // DEFERRED-mode (Task 5): CreateEntity/CreateEntities mint
+            // placeholders instead of allocating from the shared EntityManager
+            // at record time, so creation is safe from any worker thread; the
+            // deterministic flush (Execute/ExecuteSorted) resolves them.
             if (!m_buffers[index])
             {
-                m_buffers[index] = std::make_unique<CommandBuffer>(m_registry);
+                m_buffers[index] = std::make_unique<CommandBuffer>(m_registry, /*deferredCreation=*/true);
             }
 
             CommandBuffer* buffer = m_buffers[index].get();
