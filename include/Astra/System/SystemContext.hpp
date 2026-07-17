@@ -40,6 +40,13 @@ namespace Astra
          * insertionOrder and the next recordSequence, so ANY command the
          * caller records immediately after (DestroyEntity, AddComponent,
          * ...) carries this call's key -- see class docs above.
+         *
+         * Thread-safety note: CommandBuffer::AddComponent<T> registers T
+         * with the Registry's ComponentRegistry at record time, which is
+         * NOT thread-safe. Ensure every component type is registered (via a
+         * main-thread AddComponent/CreateView/RegisterComponent, or by an
+         * existing entity carrying it) before running systems that may
+         * first-add DIFFERENT component types concurrently from Commands().
          */
         CommandBuffer& Commands() noexcept
         {

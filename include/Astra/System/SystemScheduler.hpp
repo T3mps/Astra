@@ -358,6 +358,10 @@ namespace Astra
          * ReportError(). Cleared at the start of every Execute() call --
          * empty before the first call and after any Execute() that flushed
          * cleanly.
+         *
+         * Ordering note: only the skip-path (flush) errors are deterministically
+         * ordered (gathered in sort-key order); explicit ReportError() entries
+         * are gathered in worker-buffer-slot order, which is NOT deterministic.
          */
         ASTRA_NODISCARD const std::vector<DeferredCommandError>& GetLastDeferredErrors() const noexcept
         {

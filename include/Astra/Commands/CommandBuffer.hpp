@@ -399,6 +399,14 @@ namespace Astra
 
         /**
          * Add a component to an entity. The component data is stored inline in the buffer.
+         *
+         * Thread-safety note: this registers T with the Registry's
+         * ComponentRegistry at record time, which is NOT thread-safe. T
+         * must already be registered (main-thread AddComponent/CreateView/
+         * RegisterComponent, or an existing entity carrying it) before two
+         * worker threads may concurrently first-add DIFFERENT component
+         * types via their own CommandBuffers -- otherwise the concurrent
+         * first-registrations race.
          */
         template<Component T>
         void AddComponent(Entity entity, T&& component)
@@ -1063,6 +1071,12 @@ namespace Astra
          */
         Entity MakePlaceholder() noexcept
         {
+            // Capacity invariant: at m_nextPlaceholder == ID_MASK the id&ID_MASK
+            // wrap would alias this placeholder with id 0, aliasing two
+            // resolution-map keys. Can't-happen in practice (16M deferred
+            // creates in one flush window); Debug-only tripwire, not a
+            // shipping check.
+            ASTRA_ASSERT(m_nextPlaceholder < Entity::ID_MASK, "CommandBuffer: per-flush placeholder capacity exhausted (16M deferred creates)");
             Entity placeholder(static_cast<Entity::StorageType>(m_nextPlaceholder),
                                static_cast<Entity::VersionType>(0));
             ++m_nextPlaceholder;
