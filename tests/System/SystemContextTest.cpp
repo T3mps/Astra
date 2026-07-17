@@ -1,4 +1,7 @@
 #include <atomic>
+#include <map>
+#include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
@@ -9,6 +12,8 @@ namespace
 {
     using Astra::Test::Position;
     using Astra::Test::Velocity;
+    using Astra::Test::Health;
+    using Astra::Test::Transform;
 }
 
 // ---- Task 2: void(SystemContext&) systems run, read the registry, and -----
@@ -430,5 +435,307 @@ TEST(SystemContext, DeferredCreateResolvesToRealEntitiesWithDeterministicIdsAcro
 
         // The flush drained every recorded command -- nothing left pending.
         EXPECT_EQ(s.PendingCommandCount(), 0u) << "run " << run;
+    }
+}
+
+// ---- Task 6: the acceptance gate -- spec Section 14's determinism ---------
+// ---- contract, end to end: same initial world + same systems => -----------
+// ---- IDENTICAL applied order of every deferred structural change (and -----
+// ---- the real ids assigned to placeholder entities), independent of ------
+// ---- thread count / scheduling. --------------------------------------------
+
+namespace
+{
+    // Four struct-typed context systems with pairwise DISJOINT declared
+    // Writes<> masks (Position / Velocity / Health / Transform) so
+    // BuildExecutionPlan places all four in ONE parallel group (hard-
+    // asserted in the test body below) -- forcing ParallelExecutor to
+    // dispatch all four concurrently on real TestWorkerPool threads via
+    // IWorkScheduler::ParallelFor, not the group.size()==1 sequential
+    // shortcut. As with DeferWinnerA/B and DestroyViaContextA/B above, the
+    // declared mask is purely a SCHEDULING tag -- none of the four systems'
+    // deferred ops are restricted to their own mask. What makes concurrent
+    // RECORDING safe is that every mutation below goes through
+    // ctx.Commands() (deferred), never applied to the Registry synchronously
+    // inside operator().
+    //
+    // SortKey (Task 1) totally orders the flush by {insertionOrder,
+    // recordSequence}: EVERY command SysA (insertionOrder 0) recorded
+    // applies before ANY command SysB (1) recorded, which applies before ALL
+    // of SysC's (2), then SysD's (3) -- regardless of which worker thread
+    // ran which system or how their recording interleaved in real time
+    // (Task 3). That total order is what turns the elaborate overlap below
+    // into a deterministic OUTCOME rather than a race:
+    //
+    //   * health[0] and health[1]: SysA, then SysB, then SysD each
+    //     Remove+Add Health with a different value -- the highest-
+    //     insertionOrder writer (SysD) always wins (last-write-wins,
+    //     mirroring the Task 3 WinnerTag test above).
+    //   * pos[4]: SysA destroys it (insertionOrder 0); SysC's later
+    //     AddComponent<Health> targeting it (insertionOrder 2) therefore
+    //     always finds an invalid entity and is deterministically skipped +
+    //     reported (Task 4), attributed to SysC.
+    //   * vel[4]: SysB destroys it (insertionOrder 1); SysD's later
+    //     AddComponent<Health> targeting it (insertionOrder 3) is likewise
+    //     always skipped + reported, attributed to SysD.
+    //   * Every system also creates 2 entities via a placeholder handle
+    //     (Task 5), immediately adding a component to it -- resolved to a
+    //     real id single-threaded, in sort-key order, at the flush.
+    struct DetSysA : Astra::SystemTraits<Astra::Writes<Position>>
+    {
+        const std::vector<Astra::Entity>* pos;
+        const std::vector<Astra::Entity>* health;
+        DetSysA(const std::vector<Astra::Entity>* p, const std::vector<Astra::Entity>* h) : pos(p), health(h) {}
+
+        void operator()(Astra::SystemContext& ctx)
+        {
+            ctx.Commands().DestroyEntity((*pos)[0]);
+            ctx.Commands().DestroyEntity((*pos)[1]);
+            ctx.Commands().DestroyEntity((*pos)[4]);  // SysC targets this later -> deterministic skip
+
+            ctx.Commands().AddComponent<Velocity>((*pos)[2], Velocity{702.0f, 0.0f, 0.0f});
+            ctx.Commands().AddComponent<Velocity>((*pos)[3], Velocity{703.0f, 0.0f, 0.0f});
+
+            // Opens the health[0]/health[1] last-write-wins chain.
+            ctx.Commands().RemoveComponent<Health>((*health)[0]);
+            ctx.Commands().AddComponent<Health>((*health)[0], Health{100, 999});
+            ctx.Commands().RemoveComponent<Health>((*health)[1]);
+            ctx.Commands().AddComponent<Health>((*health)[1], Health{101, 999});
+
+            Astra::Entity n0 = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Position>(n0, Position{9000.0f, 0.0f, 0.0f});
+            Astra::Entity n1 = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Position>(n1, Position{9001.0f, 0.0f, 0.0f});
+        }
+    };
+
+    struct DetSysB : Astra::SystemTraits<Astra::Writes<Velocity>>
+    {
+        const std::vector<Astra::Entity>* vel;
+        const std::vector<Astra::Entity>* health;
+        DetSysB(const std::vector<Astra::Entity>* v, const std::vector<Astra::Entity>* h) : vel(v), health(h) {}
+
+        void operator()(Astra::SystemContext& ctx)
+        {
+            ctx.Commands().DestroyEntity((*vel)[0]);
+            ctx.Commands().DestroyEntity((*vel)[1]);
+            ctx.Commands().DestroyEntity((*vel)[4]);  // SysD targets this later -> deterministic skip
+
+            ctx.Commands().AddComponent<Health>((*vel)[2], Health{802, 999});
+            ctx.Commands().AddComponent<Health>((*vel)[3], Health{803, 999});
+
+            // Middle of the health[0]/health[1] chain: always applies after
+            // SysA's (insertionOrder 0 < 1) and before SysD's (1 < 3).
+            ctx.Commands().RemoveComponent<Health>((*health)[0]);
+            ctx.Commands().AddComponent<Health>((*health)[0], Health{200, 999});
+            ctx.Commands().RemoveComponent<Health>((*health)[1]);
+            ctx.Commands().AddComponent<Health>((*health)[1], Health{201, 999});
+
+            Astra::Entity n0 = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Velocity>(n0, Velocity{8000.0f, 0.0f, 0.0f});
+            Astra::Entity n1 = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Velocity>(n1, Velocity{8001.0f, 0.0f, 0.0f});
+        }
+    };
+
+    struct DetSysC : Astra::SystemTraits<Astra::Writes<Health>>
+    {
+        const std::vector<Astra::Entity>* health;
+        const std::vector<Astra::Entity>* pos;
+        DetSysC(const std::vector<Astra::Entity>* h, const std::vector<Astra::Entity>* p) : health(h), pos(p) {}
+
+        void operator()(Astra::SystemContext& ctx)
+        {
+            ctx.Commands().DestroyEntity((*health)[2]);
+            ctx.Commands().DestroyEntity((*health)[3]);
+
+            ctx.Commands().AddComponent<Position>((*health)[4], Position{404.0f, 0.0f, 0.0f});
+            ctx.Commands().AddComponent<Position>((*health)[5], Position{405.0f, 0.0f, 0.0f});
+
+            // pos[4] was destroyed by SysA (insertionOrder 0 < 2): this
+            // AddComponent deterministically fails and is reported against
+            // THIS system's insertionOrder (2) -- Task 4's skip+report path.
+            ctx.Commands().AddComponent<Health>((*pos)[4], Health{999, 999});
+
+            // Ordinary (non-overlapping-with-another-system) overwrite.
+            ctx.Commands().RemoveComponent<Position>((*pos)[2]);
+            ctx.Commands().AddComponent<Position>((*pos)[2], Position{502.0f, 0.0f, 0.0f});
+            ctx.Commands().RemoveComponent<Position>((*pos)[3]);
+            ctx.Commands().AddComponent<Position>((*pos)[3], Position{503.0f, 0.0f, 0.0f});
+
+            Astra::Entity n0 = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Health>(n0, Health{6000, 999});
+            Astra::Entity n1 = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Health>(n1, Health{6001, 999});
+        }
+    };
+
+    struct DetSysD : Astra::SystemTraits<Astra::Writes<Transform>>
+    {
+        const std::vector<Astra::Entity>* pos;
+        const std::vector<Astra::Entity>* vel;
+        const std::vector<Astra::Entity>* health;
+        DetSysD(const std::vector<Astra::Entity>* p, const std::vector<Astra::Entity>* v, const std::vector<Astra::Entity>* h)
+            : pos(p), vel(v), health(h) {}
+
+        void operator()(Astra::SystemContext& ctx)
+        {
+            ctx.Commands().DestroyEntity((*pos)[5]);
+            ctx.Commands().DestroyEntity((*vel)[6]);
+
+            ctx.Commands().AddComponent<Position>((*health)[6], Position{606.0f, 0.0f, 0.0f});
+
+            // Final write of the health[0]/health[1] chain: SysD has the
+            // highest insertionOrder (3), so this value always survives.
+            ctx.Commands().RemoveComponent<Health>((*health)[0]);
+            ctx.Commands().AddComponent<Health>((*health)[0], Health{300, 999});
+            ctx.Commands().RemoveComponent<Health>((*health)[1]);
+            ctx.Commands().AddComponent<Health>((*health)[1], Health{301, 999});
+
+            // vel[4] was destroyed by SysB (insertionOrder 1 < 3): this
+            // AddComponent deterministically fails and is reported against
+            // THIS system's insertionOrder (3).
+            ctx.Commands().AddComponent<Health>((*vel)[4], Health{777, 999});
+
+            Astra::Entity n0 = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Position>(n0, Position{7000.0f, 0.0f, 0.0f});
+            Astra::Entity n1 = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Position>(n1, Position{7001.0f, 0.0f, 0.0f});
+        }
+    };
+}
+
+TEST(SystemContext, RichMixOfDeferredStructuralChangesFlushesIdenticallyAcross50RunsUnderRealWorkers)
+{
+    // One real multi-threaded pool, reused across every run: what's under
+    // test is that the FLUSH (sort-key ordering, placeholder resolution,
+    // and skip+report attribution) is deterministic despite genuinely
+    // concurrent recording, not that thread startup/teardown is
+    // deterministic.
+    auto pool = std::make_shared<Astra::Testing::TestWorkerPool>();
+
+    std::string snapshotRun0;
+
+    for (int run = 0; run < 50; ++run)
+    {
+        Astra::Registry reg;
+
+        // CRITICAL prerequisite (Task 5 known limitation): CommandBuffer::
+        // AddComponent<T> calls RegisterComponent<T>() at RECORD time, so
+        // two workers first-registering DIFFERENT component types
+        // concurrently would race the shared ComponentRegistry. Pre-register
+        // every component type any system below will AddComponent<T>, on the
+        // main thread, BEFORE Execute() -- the same pattern the Task 5
+        // determinism test uses. (The entity creation below already
+        // registers these as a side effect -- RegisterComponent<T>() is
+        // idempotent -- but the calls are kept explicit so this test's
+        // correctness doesn't silently depend on that.)
+        reg.GetComponentRegistry()->RegisterComponent<Position>();
+        reg.GetComponentRegistry()->RegisterComponent<Velocity>();
+        reg.GetComponentRegistry()->RegisterComponent<Health>();
+
+        // Seed a rich initial world: 30 pre-existing entities across 3
+        // component types, single-threaded, identical every run.
+        std::vector<Astra::Entity> pos, vel, health;
+        pos.reserve(10);
+        vel.reserve(10);
+        health.reserve(10);
+        for (int i = 0; i < 10; ++i)
+            pos.push_back(reg.CreateEntityWith(Position{float(i), 0.0f, 0.0f}));
+        for (int i = 0; i < 10; ++i)
+            vel.push_back(reg.CreateEntityWith(Velocity{float(100 + i), 0.0f, 0.0f}));
+        for (int i = 0; i < 10; ++i)
+            health.push_back(reg.CreateEntityWith(Health{200 + i, 999}));
+        ASSERT_EQ(reg.Size(), 30u) << "run " << run;
+
+        Astra::SystemScheduler s;
+        ASSERT_TRUE(s.AddSystem<DetSysA>(&pos, &health).IsOk());        // insertionOrder 0
+        ASSERT_TRUE(s.AddSystem<DetSysB>(&vel, &health).IsOk());        // insertionOrder 1
+        ASSERT_TRUE(s.AddSystem<DetSysC>(&health, &pos).IsOk());        // insertionOrder 2
+        ASSERT_TRUE(s.AddSystem<DetSysD>(&pos, &vel, &health).IsOk());  // insertionOrder 3
+
+        // Hard-assert the premise: 4 pairwise-disjoint Writes<> masks must
+        // yield ONE group of 4 (genuine concurrent dispatch), never solo
+        // groups -- otherwise this gate would silently stop exercising the
+        // parallel dispatch path it exists to cover.
+        const auto& plan = s.GetExecutionPlan();
+        ASSERT_EQ(plan.size(), 1u) << "run " << run;
+        ASSERT_EQ(plan[0].size(), 4u) << "run " << run;
+
+        Astra::ParallelExecutor exec(pool);
+        s.Execute(reg, &exec);
+
+        EXPECT_EQ(s.PendingCommandCount(), 0u) << "run " << run;
+
+        // 10 destroyed (3 by A, 3 by B, 2 by C, 2 by D) + 8 created (2 per
+        // system) out of 30 initial = 28 live entities every run.
+        EXPECT_EQ(reg.Size(), 28u) << "run " << run;
+
+        // Exactly 2 deterministic skip+report failures every run (pos[4] via
+        // SysC, vel[4] via SysD -- see the systems' comments above).
+        const auto& errors = s.GetLastDeferredErrors();
+        EXPECT_EQ(errors.size(), 2u) << "run " << run;
+
+        // ---- Canonical world snapshot ----
+        // Sorted (by real entity id) map of every live entity -> a string
+        // describing exactly which of {Position, Velocity, Health} it
+        // carries and their field values. A std::map key-iterates in sorted
+        // StorageType order for free, so this is deterministic regardless of
+        // archetype/chunk iteration order. Every live entity in this world
+        // carries at least one of these 3 types (nothing else is ever
+        // added), so unioning the 3 single-type views covers every entity
+        // exactly once (describe() re-derives the FULL per-entity string
+        // regardless of which view found it first).
+        auto describe = [](Astra::Registry& r, Astra::Entity e) -> std::string
+        {
+            std::string out;
+            if (auto* p = r.GetComponent<Position>(e))
+                out += "P(" + std::to_string(p->x) + ")";
+            if (auto* v = r.GetComponent<Velocity>(e))
+                out += "V(" + std::to_string(v->dx) + ")";
+            if (auto* h = r.GetComponent<Health>(e))
+                out += "H(" + std::to_string(h->current) + ")";
+            return out;
+        };
+
+        std::map<Astra::Entity::StorageType, std::string> byId;
+        reg.CreateView<Position>().ForEach([&](Astra::Entity e, Position&) { byId[e.GetValue()] = describe(reg, e); });
+        reg.CreateView<Velocity>().ForEach([&](Astra::Entity e, Velocity&) { byId[e.GetValue()] = describe(reg, e); });
+        reg.CreateView<Health>().ForEach([&](Astra::Entity e, Health&) { byId[e.GetValue()] = describe(reg, e); });
+        ASSERT_EQ(byId.size(), reg.Size()) << "run " << run
+            << ": every live entity must carry Position, Velocity, and/or Health";
+
+        std::string snapshot;
+        for (const auto& [id, desc] : byId)
+        {
+            snapshot += std::to_string(id) + ":" + desc + ";";
+        }
+        // The deferred-command error list is itself gathered in globally
+        // SortKey-sorted order (ParallelCommandBuffer::ExecuteSorted -- every
+        // key here is globally unique, so there are no ties to break non-
+        // deterministically), so appending it in-order is safe.
+        for (const auto& err : errors)
+        {
+            snapshot += "ERR(" + std::to_string(err.systemInsertionOrder) + "," +
+                        std::to_string(static_cast<int>(err.reason)) + ");";
+        }
+
+        if (run == 0)
+        {
+            snapshotRun0 = snapshot;
+            // Guard against a degenerate always-equal comparison: run 0's
+            // snapshot must actually contain the entities/values this test
+            // was designed to produce.
+            ASSERT_FALSE(snapshotRun0.empty());
+        }
+        else
+        {
+            EXPECT_EQ(snapshot, snapshotRun0)
+                << "run " << run << ": deferred-command flush produced a "
+                   "DIFFERENT world state than run 0 -- a determinism bug "
+                   "(sort-key ordering, placeholder resolution, or dispatch) "
+                   "survived Tasks 1-5. This test must NOT be weakened; "
+                   "escalate instead.";
+        }
     }
 }
