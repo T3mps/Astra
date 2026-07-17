@@ -12,7 +12,9 @@
 namespace Astra
 {
     class Registry;
-    
+    class SystemContext;         // Task 2: void(SystemContext&) systems (pointer/ref-only use below)
+    class ParallelCommandBuffer; // Task 2: owned by SystemScheduler, threaded through to executors
+
     /**
      * @brief Metadata describing a system's component access patterns and scheduling hints
      */
@@ -62,16 +64,36 @@ namespace Astra
          * Indexed by system index (matches parallelGroups indices)
          */
         std::vector<Delegate<void(Registry&)>> systems;
-        
+
+        /**
+         * Execution delegates for void(SystemContext&) systems (Task 2),
+         * parallel to `systems` (same indexing). An entry is non-empty
+         * (truthy via Delegate::operator bool) exactly when the system at
+         * that index was registered with the SystemContext& signature; that
+         * truthiness is how SystemExecutor tells the two dispatch paths
+         * apart, so it doubles as the "is this a context system" flag rather
+         * than needing a separate std::vector<bool>.
+         */
+        std::vector<Delegate<void(SystemContext&)>> contextSystems;
+
         /**
          * Metadata for each system (optional, for debugging/profiling)
          * Indexed by system index (matches parallelGroups indices)
          */
         std::vector<SystemMetadata> metadata;
-        
+
         /**
          * The registry to execute systems on
          */
         Registry* registry = nullptr;
+
+        /**
+         * SystemScheduler's owned per-worker deferred-command sink (Task 2).
+         * Non-null whenever the scheduler has been Execute()'d at least once;
+         * SystemExecutor uses ->GetThreadBuffer() to hand each context
+         * system its recording CommandBuffer. Never dereferenced unless a
+         * context system is actually dispatched.
+         */
+        ParallelCommandBuffer* commandBuffer = nullptr;
     };
 } // namespace Astra

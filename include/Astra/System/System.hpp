@@ -8,6 +8,7 @@
 #include "../Component/Component.hpp"
 #include "../Core/Base.hpp"
 #include "../Registry/Registry.hpp"
+#include "SystemContext.hpp"
 
 namespace Astra
 {
@@ -55,11 +56,20 @@ namespace Astra
     template<typename T>
     inline constexpr bool HasSystemTraits_v = HasSystemTraits<T>::value;
     
+    // NOTE (Task 2): a void(SystemContext&) callable has an operator() and is
+    // NOT invocable with Registry&, so without the trailing !ContextSystem<T>
+    // clause it would satisfy LambdaLike and be misrouted into the
+    // view-lambda ExtractAndExecute path below (which expects
+    // (Entity, Components&...), not (SystemContext&)) -- a hard compile
+    // error inside LambdaSystemWrapper, not a graceful fallback. Context
+    // systems are routed to their own AddSystem overload instead (see
+    // SystemScheduler::AddSystem / SystemContext.hpp).
     template<typename T>
     concept LambdaLike = requires
     {
         &T::operator();  // Has operator()
-    } && !std::invocable<T, Registry&>;  // But not a traditional system
+    } && !std::invocable<T, Registry&>    // But not a traditional system
+      && !ContextSystem<T>;               // ...and not a void(SystemContext&) context system
 
     template<typename Lambda, typename... Args>
     class LambdaSystemWrapper

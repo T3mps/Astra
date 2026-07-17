@@ -1238,7 +1238,12 @@ namespace Astra
     {
     public:
         explicit ParallelCommandBuffer(Registry* registry) :
-            m_registry(registry)
+            m_registry(registry),
+            // Every instance gets a process-lifetime-unique id (never reused,
+            // 64-bit monotonic counter) -- see t_cache/ThreadCache below for
+            // why this exists: it is NOT the same thing as m_registry and
+            // must not be conflated with it.
+            m_instanceId(s_nextInstanceId.fetch_add(1, std::memory_order_relaxed))
         {
             ASTRA_ASSERT(registry != nullptr, "Registry cannot be null");
             // Pre-reserve space for typical thread counts
@@ -1260,8 +1265,16 @@ namespace Astra
          */
         CommandBuffer& GetThreadBuffer() const
         {
-            // Fast path: check thread-local cache
-            if (t_cache.context == this && t_cache.buffer != nullptr)
+            // Fast path: check thread-local cache. Guarded by BOTH the raw
+            // pointer AND m_instanceId (see ThreadCache below) -- pointer
+            // equality alone is not sufficient: if a ParallelCommandBuffer is
+            // destroyed and a later instance happens to be allocated at the
+            // same address, `t_cache.context == this` can spuriously match a
+            // STALE cache entry left behind by the destroyed instance,
+            // returning a dangling CommandBuffer& (use-after-free). The
+            // per-instance id can never repeat for the process lifetime, so
+            // this cannot false-positive.
+            if (t_cache.context == this && t_cache.contextInstanceId == m_instanceId && t_cache.buffer != nullptr)
             {
                 return *t_cache.buffer;
             }
@@ -1489,6 +1502,7 @@ namespace Astra
 
             // Update thread-local cache
             t_cache.context = const_cast<ParallelCommandBuffer*>(this);
+            t_cache.contextInstanceId = m_instanceId;
             t_cache.buffer = buffer;
             t_cache.index = index;
 
@@ -1496,14 +1510,34 @@ namespace Astra
         }
 
         Registry* m_registry;
+        const uint64_t m_instanceId;  // see GetThreadBuffer()/ThreadCache: never reused, guards against address-reuse after destruction
         mutable std::mutex m_mutex;
         mutable std::vector<std::unique_ptr<CommandBuffer>> m_buffers;
         mutable std::atomic<size_t> m_nextIndex{0};
 
-        // Thread-local cache to avoid repeated lookups
+        inline static std::atomic<uint64_t> s_nextInstanceId{1};  // 0 is never assigned; ThreadCache's default contextInstanceId is 0 so a never-populated cache can't accidentally match
+
+        // Thread-local cache to avoid repeated lookups.
+        //
+        // SAFETY: keyed by BOTH `context` (raw ParallelCommandBuffer*) AND
+        // `contextInstanceId` (ParallelCommandBuffer::m_instanceId). Pointer
+        // identity alone is not a safe cache key here: a ParallelCommandBuffer
+        // is frequently short-lived (e.g. SystemScheduler owns one and
+        // recreates it as needed), and the allocator can place a NEW instance
+        // at the exact address of a previously-destroyed one. A long-lived
+        // thread (e.g. a test runner's main thread, which persists across many
+        // short-lived ParallelCommandBuffers) that cached `context == thatAddress`
+        // for the OLD instance would then spuriously hit for the NEW instance
+        // too, returning a dangling `CommandBuffer&` into freed memory --
+        // observed in practice as heap corruption / access violations under
+        // repeated create-Execute-destroy cycles on one thread. The instance
+        // id is a 64-bit monotonic counter that is never reused for the
+        // process lifetime, so it can't false-positive the way the pointer
+        // alone can.
         struct ThreadCache
         {
             ParallelCommandBuffer* context = nullptr;
+            uint64_t contextInstanceId = 0;
             CommandBuffer* buffer = nullptr;
             size_t index = std::numeric_limits<size_t>::max();
         };

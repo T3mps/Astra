@@ -57,6 +57,7 @@
 
 // System support
 #include "System/System.hpp"
+#include "System/SystemContext.hpp"
 #include "System/SystemExecutor.hpp"
 #include "System/SystemMetadata.hpp"
 #include "System/SystemScheduler.hpp"

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../Archetype/Archetype.hpp"  // For MakeComponentMask
+#include "../Commands/CommandBuffer.hpp"  // ParallelCommandBuffer (Task 2: owned command sink)
 #include "../Component/Component.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/Delegate.hpp"
@@ -114,11 +115,76 @@ namespace Astra
             return Result<void, SystemError>::Ok();
         }
 
+        // Class-typed registration for a struct/class context system: a type
+        // with operator()(SystemContext&). Mirrors the System<T> overload
+        // above (same Result/uniqueness/allocation handling, same optional
+        // SystemTraits scan for scheduling), differing only in which
+        // execution delegate it populates on the resulting SystemEntry.
+        // T is always given explicitly (AddSystem<MySystem>(args...)), so
+        // this never competes with the System<T> overload above for the
+        // same call: T can satisfy at most one of the two concepts in
+        // practice (they require invocability with disjoint argument types).
+        template<ContextSystem T, typename... Args>
+        ASTRA_NODISCARD Result<void, SystemError> AddSystem(Args&&... args)
+        {
+            if (IsExecuting())
+                return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
+
+            const uint64_t typeId = TypeID<T>::Hash();
+            if (m_systemIndices.Contains(typeId))
+                return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
+
+            T* instance = new (std::nothrow) T(std::forward<Args>(args)...);
+            if (!instance)
+                return Result<void, SystemError>::Err(SystemError::AllocationFailed);
+
+            const size_t index = m_systems.size();
+            m_systemIndices[typeId] = index;
+
+            SystemMetadata metadata
+            {
+                .reads = ComponentMask{},
+                .writes = ComponentMask{},
+                .typeId = static_cast<size_t>(typeId),
+                .insertionOrder = index,
+                .requiresExclusive = false
+            };
+            if constexpr (HasSystemTraits_v<T>)
+                ExtractSystemTraits<T>(metadata);
+            if constexpr (requires { T::RequiresExclusive; })
+                metadata.requiresExclusive = T::RequiresExclusive;
+
+            m_systems.emplace_back(SystemEntry
+            {
+                .instance = std::unique_ptr<void, void(*)(void*)>(instance,
+                    [](void* ptr) { delete static_cast<T*>(ptr); }),
+                .metadata = metadata,
+                .executeContext = [instance](SystemContext& ctx) { (*instance)(ctx); },
+            });
+
+            m_needsRebuild = true;
+            return Result<void, SystemError>::Ok();
+        }
+
         template<typename Lambda>
         requires LambdaLike<Lambda>
         ASTRA_NODISCARD Result<void, SystemError> AddSystem(Lambda&& lambda)
         {
             return AddLambdaSystemImpl(std::forward<Lambda>(lambda), &std::decay_t<Lambda>::operator());
+        }
+
+        // Lambda registration for a void(SystemContext&) context system --
+        // e.g. [](Astra::SystemContext& ctx) { ... }. Unlike the LambdaLike
+        // overload above, no view/component extraction wrapper is needed:
+        // the lambda IS the thunk, stored directly as the executeContext
+        // delegate. LambdaLike is amended (System.hpp) to exclude
+        // ContextSystem, so a context lambda can never match both overloads.
+        template<typename Lambda>
+        requires ContextSystem<Lambda>
+        ASTRA_NODISCARD Result<void, SystemError> AddSystem(Lambda&& lambda)
+        {
+            using SystemType = std::decay_t<Lambda>;
+            return AddContextSystemInternal<SystemType>(SystemType(std::forward<Lambda>(lambda)));
         }
 
         template<System T>
@@ -189,23 +255,54 @@ namespace Astra
                 BuildExecutionPlan();
             }
 
+            // Lazily (re)bind the owned ParallelCommandBuffer to this call's
+            // Registry. CommandBuffer captures Registry* at construction and
+            // has no rebind API, so a change of registry between Execute()
+            // calls requires a fresh ParallelCommandBuffer; ordinary usage
+            // (and every test) calls Execute() repeatedly with the SAME
+            // registry, so in practice this allocates once. Task-2-scope
+            // note: rebinding drops any commands recorded but not yet
+            // flushed in the old buffer -- Task 3 hasn't wired a flush into
+            // Execute() yet, so nothing today prevents that; not a
+            // regression, just an explicit limitation of this task's slice.
+            if (!m_commandBuffer || m_commandBufferRegistry != &registry)
+            {
+                m_commandBuffer = std::make_unique<ParallelCommandBuffer>(&registry);
+                m_commandBufferRegistry = &registry;
+            }
+
             // Build execution context
             SystemExecutionContext context;
             context.registry = &registry;
+            context.commandBuffer = m_commandBuffer.get();
             context.parallelGroups = m_executionPlan;
             context.systems.reserve(m_systems.size());
+            context.contextSystems.reserve(m_systems.size());
             context.metadata.reserve(m_systems.size());
 
             for (const auto& entry : m_systems)
             {
                 context.systems.push_back(entry.execute);
+                context.contextSystems.push_back(entry.executeContext);
                 context.metadata.push_back(entry.metadata);
             }
 
             // Execute via the provided executor
             executor->Execute(context);
         }
-        
+
+        /**
+         * Total number of deferred commands recorded (but, as of Task 2, not
+         * yet flushed/applied -- see Task 3) across every context system's
+         * per-worker CommandBuffer. Exposed so callers/tests can observe that
+         * a void(SystemContext&) system actually recorded something without
+         * reaching into the owned ParallelCommandBuffer directly.
+         */
+        ASTRA_NODISCARD size_t PendingCommandCount() const
+        {
+            return m_commandBuffer ? m_commandBuffer->GetCommandCount() : 0;
+        }
+
         void Clear()
         {
             // Prevent modification during execution to avoid use-after-free.
@@ -243,6 +340,12 @@ namespace Astra
             std::unique_ptr<void, void(*)(void*)> instance;  // Type-erased system instance
             Delegate<void(Registry&)> execute;               // Execution delegate (more efficient than std::function)
             SystemMetadata metadata;                         // System metadata
+
+            // Execution delegate for void(SystemContext&) systems (Task 2).
+            // Empty (default-constructed -> falsy) for ordinary void(Registry&)
+            // systems and view-lambda systems, which instead populate `execute`
+            // above; exactly one of the two delegates is non-empty per entry.
+            Delegate<void(SystemContext&)> executeContext{};
         };
 
         template<typename T>
@@ -390,11 +493,64 @@ namespace Astra
             m_needsRebuild = true;
             return Result<void, SystemError>::Ok();
         }
-        
+
+        // Registers a lambda-typed void(SystemContext&) system directly (no
+        // view/component-extraction wrapper -- unlike AddSystemInternal
+        // above, SystemType IS the thunk here). Mirrors AddSystemInternal's
+        // Result/uniqueness/allocation handling; SystemType is a raw lambda
+        // closure type, so it has no SystemTraits to scan (see the
+        // ContextSystem-lambda AddSystem overload for why that's fine: no
+        // traits => BuildExecutionPlan gives it a safe solo group).
+        template<typename SystemType>
+        ASTRA_NODISCARD Result<void, SystemError> AddContextSystemInternal(SystemType system)
+        {
+            // Uniform-graceful misuse policy (decision 2026-07-13): see
+            // AddSystemInternal above.
+            if (IsExecuting())
+                return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
+
+            // See AddSystemInternal above re: TypeID::Hash() collisions.
+            const uint64_t typeId = TypeID<SystemType>::Hash();
+            if (m_systemIndices.Contains(typeId))
+                return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
+
+            SystemType* instance = new (std::nothrow) SystemType(std::move(system));
+            if (!instance)
+                return Result<void, SystemError>::Err(SystemError::AllocationFailed);
+
+            const size_t index = m_systems.size();
+            m_systemIndices[typeId] = index;
+
+            SystemMetadata metadata
+            {
+                .reads = ComponentMask{},
+                .writes = ComponentMask{},
+                .typeId = static_cast<size_t>(typeId),
+                .insertionOrder = index,
+                .requiresExclusive = false
+            };
+
+            m_systems.emplace_back(SystemEntry
+            {
+                .instance = std::unique_ptr<void, void(*)(void*)>(instance,
+                    [](void* ptr) { delete static_cast<SystemType*>(ptr); }),
+                .metadata = metadata,
+                .executeContext = [instance](SystemContext& ctx) { (*instance)(ctx); },
+            });
+
+            m_needsRebuild = true;
+            return Result<void, SystemError>::Ok();
+        }
+
         std::vector<SystemEntry> m_systems;                             // All registered systems
         FlatMap<uint64_t, size_t> m_systemIndices;                      // key: TypeID<T>::Hash() — systems must not consume dense ComponentIDs
         mutable std::vector<std::vector<size_t>> m_executionPlan;       // Cached parallel groups
         mutable bool m_needsRebuild = true;                             // Whether execution plan needs rebuild
         mutable std::atomic<int> m_executionDepth{0};                   // reentrancy-safe; ==0 is the B2 sync point
+
+        // Task 2: owned per-worker deferred-command sink, lazily (re)bound to
+        // whichever Registry Execute() is called with (see Execute() above).
+        std::unique_ptr<ParallelCommandBuffer> m_commandBuffer;
+        Registry* m_commandBufferRegistry = nullptr;                    // registry m_commandBuffer is currently bound to
     };
 } // namespace Astra

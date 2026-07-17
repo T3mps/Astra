@@ -3,7 +3,9 @@
 #include <memory>
 #include <vector>
 
+#include "../Commands/CommandBuffer.hpp"  // ParallelCommandBuffer::GetThreadBuffer()
 #include "../Core/WorkScheduler.hpp"
+#include "SystemContext.hpp"
 #include "SystemMetadata.hpp"
 
 #ifdef ASTRA_BUILD_DEBUG
@@ -12,6 +14,37 @@
 
 namespace Astra
 {
+    /**
+     * Dispatches system `systemIdx` from `context`: for a void(SystemContext&)
+     * system (Task 2 -- contextSystems[systemIdx] is non-empty), builds a
+     * SystemContext wrapping *context.registry, THIS call's per-worker
+     * CommandBuffer, and the system's insertionOrder, then invokes it;
+     * otherwise invokes the ordinary void(Registry&) delegate as before.
+     *
+     * Shared by Sequential/ParallelExecutor so both dispatch identically.
+     *
+     * CALLER CONTRACT: call this from the thread that should own the
+     * resulting per-worker CommandBuffer -- GetThreadBuffer() is called
+     * INSIDE this function, so calling it from a worker thread (e.g. from
+     * inside an IWorkScheduler::ParallelFor job lambda) makes that worker
+     * record into its own buffer; calling it from the submitting thread
+     * makes the submitting thread own the recording.
+     */
+    inline void DispatchSystem(const SystemExecutionContext& context, size_t systemIdx)
+    {
+        if (context.contextSystems[systemIdx])
+        {
+            SystemContext sysCtx(*context.registry,
+                context.commandBuffer->GetThreadBuffer(),
+                static_cast<uint32_t>(context.metadata[systemIdx].insertionOrder));
+            context.contextSystems[systemIdx](sysCtx);
+        }
+        else
+        {
+            context.systems[systemIdx](*context.registry);
+        }
+    }
+
     class ISystemExecutor
     {
     public:
@@ -27,7 +60,7 @@ namespace Astra
             {
                 for (size_t systemIdx : group)
                 {
-                    context.systems[systemIdx](*context.registry);
+                    DispatchSystem(context, systemIdx);
                 }
             }
         }
@@ -48,7 +81,7 @@ namespace Astra
                 {
                     // Single system or no scheduler: run sequentially to avoid overhead
                     for (size_t systemIdx : group)
-                        context.systems[systemIdx](*context.registry);
+                        DispatchSystem(context, systemIdx);
                 }
                 else
                 {
@@ -57,10 +90,16 @@ namespace Astra
                         context.registry->GetArchetypeManager()->GetStructuralChangeCounter();
 #endif
                     // Dispatch each system in the group as its own unit of work.
+                    // DispatchSystem is called INSIDE this worker lambda (not
+                    // hoisted out) so that for a context system, GetThreadBuffer()
+                    // runs on the worker thread actually executing it -- each
+                    // concurrent worker records into its OWN per-thread
+                    // CommandBuffer (Task 2 scope: recording only; flush/Clear
+                    // of the resulting ParallelCommandBuffer is Task 3).
                     m_scheduler->ParallelFor(group.size(), 1, [&](size_t begin, size_t end, uint32_t /*worker*/)
                     {
                         for (size_t i = begin; i < end; ++i)
-                            context.systems[group[i]](*context.registry);
+                            DispatchSystem(context, group[i]);
                     });
 #ifdef ASTRA_BUILD_DEBUG
                     const uint32_t structuralAfter =
