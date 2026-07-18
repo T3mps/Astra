@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <type_traits>
 
@@ -23,10 +25,16 @@ namespace Astra
         template<Component T>
         void RegisterComponent()
         {
-            ComponentID id = TypeID<T>::Value();
-            if (m_components.Contains(id))
+            const ComponentID id = TypeID<T>::Value();
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY  // guard before indexing m_registered
                 return;
-            RegisterComponentImpl<T>(id);
+            if (m_registered[id].load(std::memory_order_acquire))
+                return;                                // warm path: lock-free
+            std::lock_guard<std::mutex> lock(m_registrationMutex);
+            if (m_registered[id].load(std::memory_order_relaxed))
+                return;                                // double-check under lock
+            RegisterComponentImpl<T>(id);              // may refuse (over-aligned) -- that's fine
+            m_registered[id].store(true, std::memory_order_release);  // "attempt resolved for id"
         }
 
         // Hot-reload path: rebuilds the descriptor unconditionally so its function
@@ -35,9 +43,18 @@ namespace Astra
         template<Component T>
         void ReRegisterComponent()
         {
-            RegisterComponentImpl<T>(TypeID<T>::Value());
+            const ComponentID id = TypeID<T>::Value();
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return;
+            std::lock_guard<std::mutex> lock(m_registrationMutex);
+            RegisterComponentImpl<T>(id);
+            m_registered[id].store(true, std::memory_order_release);
         }
 
+        // Bulk, single-threaded setup path: do NOT call from workers. Each
+        // per-type RegisterComponent() below re-locks m_registrationMutex, so
+        // this must NOT hold the lock across the fan-out (std::mutex is
+        // non-recursive -- that would deadlock).
         template<Component... Components>
         void RegisterComponents()
         {
@@ -290,5 +307,14 @@ namespace Astra
         // Use deque instead of vector to prevent pointer invalidation when adding new names.
         // Vector reallocation would invalidate all c_str() pointers stored in ComponentDescriptor::name
         std::deque<std::string> m_componentNames;
+
+        // First-registration guard. m_registered[id] is set once per type; the
+        // warm path is a lock-free acquire-load (replacing the old Contains()
+        // lookup). m_registrationMutex serializes the one-time cold path so two
+        // workers first-registering different types can't race the containers.
+        // non-copyable: holds a registration mutex + atomics (ComponentRegistry
+        // is only ever held via std::shared_ptr; never copied/moved by value).
+        std::mutex m_registrationMutex;
+        std::atomic<bool> m_registered[MAX_COMPONENTS] = {};
     };
 }
