@@ -860,3 +860,249 @@ TEST(SystemContext, ParallelForEachRecordsDeferredChangesPerChunkThatApplyAtFlus
     EXPECT_EQ(s.PendingCommandCount(), 0u);
     EXPECT_EQ(reg.CreateView<Tag>().Size(), kCount);
 }
+
+// ---- Theme B2 Phase B, Task 4: the chunk-parallel acceptance gate ---------
+// ---- (spec Section 14's determinism contract extended to -----------------
+// ---- ctx.ParallelForEach): a SINGLE system fans a MULTI-ARCHETYPE view ----
+// ---- out across worker threads by chunk and defers a MIX of structural ---
+// ---- changes per entity. The flush (Tasks 1-3's flat chunkWork -----------
+// ---- iterationIndex + ExecuteSorted) must reproduce the IDENTICAL world --
+// ---- across 50 runs under a real multi-threaded pool. ---------------------
+
+namespace
+{
+    // Global entity counts for the multi-archetype seed below. All three
+    // archetypes carry Position, so a single CreateView<Position>() spans
+    // all of them -- this is what lets the gate catch a regression back to
+    // stamping the PER-ARCHETYPE chunk index instead of the flat chunkWork
+    // index `w` (Task 3): chunk 0 of {Position} and chunk 0 of {Position,
+    // Velocity} would otherwise collide on an identical {insertionOrder,
+    // iterationIndex} key, and the flush's stable-sort tiebreak (recordSequence,
+    // which each sub-context restarts at 0) would become non-deterministic.
+    // 3000 entities/archetype comfortably clears MIN_ENTITIES_FOR_PARALLEL
+    // (1024) and MIN_CHUNKS_FOR_PARALLEL (8) with margin (~15 total chunks
+    // at Position's ~1024- and Position+Velocity/Health's ~512-entity chunk
+    // capacities -- View.hpp's chunk-size math), well above a single chunk.
+    constexpr size_t kChunkGateNA = 3000;  // {Position} only
+    constexpr size_t kChunkGateNB = 3000;  // {Position, Velocity}
+    constexpr size_t kChunkGateNC = 3000;  // {Position, Health}
+    constexpr size_t kChunkGateTotal = kChunkGateNA + kChunkGateNB + kChunkGateNC;
+    static_assert(kChunkGateTotal >= 1024, "must clear View::MIN_ENTITIES_FOR_PARALLEL");
+
+    // Every multiple-of-300 global index spawns one placeholder child (Mix
+    // item 2 below); this count is used to predict the exact post-flush
+    // entity total.
+    constexpr size_t kChunkGateExpectedCreated = kChunkGateTotal / 300;
+    // The three explicit overlapping pairs (Mix item 3) each destroy exactly
+    // one entity.
+    constexpr size_t kChunkGateExpectedDestroyed = 3;
+}
+
+TEST(SystemContext, ChunkParallelDeferredChangesFlushIdenticallyAcross50Runs)
+{
+    // One real multi-threaded pool, reused across every run: what's under
+    // test is that the chunk-parallel FLUSH is deterministic despite
+    // genuinely concurrent per-chunk recording, not that thread startup/
+    // teardown is deterministic (same rationale as the Phase A gate above).
+    auto pool = std::make_shared<Astra::Testing::TestWorkerPool>();
+
+    std::string snapshotRun0;
+
+    for (int run = 0; run < 50; ++run)
+    {
+        // The REGISTRY must carry the scheduler so the inner view's
+        // ParallelForEach actually fans out across worker threads (View
+        // reads registry.m_workScheduler) -- unlike the Phase A gate above
+        // (which tests SYSTEM-level parallelism via ParallelExecutor), this
+        // gate's parallelism happens INSIDE one system, over a View.
+        Astra::Registry::Config cfg;
+        cfg.workScheduler = pool;
+        Astra::Registry reg(cfg);
+
+        // Pre-register every component type the system body will
+        // AddComponent<T> on the main thread before Execute() -- many
+        // chunk-workers will concurrently first-touch these types, and
+        // CommandBuffer::AddComponent<T> registers T at record time (same
+        // prerequisite as the Phase A gate above).
+        reg.GetComponentRegistry()->RegisterComponent<Position>();
+        reg.GetComponentRegistry()->RegisterComponent<Velocity>();
+        reg.GetComponentRegistry()->RegisterComponent<Health>();
+        reg.GetComponentRegistry()->RegisterComponent<Tag>();
+
+        // Seed the rich, MULTI-ARCHETYPE world (see the constants' comment
+        // above for why this shape matters). Position.x is set to a stable
+        // globally-unique index (0..kChunkGateTotal-1, in creation order) so
+        // the per-entity system body below can derive a deterministic
+        // predicate from the component value alone.
+        std::vector<Astra::Entity> archA(kChunkGateNA), archB(kChunkGateNB), archC(kChunkGateNC);
+        reg.CreateEntitiesWith<Position>(kChunkGateNA, archA, [](size_t i)
+        {
+            return std::make_tuple(Position{float(i), 0.0f, 0.0f});
+        });
+        reg.CreateEntitiesWith<Position, Velocity>(kChunkGateNB, archB, [](size_t i)
+        {
+            return std::make_tuple(Position{float(kChunkGateNA + i), 0.0f, 0.0f}, Velocity{});
+        });
+        reg.CreateEntitiesWith<Position, Health>(kChunkGateNC, archC, [](size_t i)
+        {
+            return std::make_tuple(Position{float(kChunkGateNA + kChunkGateNB + i), 0.0f, 0.0f}, Health{100, 999});
+        });
+        ASSERT_EQ(reg.Size(), kChunkGateTotal) << "run " << run;
+
+        // Fan-out precondition: hard-assert the premise BEFORE running the
+        // system, mirroring the Phase A gate's "hard-assert the premise"
+        // (line 657-663) -- a degenerate below-threshold seed would let this
+        // gate pass by silently inlining, unable to catch the class of bug
+        // it exists to catch. Sum GetChunkCount() over every Position-
+        // bearing archetype (there are no others in this fresh registry).
+        // View.hpp's MIN_CHUNKS_FOR_PARALLEL/MIN_ENTITIES_FOR_PARALLEL are
+        // private, so the threshold (8 chunks) is reproduced here as a
+        // literal, same as the Task 3 test's comment above.
+        size_t totalChunks = 0;
+        for (Astra::Archetype* a : reg.GetArchetypeManager()->GetArchetypes())
+        {
+            if (a->HasComponent<Position>())
+                totalChunks += a->GetChunkCount();
+        }
+        ASSERT_GE(totalChunks, 8u) << "run " << run
+            << ": fan-out precondition -- must clear MIN_CHUNKS_FOR_PARALLEL "
+               "or this gate silently stops exercising the parallel path";
+
+        // Special pairs: the FIRST two entities created in each archetype
+        // are guaranteed to land in that archetype's chunk 0, at storage
+        // positions 0 and 1 -- InvokeEntityCallback (View.hpp) walks a
+        // chunk's entities in strict forward storage order, so the shared
+        // per-chunk sub-context processes special0X strictly before
+        // special1X, giving both entities' commands the SAME iterationIndex
+        // and consecutive (monotonically increasing) recordSequence values.
+        Astra::Entity special0A = archA[0], special1A = archA[1];
+        Astra::Entity special0B = archB[0], special1B = archB[1];
+        Astra::Entity special0C = archC[0], special1C = archC[1];
+
+        Astra::SystemScheduler s;
+        auto added = s.AddSystem(
+            [special0A, special1A, special0B, special1B, special0C, special1C]
+            (Astra::SystemContext& ctx)
+            {
+                auto view = ctx.GetRegistry().CreateView<Position>();
+                ctx.ParallelForEach(view,
+                    [special0A, special1A, special0B, special1B, special0C, special1C]
+                    (Astra::Entity e, const Position& p, Astra::SystemContext& sub)
+                    {
+                        const int idx = static_cast<int>(p.x);
+
+                        // Mix item 1: every entity tags itself
+                        // (deterministic, unconditional).
+                        sub.Commands().AddComponent<Tag>(e, Tag{idx});
+
+                        // Mix item 2: a sparse deterministic subset spawns a
+                        // placeholder related entity via CreateEntity() +
+                        // AddComponent (exercises deterministic placeholder
+                        // resolution under chunk-parallel recording).
+                        if (idx % 300 == 0)
+                        {
+                            Astra::Entity child = sub.Commands().CreateEntity();
+                            sub.Commands().AddComponent<Position>(child, Position{float(500000 + idx), 0.0f, 0.0f});
+                        }
+
+                        // Mix item 3: three explicit overlapping pairs (one
+                        // per archetype) -- special0X destroys special1X.
+                        // special1X's OWN unconditional self-tag (item 1
+                        // above, recorded when special1X itself is later
+                        // processed in the SAME chunk) therefore always
+                        // targets an already-destroyed entity: a
+                        // deterministic skip+report, mirroring DetSysC/D's
+                        // pos[4]/vel[4] pattern above -- apply order (this
+                        // destroy vs. that add) and the skip+report error
+                        // channel are both directly observable.
+                        if (e == special0A) sub.Commands().DestroyEntity(special1A);
+                        if (e == special0B) sub.Commands().DestroyEntity(special1B);
+                        if (e == special0C) sub.Commands().DestroyEntity(special1C);
+                    });
+            });
+        ASSERT_TRUE(added.IsOk()) << "run " << run;
+
+        Astra::ParallelExecutor exec(pool);
+        s.Execute(reg, &exec);
+
+        EXPECT_EQ(s.PendingCommandCount(), 0u) << "run " << run;
+
+        // kChunkGateTotal initial - 3 destroyed (special1A/B/C) + 1 created
+        // placeholder per multiple-of-300 global index = final live count.
+        EXPECT_EQ(reg.Size(), kChunkGateTotal - kChunkGateExpectedDestroyed + kChunkGateExpectedCreated) << "run " << run;
+
+        // Every surviving ORIGINAL entity (kChunkGateTotal - 3) was tagged;
+        // the 3 destroyed originals' self-tag deterministically failed
+        // (item 3), and the kChunkGateExpectedCreated placeholder children
+        // are never tagged (only the outer view's original entities are).
+        EXPECT_EQ(reg.CreateView<Tag>().Size(), kChunkGateTotal - kChunkGateExpectedDestroyed) << "run " << run;
+
+        // Exactly 3 deterministic skip+report failures every run (special1A
+        // via special0A, special1B via special0B, special1C via special0C).
+        const auto& errors = s.GetLastDeferredErrors();
+        EXPECT_EQ(errors.size(), kChunkGateExpectedDestroyed) << "run " << run;
+        for (const auto& err : errors)
+        {
+            EXPECT_EQ(err.systemInsertionOrder, 0u) << "run " << run;
+            EXPECT_EQ(err.reason, Astra::DeferredCommandError::Reason::InvalidTargetEntity) << "run " << run;
+        }
+
+        // ---- Canonical world snapshot ----
+        // Every live entity (original or newly-created placeholder) carries
+        // Position -- it is never removed from anyone in this gate -- so a
+        // single CreateView<Position>() covers every live entity exactly
+        // once, sorted by real id (independent of archetype/chunk iteration
+        // order), same technique as the Phase A gate above.
+        auto describe = [](Astra::Registry& r, Astra::Entity e) -> std::string
+        {
+            std::string out;
+            if (auto* p = r.GetComponent<Position>(e))
+                out += "P(" + std::to_string(p->x) + ")";
+            if (auto* v = r.GetComponent<Velocity>(e))
+                out += "V(" + std::to_string(v->dx) + ")";
+            if (auto* h = r.GetComponent<Health>(e))
+                out += "H(" + std::to_string(h->current) + ")";
+            if (auto* t = r.GetComponent<Tag>(e))
+                out += "T(" + std::to_string(t->v) + ")";
+            return out;
+        };
+
+        std::map<Astra::Entity::StorageType, std::string> byId;
+        reg.CreateView<Position>().ForEach([&](Astra::Entity e, Position&) { byId[e.GetValue()] = describe(reg, e); });
+        ASSERT_EQ(byId.size(), reg.Size()) << "run " << run
+            << ": every live entity must carry Position";
+
+        std::string snapshot;
+        for (const auto& [id, desc] : byId)
+        {
+            snapshot += std::to_string(id) + ":" + desc + ";";
+        }
+        // The deferred-command error list is itself gathered in globally
+        // SortKey-sorted order (every key here is globally unique -- see
+        // the special-pair comment above -- so there are no ties to break
+        // non-deterministically), so appending it in-order is safe.
+        for (const auto& err : errors)
+        {
+            snapshot += "ERR(" + std::to_string(err.systemInsertionOrder) + "," +
+                        std::to_string(static_cast<int>(err.reason)) + ");";
+        }
+
+        if (run == 0)
+        {
+            snapshotRun0 = snapshot;
+            // Guard against a degenerate always-equal comparison: run 0's
+            // snapshot must actually contain the entities/values this test
+            // was designed to produce.
+            ASSERT_FALSE(snapshotRun0.empty());
+        }
+        else
+        {
+            EXPECT_EQ(snapshot, snapshotRun0)
+                << "run " << run << ": chunk-parallel deferred-command flush "
+                   "produced a DIFFERENT world state than run 0 -- a "
+                   "determinism bug (chunkIndex stamping, sort-key ordering, "
+                   "or placeholder resolution) survived Tasks 1-3. This test "
+                   "must NOT be weakened; escalate instead.";
+        }
+    }
+}
