@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include "Astra/Component/ComponentRegistry.hpp"
 #include "../Support/TestWorkerPool.hpp"
+#include <atomic>
 #include <cstdint>
+#include <thread>
 
 // Race test: many worker threads call ComponentRegistry::RegisterComponent<T>()
 // concurrently for a mix of distinct types and the same type repeatedly. Before
@@ -91,23 +93,47 @@ namespace
 // the registry in an inconsistent state (wrong Size(), missing descriptors,
 // wrong id/size/alignment). Guarded, every worker either wins the one-time
 // cold path for its type or observes the warm atomic flag and returns.
+//
+// The only writes that race the shared containers are the ~16 FIRST
+// registrations, and they all happen in a tiny window at job start. Without a
+// barrier the participating-caller lane starts RunJob immediately while pool
+// workers must first wake from a CV wait, so the caller usually finishes all
+// 16 cold-path inserts before any worker engages -- after which every other
+// item is a warm-path no-op and the race almost never reproduces. To make the
+// RED deterministic we (a) dispatch exactly one work item per lane
+// (WorkerCount() items, minBatch 1) so every lane grabs exactly one item, and
+// (b) hold an arrival barrier at the top of fn so no lane starts registering
+// until ALL lanes have arrived -- then every lane hits the first
+// RegisterComponent of all kTypeCount types simultaneously. Because each lane
+// blocks in the barrier holding its single item, no lane drains extra items
+// early, so all WorkerCount() lanes deterministically arrive (no deadlock, no
+// over-drain).
 TEST(ComponentRegistryConcurrency, ConcurrentRegisterDistinctAndSameTypesIsRaceFree)
 {
     Astra::Testing::TestWorkerPool pool;
 
-    constexpr int kIterations = 200;
-    constexpr size_t kRepeatFactor = 8;                    // repeat-hit the same types
-    constexpr size_t kWorkItems = kTypeCount * kRepeatFactor;
+    const uint32_t laneCount = pool.WorkerCount();   // pool threads + participating caller
+    constexpr int kIterations = 1000;
 
     for (int iter = 0; iter < kIterations; ++iter)
     {
         Astra::ComponentRegistry registry;   // fresh registry per iteration; non-movable, so a plain stack local
+        std::atomic<uint32_t> arrived{0};
 
-        pool.ParallelFor(kWorkItems, 1, [&](size_t begin, size_t end, uint32_t)
+        pool.ParallelFor(laneCount, 1, [&](size_t begin, size_t end, uint32_t)
         {
+            // Arrival barrier: every lane parks here until all lanes have
+            // arrived, so they all hit the first RegisterComponent together.
+            arrived.fetch_add(1, std::memory_order_acq_rel);
+            while (arrived.load(std::memory_order_acquire) < laneCount)
+                std::this_thread::yield();
+
             for (size_t i = begin; i < end; ++i)
             {
-                kRegisterFns[i % kTypeCount](registry);
+                // Each lane races to first-register EVERY type, so all lanes
+                // contend on all kTypeCount cold paths at once.
+                for (size_t t = 0; t < kTypeCount; ++t)
+                    kRegisterFns[t](registry);
             }
         });
 
