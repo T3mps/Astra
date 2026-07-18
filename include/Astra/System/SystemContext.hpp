@@ -2,6 +2,7 @@
 
 #include <concepts>
 #include <cstdint>
+#include <utility>
 
 #include "../Registry/Registry.hpp"
 #include "../Commands/CommandBuffer.hpp"
@@ -94,6 +95,46 @@ namespace Astra
          * ParallelForEach; unused by Commands()/ReportError() above.
          */
         [[nodiscard]] ParallelCommandBuffer* GetParallelBuffer() const noexcept { return m_parallelBuffer; }
+
+        /**
+         * @brief Fan `view` out across worker threads by chunk (Theme B2 Phase
+         * B, Task 3), handing each chunk a per-chunk sub-context so its body can
+         * defer structural changes that land deterministically at the flush.
+         *
+         * Invocable as `func(Entity, Components&..., SystemContext& sub)`: for
+         * every entity in a chunk, `func` receives that chunk's own sub-context,
+         * whose Commands() stamp the chunk's iterationIndex (the flat chunkWork
+         * index -- globally unique across the view, so keys never collide across
+         * chunks even though each sub-context restarts its recordSequence at 0).
+         *
+         * The factory runs ON the worker executing the chunk, so
+         * GetThreadBuffer() is called there: each worker records into its OWN
+         * per-thread CommandBuffer (Phase A's worker-thread rule). When this
+         * context has no parallel buffer (m_parallelBuffer == nullptr -- e.g. a
+         * standalone context), every sub-context falls back to this context's
+         * own immediate CommandBuffer; determinism still holds because the
+         * stamped iterationIndex is still the flat chunk index.
+         *
+         * See View::ParallelForEachWithContext for the chunk-split mechanics and
+         * the flat-index determinism argument in full.
+         */
+        template<typename ViewT, typename Func>
+        void ParallelForEach(ViewT& view, Func&& func)
+        {
+            Registry& reg = m_registry;
+            const uint32_t insertionOrder = m_insertionOrder;
+            ParallelCommandBuffer* pcb = m_parallelBuffer;
+            CommandBuffer& immediate = m_commands;  // fallback when pcb == nullptr
+            view.ParallelForEachWithContext(
+                [&reg, insertionOrder, pcb, &immediate](uint32_t iterationIndex)
+                {
+                    // Called ON the chunk-worker thread: GetThreadBuffer() picks
+                    // that worker's own per-thread buffer.
+                    CommandBuffer& buf = pcb ? pcb->GetThreadBuffer() : immediate;
+                    return SystemContext(reg, buf, insertionOrder, iterationIndex, pcb);
+                },
+                std::forward<Func>(func));
+        }
 
     private:
         Registry& m_registry;

@@ -785,3 +785,78 @@ TEST(SystemContext, SubContextStampsIterationIndexAndNormalContextStampsZero)
 
     EXPECT_EQ(subCtx.GetParallelBuffer(), nullptr);
 }
+
+// ---- Theme B2 Phase B, Task 3: ctx.ParallelForEach -- per-chunk sub- -------
+// ---- context deferral. Each chunk of a view runs on a worker thread with ---
+// ---- its own sub-context stamping a per-chunk (flat chunkWork) iteration ---
+// ---- index, so the deferred structural changes each chunk records land -----
+// ---- deterministically at the depth==0 flush. ------------------------------
+
+namespace
+{
+    // A deferred-added marker so the test can count, after the flush, exactly
+    // which entities the chunk-parallel bodies tagged. A distinct type means
+    // reg.CreateView<Tag>() finds precisely the tagged entities.
+    struct Tag
+    {
+        int v = 0;
+    };
+    static_assert(Astra::Component<Tag>, "Tag must satisfy Component concept");
+
+    // A void(SystemContext&) system that fans its Position view out across
+    // worker threads by chunk (ctx.ParallelForEach) and defers an
+    // AddComponent<Tag> per entity into each chunk-worker's OWN sub-context.
+    // Struct-typed only for readability; a context lambda would behave
+    // identically (both get a solo execution group -> the outer system runs on
+    // the submitting thread, so the inner view fans out to real workers).
+    struct TagEveryEntityViaParallelForEach : Astra::SystemTraits<Astra::Writes<Position>>
+    {
+        void operator()(Astra::SystemContext& ctx)
+        {
+            auto view = ctx.GetRegistry().CreateView<Position>();
+            ctx.ParallelForEach(view,
+                [](Astra::Entity e, const Position&, Astra::SystemContext& sub)
+                {
+                    sub.Commands().AddComponent<Tag>(e, Tag{1});
+                });
+        }
+    };
+}
+
+TEST(SystemContext, ParallelForEachRecordsDeferredChangesPerChunkThatApplyAtFlush)
+{
+    // The REGISTRY must carry the scheduler so the view's ParallelForEach
+    // actually fans out across worker threads (View reads registry.m_workScheduler).
+    auto pool = std::make_shared<Astra::Testing::TestWorkerPool>();
+    Astra::Registry::Config cfg;
+    cfg.workScheduler = pool;
+    Astra::Registry reg(cfg);
+
+    // Pre-register Tag on the main thread: CommandBuffer::AddComponent<Tag>
+    // registers Tag at RECORD time, and here many chunk-workers first-add Tag
+    // concurrently. (Module 1 makes registration thread-safe; keep the
+    // main-thread pre-registration pattern regardless.)
+    reg.GetComponentRegistry()->RegisterComponent<Tag>();
+
+    // Seed enough Position entities to cross every parallel threshold and span
+    // many chunks (AVG_ENTITIES_PER_CHUNK=256, MIN_CHUNKS_FOR_PARALLEL=8,
+    // MIN_ENTITIES_FOR_PARALLEL=1024): 10k entities is well above the 8-chunk
+    // floor at the Position archetype's chunk capacity.
+    constexpr size_t kCount = 10'000;
+    std::vector<Astra::Entity> entities(kCount);
+    reg.CreateEntities<Position>(kCount, entities);
+    ASSERT_EQ(reg.CreateView<Position>().Size(), kCount);
+
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<TagEveryEntityViaParallelForEach>().IsOk());
+
+    Astra::ParallelExecutor exec(pool);
+    s.Execute(reg, &exec);
+
+    // Every seeded entity now carries Tag: each chunk's per-entity deferred
+    // AddComponent<Tag> was recorded into its chunk-worker's own buffer and
+    // applied at the deterministic depth==0 flush. No crash, nothing left
+    // pending.
+    EXPECT_EQ(s.PendingCommandCount(), 0u);
+    EXPECT_EQ(reg.CreateView<Tag>().Size(), kCount);
+}

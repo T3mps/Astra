@@ -174,7 +174,123 @@ namespace Astra
                     }
                 });
         }
-        
+
+        /**
+         * Like ParallelForEach, but threads a per-chunk sub-context to the body
+         * (Theme B2 Phase B, Task 3 -- the machinery behind
+         * SystemContext::ParallelForEach). For each unit of chunk work at FLAT
+         * chunkWork index `w`, builds `auto sub = factory(w);` and invokes
+         * `body(entity, components..., sub)` for every entity in that chunk. The
+         * factory runs ON the worker executing the chunk, so a sub-context whose
+         * recorder is a per-thread CommandBuffer records into THAT worker's own
+         * buffer.
+         *
+         * DETERMINISM (critical): the factory argument is the FLAT chunkWork
+         * index `w`, NOT the per-archetype chunk index (chunkWork[w].second). In
+         * a multi-archetype view chunk 0 of archetype A and chunk 0 of archetype
+         * B share the per-archetype index 0, so stamping that would give two
+         * chunks the same {insertionOrder, 0, ...} key -- and since each
+         * sub-context restarts its recordSequence at 0, their commands would
+         * collide and the flush's stable-sort tiebreak would be non-
+         * deterministic. The flat `w` is globally unique across the whole view
+         * AND deterministic (chunkWork is built by iterating the
+         * deterministically-sorted archetypes x their chunks in order). The
+         * per-archetype chunk index is still what selects the actual chunk.
+         *
+         * Additive sibling of ParallelForEach: REUSES ParallelForEachChunkImpl
+         * for the chunk walk (both the no-optional ForEachChunk path and the
+         * optional InvokeEntityCallback path invoke the callback as
+         * `(entity, component-refs..., [optional ptrs...])`, which the wrapper
+         * adapts by appending `sub`). Does NOT modify ParallelForEach itself.
+         *
+         * Unlike ParallelForEach, the null-scheduler / below-threshold case does
+         * NOT delegate to ForEach (which has neither a per-chunk sub-context nor
+         * a chunk index): it builds chunkWork unconditionally and walks it INLINE
+         * IN FLAT ORDER, which is deterministic. The per-chunk work is factored
+         * into one `runChunk(w)` local used by both the scheduler-dispatch and
+         * the inline path so the two can't drift.
+         */
+        template<typename Factory, typename Body>
+        ASTRA_FORCEINLINE void ParallelForEachWithContext(Factory&& factory, Body&& body)
+        {
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+
+            EnsureArchetypes();
+
+            if (m_archetypes.empty()) ASTRA_UNLIKELY
+                return;
+
+            size_t quickCount = 0;
+            for (Archetype* archetype : m_archetypes)
+            {
+                quickCount += archetype->GetEntityCount();
+            }
+
+            // Build the chunk work list unconditionally (see method doc): both
+            // the parallel-dispatch and the inline fallback path need it, and
+            // the per-archetype chunk index it carries.
+            std::vector<std::pair<Archetype*, size_t>> chunkWork;
+            size_t estimatedChunks = (quickCount / AVG_ENTITIES_PER_CHUNK) + m_archetypes.size();
+            chunkWork.reserve(estimatedChunks);
+            size_t totalMatchingEntities = 0;
+
+            for (Archetype* archetype : m_archetypes)
+            {
+                size_t chunkCount = archetype->GetChunkCount();
+                for (size_t i = 0; i < chunkCount; ++i)
+                {
+                    size_t chunkEntityCount = archetype->GetChunkEntityCount(i);
+                    if (chunkEntityCount > 0)
+                    {
+                        chunkWork.emplace_back(archetype, i);
+                        totalMatchingEntities += chunkEntityCount;
+                    }
+                }
+            }
+
+            if (chunkWork.empty()) ASTRA_UNLIKELY
+                return;
+
+            // Per-chunk work, shared by the scheduler-dispatch and inline paths
+            // so they can't drift. `w` is the FLAT chunkWork index -- the
+            // iterationIndex stamped into the sub-context; chunkWork[w].second is
+            // the per-archetype chunk index selecting the actual chunk.
+            auto runChunk = [&](size_t w)
+            {
+                auto [archetype, chunkIndex] = chunkWork[w];
+                auto sub = factory(static_cast<uint32_t>(w));
+                auto wrapped = [&body, &sub](Astra::Entity e, auto&&... comps)
+                {
+                    body(e, std::forward<decltype(comps)>(comps)..., sub);
+                };
+                ParallelForEachChunkImpl(archetype, chunkIndex, wrapped, RequiredTypes{}, OptionalTypes{});
+            };
+
+            // No scheduler, or workload below the parallel thresholds: walk every
+            // chunk inline, in flat order -- deterministic, no thread fan-out.
+            if (!m_scheduler ||
+                quickCount < MIN_ENTITIES_QUICK_CHECK ||
+                totalMatchingEntities < MIN_ENTITIES_FOR_PARALLEL ||
+                chunkWork.size() < MIN_CHUNKS_FOR_PARALLEL)
+            {
+                for (size_t w = 0; w < chunkWork.size(); ++w)
+                {
+                    runChunk(w);
+                }
+                return;
+            }
+
+            m_scheduler->ParallelFor(chunkWork.size(), MIN_CHUNKS_PER_THREAD,
+                [&](size_t begin, size_t end, uint32_t /*worker*/)
+                {
+                    for (size_t w = begin; w < end; ++w)
+                    {
+                        runChunk(w);
+                    }
+                });
+        }
+
         ASTRA_NODISCARD size_t Size() noexcept
         {
             if (!m_archetypeManager) ASTRA_UNLIKELY
