@@ -209,17 +209,27 @@ namespace Astra
          * IN FLAT ORDER, which is deterministic. The per-chunk work is factored
          * into one `runChunk(w)` local used by both the scheduler-dispatch and
          * the inline path so the two can't drift.
+         *
+         * RETURNS the number of chunk-work items processed (chunkWork.size()) --
+         * i.e. the count of distinct flat indices `w` in [0, chunkWork.size())
+         * the factory could have been called with, IDENTICAL on the scheduler-
+         * dispatch and inline paths (both process the whole chunkWork). Every
+         * early-return path returns 0. SystemContext::ParallelForEach uses this
+         * to advance its per-scope iterationIndex band by exactly the number of
+         * distinct iterationIndex values this call could have stamped, keeping
+         * deferred-command SortKeys globally unique across sequential calls.
+         * Callers that ignore the return value are unaffected (additive).
          */
         template<typename Factory, typename Body>
-        ASTRA_FORCEINLINE void ParallelForEachWithContext(Factory&& factory, Body&& body)
+        ASTRA_FORCEINLINE size_t ParallelForEachWithContext(Factory&& factory, Body&& body)
         {
             if (!m_archetypeManager) ASTRA_UNLIKELY
-                return;  // Registry destroyed
+                return 0;  // Registry destroyed
 
             EnsureArchetypes();
 
             if (m_archetypes.empty()) ASTRA_UNLIKELY
-                return;
+                return 0;
 
             size_t quickCount = 0;
             for (Archetype* archetype : m_archetypes)
@@ -250,7 +260,7 @@ namespace Astra
             }
 
             if (chunkWork.empty()) ASTRA_UNLIKELY
-                return;
+                return 0;
 
             // Per-chunk work, shared by the scheduler-dispatch and inline paths
             // so they can't drift. `w` is the FLAT chunkWork index -- the
@@ -278,7 +288,7 @@ namespace Astra
                 {
                     runChunk(w);
                 }
-                return;
+                return chunkWork.size();
             }
 
             m_scheduler->ParallelFor(chunkWork.size(), MIN_CHUNKS_PER_THREAD,
@@ -289,6 +299,7 @@ namespace Astra
                         runChunk(w);
                     }
                 });
+            return chunkWork.size();
         }
 
         ASTRA_NODISCARD size_t Size() noexcept

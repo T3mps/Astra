@@ -103,9 +103,34 @@ namespace Astra
          *
          * Invocable as `func(Entity, Components&..., SystemContext& sub)`: for
          * every entity in a chunk, `func` receives that chunk's own sub-context,
-         * whose Commands() stamp the chunk's iterationIndex (the flat chunkWork
-         * index -- globally unique across the view, so keys never collide across
-         * chunks even though each sub-context restarts its recordSequence at 0).
+         * whose Commands() stamp the chunk's iterationIndex (a per-scope band
+         * base plus the flat chunkWork index -- globally unique across the view,
+         * so keys never collide across chunks even though each sub-context
+         * restarts its recordSequence at 0).
+         *
+         * ITERATIONINDEX BANDING (why keys stay globally unique within ONE
+         * system): a deferred-command SortKey is {insertionOrder, iterationIndex,
+         * recordSequence}, and the depth==0 flush relies on these keys being
+         * globally unique for a deterministic apply order (equal keys fall back
+         * to scheduling-dependent buffer-slot order). This system's own
+         * Commands() (the outer context, m_iterationIndex == 0) and each chunk of
+         * each ParallelForEach share this system's single insertionOrder, so the
+         * iterationIndex must separate them. iterationIndex 0 is RESERVED for the
+         * outer context's own Commands(); the FIRST ParallelForEach takes the
+         * disjoint band [1, 1+chunkCount), the next call the band immediately
+         * after that, and so on (m_nextIterationBase advances by the chunk count
+         * each call). Thus the outer Commands() plus any number of SEQUENTIAL
+         * ParallelForEach calls on this context all record globally-unique keys
+         * in every build config -- not just the single-ParallelForEach-and-no-
+         * outer-Commands() shape the Task 4 gate happens to exercise.
+         *
+         * LIMITATION (documented, NOT fixed here): a NESTED ParallelForEach
+         * called FROM WITHIN a chunk body (on the `sub` sub-context) is NOT made
+         * band-disjoint. A chunk sub-context is a fresh SystemContext with its
+         * own m_nextIterationBase == 1 but the SAME insertionOrder as this
+         * system, so the inner call's bands would collide with THIS call's band.
+         * A chunk body must record via `sub.Commands()`, not call
+         * `sub.ParallelForEach`.
          *
          * The factory runs ON the worker executing the chunk, so
          * GetThreadBuffer() is called there: each worker records into its OWN
@@ -113,7 +138,7 @@ namespace Astra
          * context has no parallel buffer (m_parallelBuffer == nullptr -- e.g. a
          * standalone context), every sub-context falls back to this context's
          * own immediate CommandBuffer; determinism still holds because the
-         * stamped iterationIndex is still the flat chunk index.
+         * stamped iterationIndex (band base + flat chunk index) is still unique.
          *
          * See View::ParallelForEachWithContext for the chunk-split mechanics and
          * the flat-index determinism argument in full.
@@ -125,15 +150,23 @@ namespace Astra
             const uint32_t insertionOrder = m_insertionOrder;
             ParallelCommandBuffer* pcb = m_parallelBuffer;
             CommandBuffer& immediate = m_commands;  // fallback when pcb == nullptr
-            view.ParallelForEachWithContext(
-                [&reg, insertionOrder, pcb, &immediate](uint32_t iterationIndex)
+            // Capture this call's band base BEFORE dispatch; the factory stamps
+            // base + w so this call's chunk keys can't collide with the outer
+            // context's Commands() (band 0) or with an earlier ParallelForEach's
+            // band. See the ITERATIONINDEX BANDING note above.
+            const uint32_t base = m_nextIterationBase;
+            const size_t chunkCount = view.ParallelForEachWithContext(
+                [&reg, insertionOrder, pcb, &immediate, base](uint32_t w)
                 {
                     // Called ON the chunk-worker thread: GetThreadBuffer() picks
                     // that worker's own per-thread buffer.
                     CommandBuffer& buf = pcb ? pcb->GetThreadBuffer() : immediate;
-                    return SystemContext(reg, buf, insertionOrder, iterationIndex, pcb);
+                    return SystemContext(reg, buf, insertionOrder, base + w, pcb);
                 },
                 std::forward<Func>(func));
+            // Reserve [base, base + chunkCount) for THIS call; the next
+            // ParallelForEach on this context starts after it.
+            m_nextIterationBase = base + static_cast<uint32_t>(chunkCount);
         }
 
     private:
@@ -143,6 +176,12 @@ namespace Astra
         uint32_t m_iterationIndex = 0;
         ParallelCommandBuffer* m_parallelBuffer = nullptr;
         uint32_t m_recordSequence = 0;
+        // iterationIndex 0 is reserved for THIS context's own Commands(); each
+        // ParallelForEach call reserves the next disjoint band [base, base +
+        // chunkCount) so deferred-command SortKeys stay globally unique across
+        // the outer Commands() and any number of sequential ParallelForEach
+        // calls under this system. See ParallelForEach's BANDING note.
+        uint32_t m_nextIterationBase = 1;
     };
 
     /**

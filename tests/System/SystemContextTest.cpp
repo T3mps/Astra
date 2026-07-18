@@ -1106,3 +1106,180 @@ TEST(SystemContext, ChunkParallelDeferredChangesFlushIdenticallyAcross50Runs)
         }
     }
 }
+
+// ---- Theme B2 Phase B, Task 5 fix: iterationIndex BANDING ------------------
+// ---- (whole-branch review, Important Issue 1). A deferred-command SortKey ---
+// ---- is {insertionOrder, iterationIndex, recordSequence} and the depth==0 --
+// ---- flush requires keys to be GLOBALLY UNIQUE (equal keys fall back to -----
+// ---- scheduling-dependent buffer-slot order). Under ONE system (one --------
+// ---- insertionOrder), the OUTER context's own Commands() uses iterationIndex-
+// ---- 0, and BEFORE the fix each ParallelForEach stamped its chunks with the -
+// ---- flat index w STARTING AT 0 -- so the outer Commands() and chunk w==0, --
+// ---- AND any two ParallelForEach calls (the 2nd call's w also restarts at 0),
+// ---- recorded COLLIDING keys. The fix bands iterationIndex: 0 is reserved ---
+// ---- for the outer Commands(); each ParallelForEach call takes the next -----
+// ---- disjoint band [base, base+chunkCount). This gate pins the fix. ---------
+
+TEST(SystemContext, OuterCommandsPlusSequentialParallelForEachRecordDisjointBandsAcross30Runs)
+{
+    // One real multi-threaded pool, reused across every run (same rationale as
+    // the two gates above): what's under test is that the FLUSH is
+    // deterministic despite genuinely concurrent per-chunk recording, not
+    // thread startup/teardown.
+    auto pool = std::make_shared<Astra::Testing::TestWorkerPool>();
+
+    std::string snapshotRun0;
+
+    // Multi-archetype seed shape (mirrors the Task 4 gate): all three
+    // archetypes carry Position, so ONE CreateView<Position>() spans them and
+    // fans out to >= MIN_CHUNKS_FOR_PARALLEL (8) chunks. Position.x carries a
+    // stable globally-unique index 0..N-1 (creation order) so each chunk body
+    // derives its per-entity value from the component alone.
+    constexpr size_t NA = 3000, NB = 3000, NC = 3000;
+    constexpr size_t NTotal = NA + NB + NC;
+    static_assert(NTotal >= 1024, "must clear View::MIN_ENTITIES_FOR_PARALLEL");
+
+    for (int run = 0; run < 30; ++run)
+    {
+        // The REGISTRY must carry the scheduler so the inner views'
+        // ParallelForEach actually fan out across worker threads.
+        Astra::Registry::Config cfg;
+        cfg.workScheduler = pool;
+        Astra::Registry reg(cfg);
+
+        // Pre-register every component the system body AddComponent<T>s, on the
+        // main thread before Execute() (many chunk-workers first-touch these
+        // concurrently, and AddComponent<T> registers T at record time -- same
+        // prerequisite as the two gates above).
+        reg.GetComponentRegistry()->RegisterComponent<Position>();
+        reg.GetComponentRegistry()->RegisterComponent<Velocity>();
+        reg.GetComponentRegistry()->RegisterComponent<Health>();
+
+        std::vector<Astra::Entity> archA(NA), archB(NB), archC(NC);
+        reg.CreateEntitiesWith<Position>(NA, archA, [](size_t i)
+        {
+            return std::make_tuple(Position{float(i), 0.0f, 0.0f});
+        });
+        reg.CreateEntitiesWith<Position, Velocity>(NB, archB, [](size_t i)
+        {
+            return std::make_tuple(Position{float(NA + i), 0.0f, 0.0f}, Velocity{});
+        });
+        reg.CreateEntitiesWith<Position, Health>(NC, archC, [](size_t i)
+        {
+            return std::make_tuple(Position{float(NA + NB + i), 0.0f, 0.0f}, Health{100, 999});
+        });
+        ASSERT_EQ(reg.Size(), NTotal) << "run " << run;
+
+        // Fan-out precondition (mirrors the Task 4 gate): a below-threshold seed
+        // would let this gate pass by silently inlining, unable to catch the
+        // collision it exists to catch. MIN_CHUNKS_FOR_PARALLEL (8) reproduced
+        // as a literal (View.hpp's threshold is private).
+        size_t totalChunks = 0;
+        for (Astra::Archetype* a : reg.GetArchetypeManager()->GetArchetypes())
+        {
+            if (a->HasComponent<Position>())
+                totalChunks += a->GetChunkCount();
+        }
+        ASSERT_GE(totalChunks, 8u) << "run " << run
+            << ": fan-out precondition -- must clear MIN_CHUNKS_FOR_PARALLEL";
+
+        Astra::SystemScheduler s;
+        auto added = s.AddSystem([](Astra::SystemContext& ctx)
+        {
+            // Scope 1 (iterationIndex band 0): the OUTER context creates a
+            // placeholder carrying a unique, snapshot-visible Position value via
+            // ctx.Commands(). Before the fix this recorded key (io, 0, 0);
+            // chunk w==0 of the first ParallelForEach also recorded (io, 0, 0).
+            Astra::Entity outerChild = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Position>(outerChild, Position{900001.0f, 0.0f, 0.0f});
+
+            // Scopes 2 and 3: two SEQUENTIAL ParallelForEach calls over the SAME
+            // Position view (deferred creates don't mutate the view, so both see
+            // the identical chunk layout). Each chunk body creates a placeholder
+            // for a sparse deterministic subset, with a value unique to (call,
+            // entity). Sparse (idx % 300) keeps the created-entity count modest
+            // while still landing multiple creates in many chunks.
+            //
+            // WHY THIS IS THE REGRESSION DRIVER (and why it goes RED without the
+            // fix while a bare outer-vs-chunk0 collision would NOT): the outer
+            // context always registers buffer slot 0 (DispatchSystem calls
+            // GetThreadBuffer() on the submitting thread before any worker), so
+            // an outer-vs-chunk0 equal-key pair is gathered outer-first in EVERY
+            // run -- stable, not flaky. The observable non-determinism is
+            // worker-vs-worker: WITHOUT banding, call-2 chunk-w restarts its
+            // iterationIndex at w and collides with call-1 chunk-w; both run on
+            // scheduling-dependent worker buffers, so the colliding creates'
+            // resolved real ids (hence the value->id map) vary run-to-run and
+            // the by-real-id snapshot flakes. WITH banding: outer = band 0,
+            // call1 = [1, 1+n), call2 = [1+n, 1+2n) -- all disjoint, so keys
+            // stay globally unique and the flush is deterministic.
+            auto view1 = ctx.GetRegistry().CreateView<Position>();
+            ctx.ParallelForEach(view1,
+                [](Astra::Entity, const Position& p, Astra::SystemContext& sub)
+                {
+                    const int idx = static_cast<int>(p.x);
+                    if (idx % 300 == 0)
+                    {
+                        Astra::Entity child = sub.Commands().CreateEntity();
+                        sub.Commands().AddComponent<Position>(child, Position{float(700000 + idx), 0.0f, 0.0f});
+                    }
+                });
+            auto view2 = ctx.GetRegistry().CreateView<Position>();
+            ctx.ParallelForEach(view2,
+                [](Astra::Entity, const Position& p, Astra::SystemContext& sub)
+                {
+                    const int idx = static_cast<int>(p.x);
+                    if (idx % 300 == 0)
+                    {
+                        Astra::Entity child = sub.Commands().CreateEntity();
+                        sub.Commands().AddComponent<Position>(child, Position{float(800000 + idx), 0.0f, 0.0f});
+                    }
+                });
+        });
+        ASSERT_TRUE(added.IsOk()) << "run " << run;
+
+        Astra::ParallelExecutor exec(pool);
+        s.Execute(reg, &exec);
+
+        EXPECT_EQ(s.PendingCommandCount(), 0u) << "run " << run;
+
+        // Canonical world snapshot: every live entity (original or created
+        // placeholder) carries Position, so a single CreateView<Position>()
+        // covers each exactly once, sorted by real id (independent of
+        // archetype/chunk iteration order). The created placeholders' real ids
+        // are assigned in sorted-flush order, so if the colliding creates above
+        // resolved in a scheduling-dependent order, the value->id map -- and
+        // thus this snapshot string -- differs from run 0.
+        std::map<Astra::Entity::StorageType, std::string> byId;
+        reg.CreateView<Position>().ForEach([&](Astra::Entity e, Position& p)
+        {
+            byId[e.GetValue()] = "P(" + std::to_string(p.x) + ")";
+        });
+        ASSERT_EQ(byId.size(), reg.Size()) << "run " << run
+            << ": every live entity must carry Position";
+
+        std::string snapshot;
+        for (const auto& [id, desc] : byId)
+        {
+            snapshot += std::to_string(id) + ":" + desc + ";";
+        }
+
+        if (run == 0)
+        {
+            snapshotRun0 = snapshot;
+            // Guard against a degenerate always-equal comparison: run 0 must
+            // actually contain the created placeholders this test produces.
+            ASSERT_FALSE(snapshotRun0.empty());
+        }
+        else
+        {
+            EXPECT_EQ(snapshot, snapshotRun0)
+                << "run " << run << ": deferred-command flush produced a "
+                   "DIFFERENT world state than run 0 -- an iterationIndex band "
+                   "collision (outer Commands() vs a ParallelForEach chunk, or "
+                   "two ParallelForEach calls' overlapping bands) made colliding "
+                   "SortKeys resolve non-deterministically. This test must NOT "
+                   "be weakened; escalate instead.";
+        }
+    }
+}
