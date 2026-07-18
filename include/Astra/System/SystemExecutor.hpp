@@ -18,8 +18,10 @@ namespace Astra
      * Dispatches system `systemIdx` from `context`: for a void(SystemContext&)
      * system (Task 2 -- contextSystems[systemIdx] is non-empty), builds a
      * SystemContext wrapping *context.registry, THIS call's per-worker
-     * CommandBuffer, and the system's insertionOrder, then invokes it;
-     * otherwise invokes the ordinary void(Registry&) delegate as before.
+     * CommandBuffer, the system's insertionOrder, iterationIndex 0, and the
+     * owning ParallelCommandBuffer* (Phase B, Task 2 -- read only by
+     * ParallelForEach, Task 3; unused here), then invokes it; otherwise
+     * invokes the ordinary void(Registry&) delegate as before.
      *
      * Shared by Sequential/ParallelExecutor so both dispatch identically.
      *
@@ -36,7 +38,8 @@ namespace Astra
         {
             SystemContext sysCtx(*context.registry,
                 context.commandBuffer->GetThreadBuffer(),
-                static_cast<uint32_t>(context.metadata[systemIdx].insertionOrder));
+                static_cast<uint32_t>(context.metadata[systemIdx].insertionOrder),
+                0u, context.commandBuffer);
             context.contextSystems[systemIdx](sysCtx);
         }
         else

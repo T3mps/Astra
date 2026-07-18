@@ -739,3 +739,49 @@ TEST(SystemContext, RichMixOfDeferredStructuralChangesFlushesIdenticallyAcross50
         }
     }
 }
+
+// ---- Theme B2 Phase B, Task 2: SystemContext chunk sub-context plumbing ---
+// ---- (parameterized iterationIndex + nullable ParallelCommandBuffer*). ----
+
+TEST(SystemContext, SubContextStampsIterationIndexAndNormalContextStampsZero)
+{
+    Astra::Registry reg;
+    Astra::Entity e1 = reg.CreateEntity<Position>();
+    Astra::Entity e2 = reg.CreateEntity<Position>();
+    ASSERT_TRUE(reg.IsValid(e1));
+    ASSERT_TRUE(reg.IsValid(e2));
+
+    // Phase A path: the existing 3-arg ctor must still stamp iterationIndex 0.
+    Astra::CommandBuffer normalBuf(&reg);
+    Astra::SystemContext normalCtx(reg, normalBuf, /*insertionOrder=*/5u);
+    normalCtx.Commands().DestroyEntity(e1);  // recordSequence 0
+    normalCtx.Commands().DestroyEntity(e1);  // recordSequence 1 (same context, monotonic)
+
+    const auto& normalKeys = normalBuf.CommandKeys();
+    ASSERT_EQ(normalKeys.size(), 2u);
+    EXPECT_EQ(normalKeys[0].first.insertionOrder, 5u);
+    EXPECT_EQ(normalKeys[0].first.iterationIndex, 0u);
+    EXPECT_EQ(normalKeys[0].first.recordSequence, 0u);
+    EXPECT_EQ(normalKeys[1].first.insertionOrder, 5u);
+    EXPECT_EQ(normalKeys[1].first.iterationIndex, 0u);
+    EXPECT_EQ(normalKeys[1].first.recordSequence, 1u);
+
+    // Task 2 path: the new 5-arg ctor stamps the given iterationIndex K, and
+    // exposes the (here null) ParallelCommandBuffer* via GetParallelBuffer().
+    constexpr uint32_t K = 7u;
+    Astra::CommandBuffer subBuf(&reg);
+    Astra::SystemContext subCtx(reg, subBuf, /*insertionOrder=*/5u, K, /*parallelBuffer=*/nullptr);
+    subCtx.Commands().DestroyEntity(e2);  // recordSequence 0
+    subCtx.Commands().DestroyEntity(e2);  // recordSequence 1 (same context, monotonic)
+
+    const auto& subKeys = subBuf.CommandKeys();
+    ASSERT_EQ(subKeys.size(), 2u);
+    EXPECT_EQ(subKeys[0].first.insertionOrder, 5u);
+    EXPECT_EQ(subKeys[0].first.iterationIndex, K);
+    EXPECT_EQ(subKeys[0].first.recordSequence, 0u);
+    EXPECT_EQ(subKeys[1].first.insertionOrder, 5u);
+    EXPECT_EQ(subKeys[1].first.iterationIndex, K);
+    EXPECT_EQ(subKeys[1].first.recordSequence, 1u);
+
+    EXPECT_EQ(subCtx.GetParallelBuffer(), nullptr);
+}
