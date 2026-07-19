@@ -673,3 +673,29 @@ TEST(ComponentRegistryReRegister, ReRegisterOnUnregisteredActsAsRegister)
     ASSERT_NE(desc, nullptr);
     EXPECT_EQ(registry.Size(), 1u);
 }
+
+// ==========================================================================
+// Descriptor-pointer stability. GetComponentDescriptor() returns a pointer into
+// m_components' Swiss-table slot array; consumers (ResourceStorage) cache that
+// pointer and dereference it on teardown (descriptor->Destruct()). A rehash
+// reallocates the slot array and dangles every cached pointer -- latent until a
+// "mature" registry (past the ~14-entry threshold: MIN_CAPACITY 16 * 0.875 load)
+// is destroyed. Fix: the ctor reserves m_components + m_hashToID past the hard
+// type ceiling (MAX_COMPONENTS) so, since the registry never erases, registering
+// up to the ceiling never rehashes and every descriptor pointer stays valid.
+// ==========================================================================
+// Deterministic guard that consumes ZERO TypeIDs. A behavioral test (register
+// past the rehash threshold, then prove an early descriptor pointer didn't move)
+// would have to register ~15+ distinct types, but the test binary already sits
+// near the hard MAX_COMPONENTS=128 ceiling in the process-global TypeID space,
+// so those extra registrations exhaust it and break unrelated tests. Instead we
+// assert the invariant directly: a fresh registry is pre-reserved past the
+// ceiling, so registering up to MAX_COMPONENTS types can never rehash m_components
+// -- which is exactly what keeps every GetComponentDescriptor() pointer valid for
+// the registry's life. Remove the ctor reserve and this fails (capacity 0).
+TEST(ComponentRegistryStability, DescriptorMapPreReservedPastTypeCeiling)
+{
+    Astra::ComponentRegistry registry;
+    EXPECT_GE(registry.GetAllComponentIDs().Capacity(),
+              static_cast<size_t>(Astra::MAX_COMPONENTS) * 2u);
+}

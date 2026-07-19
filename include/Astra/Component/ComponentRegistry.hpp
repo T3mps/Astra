@@ -22,6 +22,23 @@ namespace Astra
     class ComponentRegistry
     {
     public:
+        ComponentRegistry()
+        {
+            // GetComponentDescriptor() hands out pointers into m_components'
+            // Swiss-table slot array; consumers (e.g. ResourceStorage) cache
+            // those pointers for the registry's lifetime and dereference them
+            // on teardown (descriptor->Destruct()). A rehash reallocates the
+            // slot array and would dangle every cached pointer -- latent until a
+            // registry that has registered past FlatMap's growth threshold is
+            // destroyed. Reserve both maps past the hard type ceiling so that,
+            // since the registry never erases (no tombstones), registering up to
+            // MAX_COMPONENTS types never rehashes and cached descriptor pointers
+            // stay valid for life. Capacity 256 clears MAX_COMPONENTS at the
+            // 0.875 load factor with headroom.
+            m_components.Reserve(MAX_COMPONENTS * 2);
+            m_hashToID.Reserve(MAX_COMPONENTS * 2);
+        }
+
         template<Component T>
         void RegisterComponent()
         {
