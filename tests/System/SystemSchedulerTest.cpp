@@ -338,3 +338,23 @@ TEST(SystemSchedulerResourceConflict, ComponentAndResourceAccessComposeWithoutFa
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0].size(), 2u);
 }
+
+// ---- Theme B2 Phase C Task 2: ResourceTraits<T>::ConcurrentReadSafe ----------
+
+namespace SchedResCrs
+{
+    struct ResNTS { int v; };  // non-thread-safe resource
+    struct RNtsA : Astra::SystemTraits<Astra::ReadsResources<ResNTS>> { void operator()(Astra::Registry&) {} };
+    struct RNtsB : Astra::SystemTraits<Astra::ReadsResources<ResNTS>> { void operator()(Astra::Registry&) {} };
+}
+template<> struct Astra::ResourceTraits<SchedResCrs::ResNTS> { static constexpr bool ConcurrentReadSafe = false; };
+
+// Two READERS of a non-ConcurrentReadSafe resource must serialize -> separate groups.
+TEST(SystemSchedulerResourceConflict, NonConcurrentReadSafeReadersDoNotShareGroup)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<SchedResCrs::RNtsA>().IsOk());
+    ASSERT_TRUE(s.AddSystem<SchedResCrs::RNtsB>().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    EXPECT_EQ(plan.size(), 2u);
+}

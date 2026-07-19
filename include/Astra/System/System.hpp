@@ -30,6 +30,13 @@ namespace Astra
     template<typename... Resources>
     struct WritesResources { using type = std::tuple<Resources...>; };
 
+    // Per-resource concurrency trait. A resource whose ConcurrentReadSafe is
+    // false serializes ALL access to it -- even two readers -- for genuinely
+    // non-thread-safe external state (a GPU queue, a non-thread-safe library
+    // handle). Specialize to opt out; the default is safe.
+    template<typename T>
+    struct ResourceTraits { static constexpr bool ConcurrentReadSafe = true; };
+
     // Marker: a system that mutates entity structure (create/destroy/add/remove)
     // or accesses state outside its declared masks. Forces a solo execution group.
     struct Exclusive {};

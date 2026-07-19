@@ -440,7 +440,7 @@ namespace Astra
 
                 if constexpr (requires { typename T::ReadsResourceTypes; })
                 {
-                    ExtractComponentMask<typename T::ReadsResourceTypes>(metadata.resourceReads);
+                    ExtractResourceReadMask<typename T::ReadsResourceTypes>(metadata.resourceReads, metadata.resourceWrites);
                     ExtractComponentMask<typename T::WritesResourceTypes>(metadata.resourceWrites);
                 }
             }
@@ -457,7 +457,29 @@ namespace Astra
         {
             ((mask |= MakeComponentMask<std::tuple_element_t<Is, Tuple>>()), ...);
         }
-        
+
+        // For each read resource R: a ConcurrentReadSafe resource sets its bit in
+        // `reads`; a non-safe one folds into `writes` so the existing write-involved
+        // conflict predicate serializes even two readers.
+        template<typename Tuple>
+        void ExtractResourceReadMask(ComponentMask& reads, ComponentMask& writes)
+        {
+            ExtractResourceReadMaskImpl<Tuple>(reads, writes, std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+        }
+
+        template<typename Tuple, size_t... Is>
+        void ExtractResourceReadMaskImpl(ComponentMask& reads, ComponentMask& writes, std::index_sequence<Is...>)
+        {
+            ([&]
+            {
+                using R = std::tuple_element_t<Is, Tuple>;
+                if constexpr (ResourceTraits<R>::ConcurrentReadSafe)
+                    reads |= MakeComponentMask<R>();
+                else
+                    writes |= MakeComponentMask<R>();
+            }(), ...);
+        }
+
         // Partition systems into sequential groups of concurrently-runnable
         // systems. The plan is a set of CONTIGUOUS insertion-order runs: a run
         // grows from its opener until the first system that conflicts (mask
