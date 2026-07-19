@@ -427,3 +427,33 @@ TEST(SystemSchedulerOrdering, BeforeEdgeReordersLaterRegisteredSystem)
     EXPECT_EQ(plan[0][0], 1u);  // OrdC (index 1) runs first, per Before<OrdA>
     EXPECT_EQ(plan[1][0], 0u);  // OrdA (index 0) runs second
 }
+
+namespace  // Phase D edge-barrier systems (disjoint masks)
+{
+    struct BarWritesPos : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct BarWritesVel : Astra::SystemTraits<Astra::Writes<Velocity>, Astra::After<BarWritesPos>> { void operator()(Astra::Registry&) {} };
+    struct BarPlainVel  : Astra::SystemTraits<Astra::Writes<Velocity>> { void operator()(Astra::Registry&) {} };
+}
+
+// Disjoint masks but an After edge => serialized into separate groups.
+TEST(SystemSchedulerOrdering, OrderingEdgeSplitsDisjointMaskSystems)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<BarWritesPos>().IsOk());  // index 0
+    ASSERT_TRUE(s.AddSystem<BarWritesVel>().IsOk());  // index 1, After<BarWritesPos>
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 2u);         // NOT one group of two
+    EXPECT_EQ(plan[0][0], 0u);          // BarWritesPos first
+    EXPECT_EQ(plan[1][0], 1u);          // BarWritesVel second
+}
+
+// Control: the SAME two disjoint-mask systems WITHOUT an edge share one group.
+TEST(SystemSchedulerOrdering, DisjointMaskSystemsWithoutEdgeShareGroup)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<BarWritesPos>().IsOk());
+    ASSERT_TRUE(s.AddSystem<BarPlainVel>().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].size(), 2u);
+}

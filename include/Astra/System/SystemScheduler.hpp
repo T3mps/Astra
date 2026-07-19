@@ -565,6 +565,23 @@ namespace Astra
             return order;
         }
 
+        // True if there is a DIRECT ordering edge predIdx -> succIdx, i.e. succ
+        // declares After<pred> or pred declares Before<succ>. (Systems are keyed
+        // by TypeID::Hash(), stored in metadata.typeId.) Direct edges suffice for
+        // the grouping barrier: because the plan is grouped over the topological
+        // order in contiguous runs, any transitive predecessor sits in an earlier,
+        // already-closed group, so it can never be a current-group member.
+        ASTRA_NODISCARD bool IsOrderingPredecessor(size_t predIdx, size_t succIdx) const
+        {
+            const auto& pred = m_systems[predIdx].metadata;
+            const auto& succ = m_systems[succIdx].metadata;
+            const uint64_t predHash = static_cast<uint64_t>(pred.typeId);
+            const uint64_t succHash = static_cast<uint64_t>(succ.typeId);
+            for (uint64_t h : succ.afterIds)  if (h == predHash) return true;
+            for (uint64_t h : pred.beforeIds) if (h == succHash) return true;
+            return false;
+        }
+
         // Partition systems into sequential groups of concurrently-runnable
         // systems. The plan is a set of CONTIGUOUS insertion-order runs: a run
         // grows from its opener until the first system that conflicts (mask
@@ -627,7 +644,16 @@ namespace Astra
                         (sysJ.resourceWrites & groupResourceReads ).Any() ||
                         (sysJ.resourceReads  & groupResourceWrites).Any())
                         break;
-                    // (Task 2 inserts the edge-as-barrier break here.)
+                    // Edge-as-barrier: an explicit ordering edge into sysJ from any
+                    // current-group member forces sysJ into a later group, even with
+                    // disjoint masks (the edge demands serialization).
+                    {
+                        bool blockedByEdge = false;
+                        for (size_t member : group)
+                            if (IsOrderingPredecessor(member, jIdx)) { blockedByEdge = true; break; }
+                        if (blockedByEdge)
+                            break;
+                    }
 
                     group.push_back(jIdx);
                     groupReads  |= sysJ.reads;
