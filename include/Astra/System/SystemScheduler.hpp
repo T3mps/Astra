@@ -444,6 +444,13 @@ namespace Astra
                     // Resource writes always route to resourceWrites regardless of ConcurrentReadSafe (only reads are folded).
                     ExtractComponentMask<typename T::WritesResourceTypes>(metadata.resourceWrites);
                 }
+
+                if constexpr (requires { typename T::BeforeTypes; typename T::AfterTypes; typename T::AmbiguousWithTypes; })
+                {
+                    ExtractSystemIdList<typename T::BeforeTypes>(metadata.beforeIds);
+                    ExtractSystemIdList<typename T::AfterTypes>(metadata.afterIds);
+                    ExtractSystemIdList<typename T::AmbiguousWithTypes>(metadata.ambiguousWithIds);
+                }
             }
         }
 
@@ -457,6 +464,20 @@ namespace Astra
         void ExtractComponentMaskImpl(ComponentMask& mask, std::index_sequence<Is...>)
         {
             ((mask |= MakeComponentMask<std::tuple_element_t<Is, Tuple>>()), ...);
+        }
+
+        // Push TypeID<Each>::Hash() for each system type in the tuple into `out`
+        // (the same 64-bit key m_systemIndices uses to look systems up).
+        template<typename Tuple>
+        void ExtractSystemIdList(std::vector<uint64_t>& out)
+        {
+            ExtractSystemIdListImpl<Tuple>(out, std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+        }
+
+        template<typename Tuple, size_t... Is>
+        void ExtractSystemIdListImpl(std::vector<uint64_t>& out, std::index_sequence<Is...>)
+        {
+            ((out.push_back(TypeID<std::tuple_element_t<Is, Tuple>>::Hash())), ...);
         }
 
         // For each read resource R: a ConcurrentReadSafe resource sets its bit in
@@ -479,6 +500,69 @@ namespace Astra
                 else
                     writes |= MakeComponentMask<R>();
             }(), ...);
+        }
+
+        // Stable topological order over the Before/After edges. Honors every
+        // resolved edge; among unconstrained systems preserves insertion order
+        // (m_systems is stored in registration order, so index == insertionOrder,
+        // and picking the lowest ready index is the insertion-order tiebreak).
+        // A cycle cannot be ordered -- it is broken deterministically by forcing
+        // the lowest-index unplaced system, so this ALWAYS terminates with a
+        // total order (m_scheduleHadCycle records that a break happened).
+        std::vector<size_t> ComputeScheduleOrder()
+        {
+            m_scheduleHadCycle = false;
+            m_cycleMembers.clear();
+            const size_t n = m_systems.size();
+            const size_t UNKNOWN = n;
+
+            auto resolve = [&](uint64_t hash) -> size_t
+            {
+                auto it = m_systemIndices.Find(hash);
+                return it == m_systemIndices.end() ? UNKNOWN : it->second;
+            };
+
+            // predecessor -> successor adjacency (predecessor runs first) + in-degrees.
+            std::vector<std::vector<size_t>> succ(n);
+            std::vector<size_t> indeg(n, 0);
+            for (size_t s = 0; s < n; ++s)
+            {
+                const auto& md = m_systems[s].metadata;
+                for (uint64_t h : md.afterIds)   // After<T> on s: T runs before s => T -> s
+                {
+                    size_t t = resolve(h);
+                    if (t != UNKNOWN && t != s) { succ[t].push_back(s); ++indeg[s]; }
+                }
+                for (uint64_t h : md.beforeIds)  // Before<T> on s: s runs before T => s -> T
+                {
+                    size_t t = resolve(h);
+                    if (t != UNKNOWN && t != s) { succ[s].push_back(t); ++indeg[t]; }
+                }
+            }
+
+            std::vector<size_t> order;
+            order.reserve(n);
+            std::vector<bool> placed(n, false);
+            while (order.size() < n)
+            {
+                size_t pick = UNKNOWN;
+                for (size_t k = 0; k < n; ++k)
+                    if (!placed[k] && indeg[k] == 0) { pick = k; break; }  // lowest ready index
+                if (pick == UNKNOWN)
+                {
+                    // Cycle: no ready node but systems remain. Force the lowest
+                    // unplaced index (deterministic), recording it for Task 3.
+                    m_scheduleHadCycle = true;
+                    for (size_t k = 0; k < n; ++k)
+                        if (!placed[k]) { pick = k; break; }
+                    m_cycleMembers.push_back(m_systems[pick].metadata.insertionOrder);
+                }
+                placed[pick] = true;
+                order.push_back(pick);
+                for (size_t nx : succ[pick])
+                    if (indeg[nx] > 0) --indeg[nx];
+            }
+            return order;
         }
 
         // Partition systems into sequential groups of concurrently-runnable
@@ -506,13 +590,18 @@ namespace Astra
                       && m.resourceReads.None() && m.resourceWrites.None());
             };
 
-            size_t i = 0;
-            while (i < m_systems.size())
+            const std::vector<size_t> order = ComputeScheduleOrder();
+            for (size_t k = 0; k < order.size(); ++k)
+                m_systems[order[k]].metadata.scheduleOrder = k;
+
+            size_t p = 0;
+            while (p < order.size())
             {
-                const auto& sysI = m_systems[i].metadata;
+                const size_t iIdx = order[p];
+                const auto& sysI = m_systems[iIdx].metadata;
 
                 std::vector<size_t> group;
-                group.push_back(i);
+                group.push_back(iIdx);
                 ComponentMask groupReads = sysI.reads;
                 ComponentMask groupWrites = sysI.writes;
                 ComponentMask groupResourceReads = sysI.resourceReads;
@@ -521,10 +610,11 @@ namespace Astra
                 // A solo opener (Exclusive, or no declared hints) accepts nobody.
                 const bool acceptsMore = !sysI.requiresExclusive && declaresAccess(sysI);
 
-                size_t j = i + 1;
-                for (; acceptsMore && j < m_systems.size(); ++j)
+                size_t q = p + 1;
+                for (; acceptsMore && q < order.size(); ++q)
                 {
-                    const auto& sysJ = m_systems[j].metadata;
+                    const size_t jIdx = order[q];
+                    const auto& sysJ = m_systems[jIdx].metadata;
 
                     // Exclusive / no-trait systems never join an existing group,
                     // and any conflict ends the contiguous run (order preserved).
@@ -537,8 +627,9 @@ namespace Astra
                         (sysJ.resourceWrites & groupResourceReads ).Any() ||
                         (sysJ.resourceReads  & groupResourceWrites).Any())
                         break;
+                    // (Task 2 inserts the edge-as-barrier break here.)
 
-                    group.push_back(j);
+                    group.push_back(jIdx);
                     groupReads  |= sysJ.reads;
                     groupWrites |= sysJ.writes;
                     groupResourceReads  |= sysJ.resourceReads;
@@ -546,7 +637,7 @@ namespace Astra
                 }
 
                 m_executionPlan.push_back(std::move(group));
-                i = j;  // next group starts right after this contiguous run
+                p = q;
             }
 
             m_needsRebuild = false;
@@ -671,6 +762,8 @@ namespace Astra
 
         std::vector<SystemEntry> m_systems;                             // All registered systems
         FlatMap<uint64_t, size_t> m_systemIndices;                      // key: TypeID<T>::Hash() — systems must not consume dense ComponentIDs
+        bool m_scheduleHadCycle = false;            // set by ComputeScheduleOrder; surfaced in Task 3
+        std::vector<size_t> m_cycleMembers;         // insertionOrders forced during a cycle break (Task 3 log)
         mutable std::vector<std::vector<size_t>> m_executionPlan;       // Cached parallel groups
         mutable bool m_needsRebuild = true;                             // Whether execution plan needs rebuild
         mutable std::atomic<int> m_executionDepth{0};                   // reentrancy-safe; ==0 is the B2 sync point

@@ -24,6 +24,15 @@ namespace Astra
     template<typename... Components>
     struct Writes { using type = std::tuple<Components...>; };
 
+    template<typename... Systems>
+    struct Before { using type = std::tuple<Systems...>; };
+
+    template<typename... Systems>
+    struct After { using type = std::tuple<Systems...>; };
+
+    template<typename... Systems>
+    struct AmbiguousWith { using type = std::tuple<Systems...>; };
+
     template<typename... Resources>
     struct ReadsResources { using type = std::tuple<Resources...>; };
 
@@ -48,6 +57,13 @@ namespace Astra
         template<typename T> struct TraitWrites { using type = std::tuple<>; };
         template<typename... W> struct TraitWrites<Writes<W...>> { using type = std::tuple<W...>; };
 
+        template<typename T> struct TraitBefore { using type = std::tuple<>; };
+        template<typename... S> struct TraitBefore<Before<S...>> { using type = std::tuple<S...>; };
+        template<typename T> struct TraitAfter  { using type = std::tuple<>; };
+        template<typename... S> struct TraitAfter<After<S...>>   { using type = std::tuple<S...>; };
+        template<typename T> struct TraitAmbiguousWith { using type = std::tuple<>; };
+        template<typename... S> struct TraitAmbiguousWith<AmbiguousWith<S...>> { using type = std::tuple<S...>; };
+
         template<typename T> struct TraitReadsResources  { using type = std::tuple<>; };
         template<typename... R> struct TraitReadsResources<ReadsResources<R...>>  { using type = std::tuple<R...>; };
         template<typename T> struct TraitWritesResources { using type = std::tuple<>; };
@@ -60,6 +76,9 @@ namespace Astra
     {
         using ReadsComponents  = decltype(std::tuple_cat(std::declval<typename Detail::TraitReads<Traits>::type>()...));
         using WritesComponents = decltype(std::tuple_cat(std::declval<typename Detail::TraitWrites<Traits>::type>()...));
+        using BeforeTypes        = decltype(std::tuple_cat(std::declval<typename Detail::TraitBefore<Traits>::type>()...));
+        using AfterTypes         = decltype(std::tuple_cat(std::declval<typename Detail::TraitAfter<Traits>::type>()...));
+        using AmbiguousWithTypes = decltype(std::tuple_cat(std::declval<typename Detail::TraitAmbiguousWith<Traits>::type>()...));
         using ReadsResourceTypes  = decltype(std::tuple_cat(std::declval<typename Detail::TraitReadsResources<Traits>::type>()...));
         using WritesResourceTypes = decltype(std::tuple_cat(std::declval<typename Detail::TraitWritesResources<Traits>::type>()...));
         static constexpr bool HasTraits = true;

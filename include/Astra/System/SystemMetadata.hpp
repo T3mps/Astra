@@ -40,6 +40,18 @@ namespace Astra
 
         // True if the system declared Astra::Exclusive (runs in its own solo group).
         bool requiresExclusive = false;
+
+        // Explicit ordering edges (Phase D), resolved to the target systems'
+        // TypeID::Hash() -- the same 64-bit key m_systemIndices uses. Filled by
+        // ExtractSystemTraits; resolved to indices in BuildExecutionPlan.
+        std::vector<uint64_t> beforeIds;
+        std::vector<uint64_t> afterIds;
+        std::vector<uint64_t> ambiguousWithIds;
+
+        // Position of this system in the topological execution order (filled by
+        // BuildExecutionPlan). Equals insertionOrder when no ordering edges
+        // exist. Primary key of the deferred-command SortKey (see Task 4).
+        size_t scheduleOrder = 0;
     };
     
     /**

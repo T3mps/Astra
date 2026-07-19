@@ -374,3 +374,56 @@ TEST(SystemSchedulerResourceConflict, NonConcurrentReadSafeReadersDoNotShareGrou
     const auto& plan = s.GetExecutionPlan();
     EXPECT_EQ(plan.size(), 2u);
 }
+
+// ---- Theme B2 Phase D Task 1: Before/After ordering traits + topological reorder --
+
+namespace  // Phase D ordering systems
+{
+    // Both write Position => always conflict => always separate groups.
+    struct OrdA  : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct OrdB  : Astra::SystemTraits<Astra::Writes<Position>, Astra::After<OrdA>>  { void operator()(Astra::Registry&) {} };
+    struct OrdC  : Astra::SystemTraits<Astra::Writes<Position>, Astra::Before<OrdA>> { void operator()(Astra::Registry&) {} };
+}
+
+// Compile-time: the trait aliases collect the declared ordering targets.
+static_assert(std::is_same_v<Astra::SystemTraits<Astra::After<OrdA>>::AfterTypes,  std::tuple<OrdA>>);
+static_assert(std::is_same_v<Astra::SystemTraits<Astra::Before<OrdA>>::BeforeTypes, std::tuple<OrdA>>);
+static_assert(std::is_same_v<Astra::SystemTraits<Astra::AmbiguousWith<OrdA>>::AmbiguousWithTypes, std::tuple<OrdA>>);
+
+// With no ordering edges at all, groups follow registration order (baseline
+// unchanged). WPosOnly (Writes<Position>, defined in the Phase C tests earlier
+// in this same TU, so its anonymous-namespace type is visible here) has no edges.
+TEST(SystemSchedulerOrdering, NoEdgesKeepsInsertionOrder)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<OrdA>().IsOk());     // index 0, no edges
+    ASSERT_TRUE(s.AddSystem<WPosOnly>().IsOk()); // index 1, no edges (both write Position => conflict => 2 groups)
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 2u);
+    EXPECT_EQ(plan[0][0], 0u);  // OrdA first (insertion order preserved)
+    EXPECT_EQ(plan[1][0], 1u);  // WPosOnly second
+}
+
+// After<OrdA> on a system registered BEFORE OrdA moves it after OrdA.
+TEST(SystemSchedulerOrdering, AfterEdgeReordersEarlierRegisteredSystem)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<OrdB>().IsOk());   // index 0, declares After<OrdA>
+    ASSERT_TRUE(s.AddSystem<OrdA>().IsOk());   // index 1
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 2u);
+    EXPECT_EQ(plan[0][0], 1u);  // OrdA (index 1) runs first
+    EXPECT_EQ(plan[1][0], 0u);  // OrdB (index 0) runs second, per After<OrdA>
+}
+
+// Before<OrdA> on a system registered AFTER OrdA moves it before OrdA.
+TEST(SystemSchedulerOrdering, BeforeEdgeReordersLaterRegisteredSystem)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<OrdA>().IsOk());   // index 0
+    ASSERT_TRUE(s.AddSystem<OrdC>().IsOk());   // index 1, declares Before<OrdA>
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 2u);
+    EXPECT_EQ(plan[0][0], 1u);  // OrdC (index 1) runs first, per Before<OrdA>
+    EXPECT_EQ(plan[1][0], 0u);  // OrdA (index 0) runs second
+}
