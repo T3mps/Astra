@@ -437,6 +437,12 @@ namespace Astra
             {
                 ExtractComponentMask<typename T::ReadsComponents>(metadata.reads);
                 ExtractComponentMask<typename T::WritesComponents>(metadata.writes);
+
+                if constexpr (requires { typename T::ReadsResourceTypes; })
+                {
+                    ExtractComponentMask<typename T::ReadsResourceTypes>(metadata.resourceReads);
+                    ExtractComponentMask<typename T::WritesResourceTypes>(metadata.resourceWrites);
+                }
             }
         }
 
@@ -467,6 +473,16 @@ namespace Astra
                 return;
             }
 
+            // A system participates in grouping only if it declares SOME access.
+            // A system with no declared component OR resource access runs solo
+            // (unchanged for component-only systems; extended to cover resources
+            // so a resource-only system is groupable rather than forced solo).
+            const auto declaresAccess = [](const SystemMetadata& m)
+            {
+                return !(m.reads.None() && m.writes.None()
+                      && m.resourceReads.None() && m.resourceWrites.None());
+            };
+
             size_t i = 0;
             while (i < m_systems.size())
             {
@@ -476,10 +492,11 @@ namespace Astra
                 group.push_back(i);
                 ComponentMask groupReads = sysI.reads;
                 ComponentMask groupWrites = sysI.writes;
+                ComponentMask groupResourceReads = sysI.resourceReads;
+                ComponentMask groupResourceWrites = sysI.resourceWrites;
 
                 // A solo opener (Exclusive, or no declared hints) accepts nobody.
-                const bool acceptsMore = !sysI.requiresExclusive
-                                      && !(sysI.reads.None() && sysI.writes.None());
+                const bool acceptsMore = !sysI.requiresExclusive && declaresAccess(sysI);
 
                 size_t j = i + 1;
                 for (; acceptsMore && j < m_systems.size(); ++j)
@@ -488,16 +505,21 @@ namespace Astra
 
                     // Exclusive / no-trait systems never join an existing group,
                     // and any conflict ends the contiguous run (order preserved).
-                    if (sysJ.requiresExclusive || (sysJ.reads.None() && sysJ.writes.None()))
+                    if (sysJ.requiresExclusive || !declaresAccess(sysJ))
                         break;
                     if ((sysJ.writes & groupWrites).Any() ||
                         (sysJ.writes & groupReads ).Any() ||
-                        (sysJ.reads  & groupWrites).Any())
+                        (sysJ.reads  & groupWrites).Any() ||
+                        (sysJ.resourceWrites & groupResourceWrites).Any() ||
+                        (sysJ.resourceWrites & groupResourceReads ).Any() ||
+                        (sysJ.resourceReads  & groupResourceWrites).Any())
                         break;
 
                     group.push_back(j);
                     groupReads  |= sysJ.reads;
                     groupWrites |= sysJ.writes;
+                    groupResourceReads  |= sysJ.resourceReads;
+                    groupResourceWrites |= sysJ.resourceWrites;
                 }
 
                 m_executionPlan.push_back(std::move(group));

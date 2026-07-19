@@ -268,3 +268,73 @@ TEST(SystemScheduler, ExclusiveSpawnerRunsSoloWhilePureGroupRunsOnThreads)
     // sees no structural change across the pure [1,2] group, so it never fires.
     EXPECT_EQ(CountPositions(reg), static_cast<size_t>(10 * kFrames));
 }
+
+// ---- Theme B2 Phase C Task 1: resource access folded into conflict analysis --
+
+namespace  // extend the existing anon namespace or add a new one
+{
+    struct ResA { int v; };
+    struct ResB { int v; };
+
+    struct WResA  : Astra::SystemTraits<Astra::WritesResources<ResA>> { void operator()(Astra::Registry&) {} };
+    struct WResA2 : Astra::SystemTraits<Astra::WritesResources<ResA>> { void operator()(Astra::Registry&) {} };
+    struct RResA  : Astra::SystemTraits<Astra::ReadsResources<ResA>>  { void operator()(Astra::Registry&) {} };
+    struct RResA2 : Astra::SystemTraits<Astra::ReadsResources<ResA>>  { void operator()(Astra::Registry&) {} };
+    struct WResB  : Astra::SystemTraits<Astra::WritesResources<ResB>> { void operator()(Astra::Registry&) {} };
+    struct WPosOnly : Astra::SystemTraits<Astra::Writes<Position>>    { void operator()(Astra::Registry&) {} };
+}
+
+// Two writers of the SAME resource conflict -> separate groups.
+TEST(SystemSchedulerResourceConflict, SameResourceWritersDoNotShareGroup)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<WResA>().IsOk());
+    ASSERT_TRUE(s.AddSystem<WResA2>().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    EXPECT_EQ(plan.size(), 2u);
+}
+
+// Writer + reader of the same resource conflict -> separate groups.
+TEST(SystemSchedulerResourceConflict, SameResourceWriterAndReaderDoNotShareGroup)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<WResA>().IsOk());
+    ASSERT_TRUE(s.AddSystem<RResA>().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    EXPECT_EQ(plan.size(), 2u);
+}
+
+// Two readers of the same (default-safe) resource DO share a group -- proves
+// read/read is not a conflict AND that a resource-only system is groupable
+// (not wrongly forced solo).
+TEST(SystemSchedulerResourceConflict, SameResourceReadersShareGroup)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<RResA>().IsOk());
+    ASSERT_TRUE(s.AddSystem<RResA2>().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].size(), 2u);
+}
+
+// Writers of DIFFERENT resources do not conflict -> share a group (per-resource).
+TEST(SystemSchedulerResourceConflict, DifferentResourceWritersShareGroup)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<WResA>().IsOk());
+    ASSERT_TRUE(s.AddSystem<WResB>().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].size(), 2u);
+}
+
+// A component-writer and a disjoint resource-writer compose without conflict.
+TEST(SystemSchedulerResourceConflict, ComponentAndResourceAccessComposeWithoutFalseConflict)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<WPosOnly>().IsOk());
+    ASSERT_TRUE(s.AddSystem<WResA>().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].size(), 2u);
+}

@@ -25,7 +25,13 @@ namespace Astra
         
         // Components this system writes (mutable access)
         ComponentMask writes;
-        
+
+        // Resources this system reads / writes (singleton state; keyed by the
+        // resource type's ComponentID, in masks distinct from the component
+        // reads/writes so component-vs-resource can never false-conflict).
+        ComponentMask resourceReads;
+        ComponentMask resourceWrites;
+
         // Runtime type identifier for the system (type-erased)
         size_t typeId;
         

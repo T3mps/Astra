@@ -24,6 +24,12 @@ namespace Astra
     template<typename... Components>
     struct Writes { using type = std::tuple<Components...>; };
 
+    template<typename... Resources>
+    struct ReadsResources { using type = std::tuple<Resources...>; };
+
+    template<typename... Resources>
+    struct WritesResources { using type = std::tuple<Resources...>; };
+
     // Marker: a system that mutates entity structure (create/destroy/add/remove)
     // or accesses state outside its declared masks. Forces a solo execution group.
     struct Exclusive {};
@@ -34,6 +40,11 @@ namespace Astra
         template<typename... R> struct TraitReads<Reads<R...>>  { using type = std::tuple<R...>; };
         template<typename T> struct TraitWrites { using type = std::tuple<>; };
         template<typename... W> struct TraitWrites<Writes<W...>> { using type = std::tuple<W...>; };
+
+        template<typename T> struct TraitReadsResources  { using type = std::tuple<>; };
+        template<typename... R> struct TraitReadsResources<ReadsResources<R...>>  { using type = std::tuple<R...>; };
+        template<typename T> struct TraitWritesResources { using type = std::tuple<>; };
+        template<typename... W> struct TraitWritesResources<WritesResources<W...>> { using type = std::tuple<W...>; };
     }
 
     // Accepts Reads<...>, Writes<...>, and Exclusive in any order/combination.
@@ -42,6 +53,8 @@ namespace Astra
     {
         using ReadsComponents  = decltype(std::tuple_cat(std::declval<typename Detail::TraitReads<Traits>::type>()...));
         using WritesComponents = decltype(std::tuple_cat(std::declval<typename Detail::TraitWrites<Traits>::type>()...));
+        using ReadsResourceTypes  = decltype(std::tuple_cat(std::declval<typename Detail::TraitReadsResources<Traits>::type>()...));
+        using WritesResourceTypes = decltype(std::tuple_cat(std::declval<typename Detail::TraitWritesResources<Traits>::type>()...));
         static constexpr bool HasTraits = true;
         static constexpr bool RequiresExclusive = (std::is_same_v<Traits, Exclusive> || ...);
     };
