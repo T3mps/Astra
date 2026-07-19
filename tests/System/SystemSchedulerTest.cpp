@@ -282,6 +282,7 @@ namespace  // extend the existing anon namespace or add a new one
     struct RResA2 : Astra::SystemTraits<Astra::ReadsResources<ResA>>  { void operator()(Astra::Registry&) {} };
     struct WResB  : Astra::SystemTraits<Astra::WritesResources<ResB>> { void operator()(Astra::Registry&) {} };
     struct WPosOnly : Astra::SystemTraits<Astra::Writes<Position>>    { void operator()(Astra::Registry&) {} };
+    struct WPosRes : Astra::SystemTraits<Astra::WritesResources<Position>> { void operator()(Astra::Registry&) {} };
 }
 
 // Two writers of the SAME resource conflict -> separate groups.
@@ -334,6 +335,21 @@ TEST(SystemSchedulerResourceConflict, ComponentAndResourceAccessComposeWithoutFa
     Astra::SystemScheduler s;
     ASSERT_TRUE(s.AddSystem<WPosOnly>().IsOk());
     ASSERT_TRUE(s.AddSystem<WResA>().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].size(), 2u);
+}
+
+// A component-writer and a resource-writer of the SAME type (Position) share
+// one ComponentID bit but in DISJOINT mask categories (writes vs
+// resourceWrites) -> they must NOT false-conflict. This directly exercises the
+// spec's load-bearing separate-masks invariant, which the distinct-type tests
+// above only cover structurally.
+TEST(SystemSchedulerResourceConflict, SameTypeAsComponentAndResourceDoNotFalseConflict)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<WPosOnly>().IsOk());
+    ASSERT_TRUE(s.AddSystem<WPosRes>().IsOk());
     const auto& plan = s.GetExecutionPlan();
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0].size(), 2u);

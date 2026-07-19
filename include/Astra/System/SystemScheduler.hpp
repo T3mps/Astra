@@ -438,9 +438,10 @@ namespace Astra
                 ExtractComponentMask<typename T::ReadsComponents>(metadata.reads);
                 ExtractComponentMask<typename T::WritesComponents>(metadata.writes);
 
-                if constexpr (requires { typename T::ReadsResourceTypes; })
+                if constexpr (requires { typename T::ReadsResourceTypes; typename T::WritesResourceTypes; })
                 {
                     ExtractResourceReadMask<typename T::ReadsResourceTypes>(metadata.resourceReads, metadata.resourceWrites);
+                    // Resource writes always route to resourceWrites regardless of ConcurrentReadSafe (only reads are folded).
                     ExtractComponentMask<typename T::WritesResourceTypes>(metadata.resourceWrites);
                 }
             }
