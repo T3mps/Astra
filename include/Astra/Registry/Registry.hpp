@@ -671,13 +671,11 @@ namespace Astra
             const ComponentMask& mask = record->archetype->GetMask();
 
             // Iterate through all registered components and check if entity has them
-            for (const auto& [id, desc] : m_componentRegistry->GetAllComponentIDs())
+            m_componentRegistry->ForEachComponent([&](ComponentID id, const ComponentDescriptor& desc)
             {
                 if (mask.Test(id))
-                {
                     result.push_back(&desc);
-                }
-            }
+            });
 
             return result;
         }
@@ -717,28 +715,28 @@ namespace Astra
                 return result;
 
             // Iterate through all registered components and collect info
-            for (const auto& [id, desc] : m_componentRegistry->GetAllComponentIDs())
+            m_componentRegistry->ForEachComponent([&](ComponentID id, const ComponentDescriptor& desc)
             {
-                if (mask.Test(id))
+                if (!mask.Test(id))
+                    return;
+
+                ComponentInfo info;
+                info.descriptor = &desc;
+                info.meta = desc.meta;  // May be nullptr if type is not reflected
+
+                // Get component data pointer
+                void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(id);
+                if (compArray && desc.size > 0)
                 {
-                    ComponentInfo info;
-                    info.descriptor = &desc;
-                    info.meta = desc.meta;  // May be nullptr if type is not reflected
-
-                    // Get component data pointer
-                    void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(id);
-                    if (compArray && desc.size > 0)
-                    {
-                        info.data = static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc.size;
-                    }
-                    else
-                    {
-                        info.data = nullptr;  // Empty component
-                    }
-
-                    result.push_back(info);
+                    info.data = static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc.size;
                 }
-            }
+                else
+                {
+                    info.data = nullptr;  // Empty component
+                }
+
+                result.push_back(info);
+            });
 
             return result;
         }

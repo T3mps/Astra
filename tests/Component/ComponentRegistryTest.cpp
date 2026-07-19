@@ -607,24 +607,26 @@ TEST_F(ComponentRegistryTest, MultipleComponentSerialization)
     EXPECT_TRUE(badResult.IsErr());
 }
 
-// Test GetAllComponents and GetComponentCount
+// Test component enumeration via Size() and ForEachComponent()
 TEST_F(ComponentRegistryTest, ComponentEnumeration)
 {
     Astra::ComponentRegistry registry;
-    
+
     EXPECT_EQ(registry.Size(), 0u);
-    
+
     registry.RegisterComponents<Position, Velocity, Health>();
-    
+
     EXPECT_EQ(registry.Size(), 3u);
-    
-    const auto& allComponents = registry.GetAllComponentIDs();
-    EXPECT_EQ(allComponents.Size(), 3u);
-    
-    // Verify each component is in the map
-    EXPECT_TRUE(allComponents.Contains(Astra::TypeID<Position>::Value()));
-    EXPECT_TRUE(allComponents.Contains(Astra::TypeID<Velocity>::Value()));
-    EXPECT_TRUE(allComponents.Contains(Astra::TypeID<Health>::Value()));
+
+    // Each registered component has a descriptor
+    EXPECT_NE(registry.GetComponentDescriptor(Astra::TypeID<Position>::Value()), nullptr);
+    EXPECT_NE(registry.GetComponentDescriptor(Astra::TypeID<Velocity>::Value()), nullptr);
+    EXPECT_NE(registry.GetComponentDescriptor(Astra::TypeID<Health>::Value()), nullptr);
+
+    // ForEachComponent visits exactly the registered set
+    size_t visited = 0;
+    registry.ForEachComponent([&](Astra::ComponentID, const Astra::ComponentDescriptor&) { ++visited; });
+    EXPECT_EQ(visited, 3u);
 }
 
 // Probe types at namespace scope to avoid MSVC concept/name issues with local structs
@@ -674,28 +676,38 @@ TEST(ComponentRegistryReRegister, ReRegisterOnUnregisteredActsAsRegister)
     EXPECT_EQ(registry.Size(), 1u);
 }
 
+namespace Astra_Test_RegStability
+{
+    struct ProbeA { int v; };
+    struct ProbeB { int v; };
+    struct ProbeC { int v; };
+    struct ProbeD { int v; };
+}
+
 // ==========================================================================
 // Descriptor-pointer stability. GetComponentDescriptor() returns a pointer into
-// m_components' Swiss-table slot array; consumers (ResourceStorage) cache that
-// pointer and dereference it on teardown (descriptor->Destruct()). A rehash
-// reallocates the slot array and dangles every cached pointer -- latent until a
-// "mature" registry (past the ~14-entry threshold: MIN_CAPACITY 16 * 0.875 load)
-// is destroyed. Fix: the ctor reserves m_components + m_hashToID past the hard
-// type ceiling (MAX_COMPONENTS) so, since the registry never erases, registering
-// up to the ceiling never rehashes and every descriptor pointer stays valid.
+// m_components, which consumers (ResourceStorage) cache. m_components is a fixed
+// directly-indexed array (ComponentID is a dense 0..MAX_COMPONENTS-1 index), so
+// the pointer is stable for the registry's life -- registering more types never
+// moves it. (Previously m_components was a FlatMap whose rehash relocated the
+// slot array and dangled cached pointers -> a ResourceStorage teardown segfault.)
+// Kept to a handful of types so it does not exhaust the process-global TypeID
+// space (the test binary already sits near the MAX_COMPONENTS=128 ceiling).
 // ==========================================================================
-// Deterministic guard that consumes ZERO TypeIDs. A behavioral test (register
-// past the rehash threshold, then prove an early descriptor pointer didn't move)
-// would have to register ~15+ distinct types, but the test binary already sits
-// near the hard MAX_COMPONENTS=128 ceiling in the process-global TypeID space,
-// so those extra registrations exhaust it and break unrelated tests. Instead we
-// assert the invariant directly: a fresh registry is pre-reserved past the
-// ceiling, so registering up to MAX_COMPONENTS types can never rehash m_components
-// -- which is exactly what keeps every GetComponentDescriptor() pointer valid for
-// the registry's life. Remove the ctor reserve and this fails (capacity 0).
-TEST(ComponentRegistryStability, DescriptorMapPreReservedPastTypeCeiling)
+TEST(ComponentRegistryStability, DescriptorPointerStableAsMoreTypesRegister)
 {
     Astra::ComponentRegistry registry;
-    EXPECT_GE(registry.GetAllComponentIDs().Capacity(),
-              static_cast<size_t>(Astra::MAX_COMPONENTS) * 2u);
+    registry.RegisterComponent<Astra_Test_RegStability::ProbeA>();
+    const auto* before = registry.GetComponentDescriptor(
+        Astra::TypeID<Astra_Test_RegStability::ProbeA>::Value());
+    ASSERT_NE(before, nullptr);
+
+    registry.RegisterComponent<Astra_Test_RegStability::ProbeB>();
+    registry.RegisterComponent<Astra_Test_RegStability::ProbeC>();
+    registry.RegisterComponent<Astra_Test_RegStability::ProbeD>();
+
+    EXPECT_EQ(registry.GetComponentDescriptor(
+                  Astra::TypeID<Astra_Test_RegStability::ProbeA>::Value()),
+              before)
+        << "descriptor pointer for an early type moved after further registrations";
 }
