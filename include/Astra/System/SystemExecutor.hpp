@@ -38,7 +38,10 @@ namespace Astra
         {
             SystemContext sysCtx(*context.registry,
                 context.commandBuffer->GetThreadBuffer(),
-                static_cast<uint32_t>(context.metadata[systemIdx].insertionOrder),
+                // Sort-key primary = this system's SCHEDULE order (topological
+                // position), so deferred commands apply in execution order.
+                // Equals insertionOrder when no Before/After edges exist.
+                static_cast<uint32_t>(context.metadata[systemIdx].scheduleOrder),
                 0u, context.commandBuffer);
             context.contextSystems[systemIdx](sysCtx);
         }

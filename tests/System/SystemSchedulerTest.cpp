@@ -518,3 +518,73 @@ TEST(SystemSchedulerOrdering, UnknownEdgeTargetIsIgnored)
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0][0], 0u);
 }
+
+// ---- Theme B2 Phase D Task 4: deferred commands apply in schedule (execution) order --
+
+namespace  // Phase D deferred-apply-order systems
+{
+    struct DTag { int v = 0; };
+    // Recorded-against entity is shared via a namespace-scope handle set by the test.
+    inline Astra::Entity g_applyOrderEntity{};
+
+    struct AddsTag : Astra::SystemTraits<Astra::Exclusive>
+    {
+        void operator()(Astra::SystemContext& ctx) { ctx.Commands().AddComponent<DTag>(g_applyOrderEntity, DTag{7}); }
+    };
+    // Registered BEFORE AddsTag, but After<AddsTag> => must run/apply second.
+    struct RemovesTag : Astra::SystemTraits<Astra::Exclusive, Astra::After<AddsTag>>
+    {
+        void operator()(Astra::SystemContext& ctx) { ctx.Commands().RemoveComponent<DTag>(g_applyOrderEntity); }
+    };
+}
+
+// After<AddsTag> on a system registered first => its Remove applies AFTER the Add
+// => the tag ends up absent. (Registration-order apply would remove-then-add => present.)
+TEST(SystemSchedulerOrdering, DeferredCommandsApplyInScheduleOrder)
+{
+    Astra::Registry reg;
+    g_applyOrderEntity = reg.CreateEntity();
+    reg.AddComponent<DTag>(g_applyOrderEntity, DTag{1});  // pre-exists so RemoveComponent is valid
+
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<RemovesTag>().IsOk());  // index 0, After<AddsTag>
+    ASSERT_TRUE(s.AddSystem<AddsTag>().IsOk());     // index 1
+    s.Execute(reg);   // schedule order: AddsTag then RemovesTag
+
+    EXPECT_FALSE(reg.HasComponent<DTag>(g_applyOrderEntity));  // Remove applied last
+}
+
+// A reordered schedule that defers structural changes on a shared entity is
+// byte-identical every run (the scheduleOrder sort key does not flake under a
+// real multi-threaded TestWorkerPool). Kept minimal per plan: no SnapshotWorld
+// helper exists in this file, so the gate compares a single deterministic
+// observable -- whether DTag ends up present on the shared entity -- across
+// repeated runs, reusing the worker-pool + repeated-run pattern from the
+// Phase B determinism gate (SystemContextTest.cpp,
+// DeferredCommandsFlushDeterministicallyByInsertionOrderAcross20Runs).
+TEST(SystemSchedulerOrdering, ReorderedDeferredScheduleIsDeterministicAcrossRuns)
+{
+    // One real multi-threaded pool, reused across every run.
+    auto pool = std::make_shared<Astra::Testing::TestWorkerPool>();
+
+    auto run = [&pool]() -> bool
+    {
+        Astra::Registry reg;
+        g_applyOrderEntity = reg.CreateEntity();
+        reg.AddComponent<DTag>(g_applyOrderEntity, DTag{1});
+
+        Astra::SystemScheduler s;
+        EXPECT_TRUE(s.AddSystem<RemovesTag>().IsOk());  // index 0, After<AddsTag>
+        EXPECT_TRUE(s.AddSystem<AddsTag>().IsOk());     // index 1
+
+        Astra::ParallelExecutor exec(pool);
+        s.Execute(reg, &exec);   // schedule order: AddsTag then RemovesTag
+
+        return reg.HasComponent<DTag>(g_applyOrderEntity);
+    };
+
+    const bool oracle = run();
+    EXPECT_FALSE(oracle) << "AddsTag must run/apply before RemovesTag per scheduleOrder";
+    for (int i = 0; i < 20; ++i)
+        EXPECT_EQ(run(), oracle) << "run " << i;
+}
