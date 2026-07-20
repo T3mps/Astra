@@ -304,19 +304,27 @@ namespace Astra
             }
 
             {
-                // Scope the ExecutionGuard so m_executionDepth returns to 0
-                // BEFORE the flush below runs, making the class's own
-                // documented contract literal (see ExecutionGuard's doc
-                // comment: "Depth returning to zero is the designated B2
-                // command-buffer sync point") rather than relying on the
-                // guard being about to destruct at function exit anyway.
+                // The ExecutionGuard now wraps the WHOLE segment loop below,
+                // not just a single executor->Execute() call: with Phase E
+                // sync points, a "frame" is potentially several run+flush
+                // pairs, and the reentrancy guard must stay armed for all of
+                // them (a system on segment 1 must not be able to kick off a
+                // nested Execute() any more than one on segment 0 could).
+                // Each per-segment flush below therefore runs at depth==1,
+                // not depth==0 -- that is still safe, because a flush only
+                // ever happens immediately after THAT segment's
+                // executor->Execute(context) has RETURNED, i.e. every system
+                // in that segment has completed and no worker is still
+                // recording into m_commandBuffer's per-thread buffers. See
+                // Task 3's original comment (now folded into the loop below)
+                // for why that makes the flush safe.
                 ExecutionGuard guard(m_executionDepth);
 
-                // Build execution context
+                // Build the shared context once (systems/metadata do not
+                // change between segments; only which groups run does).
                 SystemExecutionContext context;
                 context.registry = &registry;
                 context.commandBuffer = m_commandBuffer.get();
-                context.parallelGroups = m_executionPlan;
                 context.systems.reserve(m_systems.size());
                 context.contextSystems.reserve(m_systems.size());
                 context.metadata.reserve(m_systems.size());
@@ -328,39 +336,82 @@ namespace Astra
                     context.metadata.push_back(entry.metadata);
                 }
 
-                // Execute via the provided executor
-                executor->Execute(context);
+                // Run the plan segment-by-segment. Groups are emitted in
+                // segment-major order (Task 1), so groups sharing a segment
+                // are contiguous in m_executionPlan; m_planGroupSegment[g] is
+                // group g's segment. Every segment boundary is a sync point:
+                // flush all deferred structural commands recorded by that
+                // segment's systems, in deterministic SortKey order, before
+                // the next segment runs -- so a segment-N+1 system sees
+                // entities/components a segment-N system deferred-created
+                // the SAME frame (spawn-then-process). With no SyncPoint
+                // there is exactly one segment, so this loop runs once and
+                // flushes once at the end, byte-identical to the pre-Phase-E
+                // behavior; the final segment's flush is still the last
+                // thing that happens before Execute() returns.
+                size_t g = 0;
+                while (g < m_executionPlan.size())
+                {
+                    const size_t seg = m_planGroupSegment[g];
+                    size_t gEnd = g;
+                    while (gEnd < m_executionPlan.size() && m_planGroupSegment[gEnd] == seg)
+                        ++gEnd;
+
+                    context.parallelGroups.assign(m_executionPlan.begin() + g,
+                                                  m_executionPlan.begin() + gEnd);
+
+                    // Execute via the provided executor
+                    executor->Execute(context);
+
+                    // Task 3/Task 4, per segment: executor->Execute() above
+                    // has just returned, so every system in this segment has
+                    // completed and no worker is still recording into
+                    // m_commandBuffer's per-thread buffers -- flush every
+                    // recorded deferred command, across every worker buffer,
+                    // in deterministic SortKey order. Determinism holds
+                    // because SystemContext::Commands() stamps every command
+                    // with {this system's unique scheduleOrder (==
+                    // insertionOrder absent Before/After edges), 0, a
+                    // per-system monotonic recordSequence} -- see
+                    // ParallelCommandBuffer::ExecuteSorted()'s documented
+                    // precondition.
+                    auto flushResult = m_commandBuffer->ExecuteSorted();
+                    // ExecuteSorted() itself always returns Ok() now -- a
+                    // skipped command is reported, not treated as a flush
+                    // failure -- so flushResult carries no additional
+                    // information; kept only so a future genuine flush-level
+                    // failure mode has somewhere to be checked.
+                    (void)flushResult;
+
+                    // Surface this segment's deferred-command errors (commands
+                    // skipped because their target entity/component state no
+                    // longer permitted the op, plus anything reported via
+                    // SystemContext::ReportError()) through the scheduler's
+                    // own accessor. ExecuteSorted() clears its error list at
+                    // the START of every call and GetDeferredErrors() returns
+                    // only the most recent call's errors, so this ACCUMULATES
+                    // each segment's errors onto m_lastDeferredErrors without
+                    // double-counting a prior segment's.
+                    const auto& segErrors = m_commandBuffer->GetDeferredErrors();
+                    m_lastDeferredErrors.insert(m_lastDeferredErrors.end(),
+                                                segErrors.begin(), segErrors.end());
+
+                    // Start the next segment's recording from empty
+                    // regardless of outcome. ExecuteSorted() already clears
+                    // every worker buffer on both success and failure (see
+                    // its rollback comment), so this is a defensive no-op
+                    // today -- kept so "each segment leaves the buffer empty
+                    // before the next one runs" doesn't silently depend on
+                    // ExecuteSorted's internals never changing.
+                    m_commandBuffer->Clear();
+
+                    g = gEnd;
+                }
+
+                // If the plan is empty (no systems, or only empty segments),
+                // there is nothing to run or flush -- matches the old
+                // early-out behavior for an empty schedule.
             }
-
-            // Task 3: the depth==0 sync point. Every context system has now
-            // returned (the ExecutionGuard above just destructed), so no
-            // worker is still recording into m_commandBuffer's per-thread
-            // buffers -- flush every recorded deferred command, across every
-            // worker buffer, in deterministic SortKey order. Determinism
-            // holds because SystemContext::Commands() stamps every command
-            // with {this system's unique scheduleOrder (== insertionOrder
-            // absent Before/After edges), 0, a per-system monotonic
-            // recordSequence} -- see ParallelCommandBuffer::
-            // ExecuteSorted()'s documented precondition.
-            auto flushResult = m_commandBuffer->ExecuteSorted();
-            // Task 4: surface this flush's deferred-command errors (commands
-            // skipped because their target entity/component state no longer
-            // permitted the op, plus anything reported via SystemContext::
-            // ReportError()) through the scheduler's own accessor. ExecuteSorted()
-            // itself always returns Ok() now -- a skipped command is reported,
-            // not treated as a flush failure -- so flushResult carries no
-            // additional information; kept only so a future genuine flush-level
-            // failure mode has somewhere to be checked.
-            (void)flushResult;
-            m_lastDeferredErrors = m_commandBuffer->GetDeferredErrors();
-
-            // Start the next frame's recording from empty regardless of
-            // outcome. ExecuteSorted() already clears every worker buffer on
-            // both success and failure (see its rollback comment), so this is
-            // a defensive no-op today -- kept so "Execute() always leaves the
-            // buffer empty" doesn't silently depend on ExecuteSorted's
-            // internals never changing.
-            m_commandBuffer->Clear();
         }
 
         /**

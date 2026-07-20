@@ -740,3 +740,43 @@ TEST(SystemSchedulerSyncPoint, EmptySegmentsAreHarmless)
     EXPECT_EQ(plan[0][0], 0u);
     EXPECT_EQ(plan[1][0], 1u);
 }
+
+namespace  // Phase E spawn-then-process
+{
+    inline int g_syncSeenCount = 0;
+
+    struct SpawnThree : Astra::SystemTraits<Astra::Exclusive>
+    {
+        void operator()(Astra::SystemContext& ctx)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                auto e = ctx.Commands().CreateEntity();       // deferred create (placeholder)
+                ctx.Commands().AddComponent<Position>(e, Position{});
+            }
+        }
+    };
+    struct CountPositions : Astra::SystemTraits<Astra::Exclusive>
+    {
+        void operator()(Astra::Registry& reg)
+        {
+            g_syncSeenCount = 0;
+            auto view = reg.CreateView<Position>();           // mirror the file's existing view API spelling
+            view.ForEach([](Astra::Entity, Position&) { ++g_syncSeenCount; });
+        }
+    };
+}
+
+// With a SyncPoint between them, the spawner's deferred creates apply at the
+// fence, so the counter (in segment 1) sees all 3 the SAME frame.
+TEST(SystemSchedulerSyncPoint, DeferredSpawnsVisibleAfterFenceSameFrame)
+{
+    Astra::Registry reg;
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<SpawnThree>().IsOk());     // segment 0
+    ASSERT_TRUE(s.AddSyncPoint("post-spawn").IsOk());
+    ASSERT_TRUE(s.AddSystem<CountPositions>().IsOk()); // segment 1
+    g_syncSeenCount = -1;
+    s.Execute(reg);
+    EXPECT_EQ(g_syncSeenCount, 3);                     // counter saw the 3 spawned entities
+}
