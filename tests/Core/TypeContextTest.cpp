@@ -3,6 +3,8 @@
 #include <Astra/Core/TypeID.hpp>
 #include <Astra/Reflection/MetaRegistry.hpp>  // completes TypeContext::Meta()
 
+#include "../Support/DiagnosticsTestGuards.hpp"
+
 namespace
 {
     struct CtxA { int v; };
@@ -75,4 +77,58 @@ namespace
         Astra::SetTypeContext(prev);  // restore for other tests
         EXPECT_EQ(prev->Meta().Get(123456u), nullptr);
     }
+}
+
+namespace  // Theme E collision-detection capture
+{
+    struct ECapture { int errors = 0; };
+    inline void ECaptureSink(const Astra::LogRecord& r, void* user) noexcept
+    {
+        if (r.level == Astra::LogLevel::Error) static_cast<ECapture*>(user)->errors++;
+    }
+    Astra::TypeIdentity MakeStructId(uint32_t size, uint32_t align, uint8_t flags = 0)
+    {
+        Astra::TypeIdentity id; id.size = size; id.align = align; id.flags = flags; return id;
+    }
+}
+
+// Class 1: same name-hash, same name, but a provably different type (differing
+// structural identity, as two distinct anonymous-namespace types would) -> refused.
+TEST(TypeContextCollision, SameNameDistinctIdentityIsRefused)
+{
+    ECapture cap;
+    Astra::Testing::ScopedLogSink sink(&ECaptureSink, &cap);
+    Astra::Testing::ScopedAssertHandler handler(nullptr);  // default handler routes through the sink
+    Astra::TypeContext ctx;
+    const auto id0 = ctx.GetOrAssignComponentID(1234, "Foo", MakeStructId(8, 8));
+    ASSERT_NE(id0, Astra::INVALID_COMPONENT);
+    const auto id1 = ctx.GetOrAssignComponentID(1234, "Foo", MakeStructId(16, 8));  // different size => different type
+    EXPECT_EQ(id1, Astra::INVALID_COMPONENT);
+    EXPECT_GE(cap.errors, 1);
+}
+
+// Class 2: same name-hash but a DIFFERENT name (a real XXHash collision of two
+// differently-named types) -> refused, in all configs (upgrades the old
+// Debug-only name-assert to a graceful all-config refuse).
+TEST(TypeContextCollision, DifferentNameSameHashIsRefused)
+{
+    ECapture cap;
+    Astra::Testing::ScopedLogSink sink(&ECaptureSink, &cap);
+    Astra::Testing::ScopedAssertHandler handler(nullptr);
+    Astra::TypeContext ctx;
+    const auto id0 = ctx.GetOrAssignComponentID(4321, "A");
+    ASSERT_NE(id0, Astra::INVALID_COMPONENT);
+    const auto id1 = ctx.GetOrAssignComponentID(4321, "B");  // same hash, different name
+    EXPECT_EQ(id1, Astra::INVALID_COMPONENT);
+    EXPECT_GE(cap.errors, 1);
+}
+
+// Non-collision: identical name + identity re-registration is idempotent.
+TEST(TypeContextCollision, SameNameSameIdentityIsIdempotent)
+{
+    Astra::TypeContext ctx;
+    const auto id0 = ctx.GetOrAssignComponentID(1234, "Foo", MakeStructId(8, 8));
+    const auto id1 = ctx.GetOrAssignComponentID(1234, "Foo", MakeStructId(8, 8));
+    EXPECT_EQ(id0, id1);
+    EXPECT_NE(id0, Astra::INVALID_COMPONENT);
 }

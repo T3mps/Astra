@@ -12,6 +12,11 @@
 #include "../Component/Component.hpp"
 #include "../Container/FlatMap.hpp"
 #include "Base.hpp"
+#include "Log.hpp"
+
+#if defined(__cpp_rtti) || defined(_CPPRTTI)
+#include <typeinfo>
+#endif
 
 // NOTE: deliberately does NOT include MetaRegistry.hpp -- MetaRegistry's
 // templated API uses TypeID, and TypeID.hpp includes this header. The meta
@@ -56,6 +61,30 @@ namespace Astra
         void DrainPendingMeta(TypeContext& ctx);  // defined below TypeContext
     }
 
+    // Triviality bits carried by TypeIdentity.
+    enum TypeIdentityFlags : uint8_t
+    {
+        TIF_TriviallyCopyable     = 1u << 0,
+        TIF_TriviallyDestructible = 1u << 1,
+        TIF_Empty                 = 1u << 2,
+    };
+
+    // Distinguishes two types that share a compiler pretty-name (and thus the
+    // same stable name-hash) -- e.g. distinct same-named types in anonymous
+    // namespaces across TUs. A pure side-channel used ONLY to detect a collision
+    // at id assignment; it never enters the hash, the assigned id, or the wire
+    // format. `size == 0` means "unspecified" (raw call with no type). Built by
+    // MakeTypeIdentity<T>() (TypeID.hpp).
+    struct TypeIdentity
+    {
+        uint32_t size  = 0;   // sizeof(T); always >= 1 for a real type, so 0 == unspecified
+        uint32_t align = 0;   // alignof(T)
+        uint8_t  flags = 0;   // TypeIdentityFlags bits
+#if defined(__cpp_rtti) || defined(_CPPRTTI)
+        const std::type_info* rtti = nullptr;  // &typeid(T) where RTTI is enabled
+#endif
+    };
+
     // Process-wide type identity service. Component/type IDs are assigned
     // densely (ComponentMask bit index == ComponentID) keyed by the STABLE
     // XXHash64 type-name hash, so every module (EXE/DLL) that shares one
@@ -67,16 +96,32 @@ namespace Astra
     {
     public:
         // Not noexcept: allocates on first sight of a hash.
-        ASTRA_NODISCARD ComponentID GetOrAssignComponentID(uint64_t hash, std::string_view name)
+        ASTRA_NODISCARD ComponentID GetOrAssignComponentID(uint64_t hash, std::string_view name,
+                                                           TypeIdentity identity = {})
         {
             std::lock_guard lock(m_mutex);
             if (auto it = m_hashToId.Find(hash); it != m_hashToId.end())
             {
-#ifdef ASTRA_BUILD_DEBUG
-                ASTRA_ASSERT(m_names[it->second] == name,
-                             "TypeContext hash collision: two distinct type names share a hash");
-#endif
-                return it->second;
+                const ComponentID existingId = it->second;
+                // Two collision classes: (1) same name-hash + DIFFERENT name = a
+                // real XXHash collision of two differently-named types; (2) same
+                // name-hash + same name but a DIFFERENT type = identical
+                // anonymous-namespace names across TUs (the discriminator catches
+                // what the byte-identical name cannot). Either is refused loudly.
+                if (m_names[existingId] != name
+                    || IsTypeIdentityCollision(m_identities[existingId], identity))
+                {
+                    std::string msg = "TypeContext: type-identity collision -- a distinct type shares "
+                                      "the name-hash of '";
+                    msg.append(m_names[existingId]);
+                    msg += "'. The second type is refused (its ComponentID is INVALID). Give types a "
+                           "unique unqualified name; do not place two same-named types in anonymous "
+                           "namespaces across translation units.";
+                    ASTRA_LOG_ERROR(msg);
+                    ASTRA_ENSURE_ALWAYS(false, "TypeContext type-identity collision (see log)");
+                    return INVALID_COMPONENT;  // refuse, uncached -- mirrors the id-exhaustion guard below
+                }
+                return existingId;
             }
             // All-config guard: uint16 id space exhausted. Refuse rather than
             // wrap m_next (which would silently alias a fresh type onto a
@@ -93,6 +138,7 @@ namespace Astra
             const ComponentID id = m_next++;
             m_hashToId[hash] = id;
             m_names.emplace_back(name);
+            m_identities.push_back(identity);
             return id;
         }
 
@@ -101,9 +147,24 @@ namespace Astra
         ASTRA_NODISCARD MetaRegistry& Meta();
 
     private:
+        // True iff a and b provably denote DIFFERENT types. Each dimension is
+        // compared only when present on both sides. Absence of any comparable
+        // dimension => not treated as a collision (raw test-helper calls).
+        ASTRA_NODISCARD static bool IsTypeIdentityCollision(const TypeIdentity& a, const TypeIdentity& b) noexcept
+        {
+#if defined(__cpp_rtti) || defined(_CPPRTTI)
+            if (a.rtti != nullptr && b.rtti != nullptr)
+                return *a.rtti != *b.rtti;  // ABI-correct, cross-module-safe; disambiguates anon namespaces
+#endif
+            if (a.size != 0 && b.size != 0)
+                return a.size != b.size || a.align != b.align || a.flags != b.flags;
+            return false;
+        }
+
         std::mutex m_mutex;      // guards id assignment (m_hashToId / m_names / m_next)
         FlatMap<uint64_t, ComponentID> m_hashToId;
         std::deque<std::string> m_names;  // index == id; collision diagnostics
+        std::vector<TypeIdentity> m_identities;  // parallel to m_names, index == id
         ComponentID m_next = 0;
         std::mutex m_metaMutex;  // guards m_meta lazy init only; separate so meta
                                  // access never contends with id assignment
