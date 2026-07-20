@@ -7,17 +7,17 @@
 namespace
 {
     // Test components
-    struct Position
+    struct ReflPosition
     {
         float x, y, z;
     };
 
-    struct Velocity
+    struct ReflVelocity
     {
         float dx, dy, dz;
     };
 
-    struct Health
+    struct ReflHealth
     {
         int current;
         int max;
@@ -52,30 +52,30 @@ namespace
 }
 
 // Reflect the test types - must be outside anonymous namespace for static initialization
-ASTRA_REFLECT_TYPE(Position)
-    ASTRA_REFLECT_FIELD(Position, x)
+ASTRA_REFLECT_TYPE(ReflPosition)
+    ASTRA_REFLECT_FIELD(ReflPosition, x)
         ASTRA_REFLECT_ATTR(Range, -1000.0, 1000.0)
         ASTRA_REFLECT_ATTR(Tooltip, "X coordinate")
-    ASTRA_REFLECT_FIELD(Position, y)
+    ASTRA_REFLECT_FIELD(ReflPosition, y)
         ASTRA_REFLECT_ATTR(Range, -1000.0, 1000.0)
-    ASTRA_REFLECT_FIELD(Position, z)
+    ASTRA_REFLECT_FIELD(ReflPosition, z)
         ASTRA_REFLECT_ATTR(Range, -1000.0, 1000.0)
 ASTRA_END_REFLECT_TYPE()
 
-ASTRA_REFLECT_TYPE(Velocity)
-    ASTRA_REFLECT_FIELD(Velocity, dx)
-    ASTRA_REFLECT_FIELD(Velocity, dy)
-    ASTRA_REFLECT_FIELD(Velocity, dz)
+ASTRA_REFLECT_TYPE(ReflVelocity)
+    ASTRA_REFLECT_FIELD(ReflVelocity, dx)
+    ASTRA_REFLECT_FIELD(ReflVelocity, dy)
+    ASTRA_REFLECT_FIELD(ReflVelocity, dz)
 ASTRA_END_REFLECT_TYPE()
 
-ASTRA_REFLECT_TYPE(Health)
-    ASTRA_REFLECT_FIELD(Health, current)
+ASTRA_REFLECT_TYPE(ReflHealth)
+    ASTRA_REFLECT_FIELD(ReflHealth, current)
         ASTRA_REFLECT_ATTR(Range, 0.0, 10000.0)
         ASTRA_REFLECT_ATTR(DisplayName, "Current HP")
-    ASTRA_REFLECT_FIELD(Health, max)
+    ASTRA_REFLECT_FIELD(ReflHealth, max)
         ASTRA_REFLECT_ATTR(Range, 1.0, 10000.0)
         ASTRA_REFLECT_ATTR(DisplayName, "Maximum HP")
-    ASTRA_REFLECT_FIELD(Health, regenerating)
+    ASTRA_REFLECT_FIELD(ReflHealth, regenerating)
         ASTRA_REFLECT_ATTR(Tooltip, "Whether health regenerates over time")
 ASTRA_END_REFLECT_TYPE()
 
@@ -119,13 +119,13 @@ TEST_F(ReflectionTest, TypeMetaRegistration)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
-    EXPECT_EQ(meta->typeHash, TypeID<Position>::Hash());
-    EXPECT_NE(meta->typeName.find("Position"), std::string_view::npos);
-    EXPECT_EQ(meta->size, sizeof(Position));
-    EXPECT_EQ(meta->alignment, alignof(Position));
+    EXPECT_EQ(meta->typeHash, TypeID<ReflPosition>::Hash());
+    EXPECT_NE(meta->typeName.find("ReflPosition"), std::string_view::npos);
+    EXPECT_EQ(meta->size, sizeof(ReflPosition));
+    EXPECT_EQ(meta->alignment, alignof(ReflPosition));
     EXPECT_TRUE(meta->isClass);
     EXPECT_FALSE(meta->isEnum);
     EXPECT_TRUE(meta->isTrivial);
@@ -135,8 +135,8 @@ TEST_F(ReflectionTest, TypeMetaLookupByHash)
 {
     using namespace Astra;
 
-    const TypeMeta* meta1 = GetMeta<Position>();
-    const TypeMeta* meta2 = GetMeta(TypeID<Position>::Hash());
+    const TypeMeta* meta1 = GetMeta<ReflPosition>();
+    const TypeMeta* meta2 = GetMeta(TypeID<ReflPosition>::Hash());
 
     ASSERT_NE(meta1, nullptr);
     ASSERT_NE(meta2, nullptr);
@@ -147,7 +147,7 @@ TEST_F(ReflectionTest, TypeMetaFields)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
     EXPECT_EQ(meta->GetFieldCount(), 3u);
@@ -161,7 +161,7 @@ TEST_F(ReflectionTest, FieldInfoBasics)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
     const FieldInfo* xField = meta->GetField("x");
@@ -184,10 +184,10 @@ TEST_F(ReflectionTest, FieldGetSet)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
-    Position pos{1.0f, 2.0f, 3.0f};
+    ReflPosition pos{1.0f, 2.0f, 3.0f};
 
     const FieldInfo* xField = meta->GetField("x");
     ASSERT_NE(xField, nullptr);
@@ -205,10 +205,10 @@ TEST_F(ReflectionTest, FieldGetPtr)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
-    Position pos{1.0f, 2.0f, 3.0f};
+    ReflPosition pos{1.0f, 2.0f, 3.0f};
 
     const FieldInfo* yField = meta->GetField("y");
     ASSERT_NE(yField, nullptr);
@@ -224,10 +224,10 @@ TEST_F(ReflectionTest, FieldGetSetAny)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
-    Position pos{1.0f, 2.0f, 3.0f};
+    ReflPosition pos{1.0f, 2.0f, 3.0f};
 
     const FieldInfo* zField = meta->GetField("z");
     ASSERT_NE(zField, nullptr);
@@ -247,10 +247,10 @@ TEST_F(ReflectionTest, FieldValueByName)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Health>();
+    const TypeMeta* meta = GetMeta<ReflHealth>();
     ASSERT_NE(meta, nullptr);
 
-    Health health{100, 200, true};
+    ReflHealth health{100, 200, true};
 
     // Get value by name
     auto current = meta->GetFieldValue<int>(&health, "current");
@@ -271,10 +271,10 @@ TEST_F(ReflectionTest, ForEachField)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
-    Position pos{1.0f, 2.0f, 3.0f};
+    ReflPosition pos{1.0f, 2.0f, 3.0f};
 
     int fieldCount = 0;
     float sum = 0.0f;
@@ -296,7 +296,7 @@ TEST_F(ReflectionTest, FieldAttributes)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
     const FieldInfo* xField = meta->GetField("x");
@@ -323,7 +323,7 @@ TEST_F(ReflectionTest, FieldDisplayName)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Health>();
+    const TypeMeta* meta = GetMeta<ReflHealth>();
     ASSERT_NE(meta, nullptr);
 
     const FieldInfo* currentField = meta->GetField("current");
@@ -462,10 +462,10 @@ TEST_F(ReflectionTest, DefaultConstruct)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
-    alignas(Position) std::byte storage[sizeof(Position)];
+    alignas(ReflPosition) std::byte storage[sizeof(ReflPosition)];
 
     bool success = meta->Construct(storage);
     EXPECT_TRUE(success);
@@ -480,16 +480,16 @@ TEST_F(ReflectionTest, CopyConstruct)
 {
     using namespace Astra;
 
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
-    Position src{1.0f, 2.0f, 3.0f};
-    alignas(Position) std::byte storage[sizeof(Position)];
+    ReflPosition src{1.0f, 2.0f, 3.0f};
+    alignas(ReflPosition) std::byte storage[sizeof(ReflPosition)];
 
     bool success = meta->CopyConstruct(storage, &src);
     EXPECT_TRUE(success);
 
-    Position* pos = reinterpret_cast<Position*>(storage);
+    ReflPosition* pos = reinterpret_cast<ReflPosition*>(storage);
     EXPECT_FLOAT_EQ(pos->x, 1.0f);
     EXPECT_FLOAT_EQ(pos->y, 2.0f);
     EXPECT_FLOAT_EQ(pos->z, 3.0f);
@@ -544,7 +544,7 @@ TEST_F(ReflectionTest, NonContainerType)
     using namespace Astra;
 
     EXPECT_FALSE(IsContainer_v<int>);
-    EXPECT_FALSE(IsContainer_v<Position>);
+    EXPECT_FALSE(IsContainer_v<ReflPosition>);
 }
 
 // ============================================================================
@@ -555,12 +555,12 @@ TEST_F(ReflectionTest, JsonSchemaGeneration)
 {
     using namespace Astra;
 
-    std::string schema = GenerateJsonSchema<Position>();
+    std::string schema = GenerateJsonSchema<ReflPosition>();
     EXPECT_FALSE(schema.empty());
 
     // Check for expected content
     EXPECT_NE(schema.find("\"$schema\""), std::string::npos);
-    EXPECT_NE(schema.find("Position"), std::string::npos);
+    EXPECT_NE(schema.find("ReflPosition"), std::string::npos);
     EXPECT_NE(schema.find("\"properties\""), std::string::npos);
     EXPECT_NE(schema.find("\"x\""), std::string::npos);
     EXPECT_NE(schema.find("\"y\""), std::string::npos);
@@ -571,7 +571,7 @@ TEST_F(ReflectionTest, JsonSchemaWithRange)
 {
     using namespace Astra;
 
-    std::string schema = GenerateJsonSchema<Position>();
+    std::string schema = GenerateJsonSchema<ReflPosition>();
 
     // Check for range constraints
     EXPECT_NE(schema.find("\"minimum\""), std::string::npos);
@@ -584,7 +584,7 @@ TEST_F(ReflectionTest, JsonSchemaWithTooltip)
 {
     using namespace Astra;
 
-    std::string schema = GenerateJsonSchema<Position>();
+    std::string schema = GenerateJsonSchema<ReflPosition>();
 
     // Check for description from tooltip
     EXPECT_NE(schema.find("\"description\""), std::string::npos);
@@ -600,14 +600,14 @@ TEST_F(ReflectionTest, RegistryGetComponentByHash)
     using namespace Astra;
 
     Registry registry;
-    registry.GetComponentRegistry()->RegisterComponent<Position>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflPosition>();
 
-    Entity entity = registry.CreateEntityWith(Position{10.0f, 20.0f, 30.0f});
+    Entity entity = registry.CreateEntityWith(ReflPosition{10.0f, 20.0f, 30.0f});
 
-    void* comp = registry.GetComponentByHash(entity, TypeID<Position>::Hash());
+    void* comp = registry.GetComponentByHash(entity, TypeID<ReflPosition>::Hash());
     ASSERT_NE(comp, nullptr);
 
-    Position* pos = static_cast<Position*>(comp);
+    ReflPosition* pos = static_cast<ReflPosition*>(comp);
     EXPECT_FLOAT_EQ(pos->x, 10.0f);
     EXPECT_FLOAT_EQ(pos->y, 20.0f);
     EXPECT_FLOAT_EQ(pos->z, 30.0f);
@@ -618,13 +618,13 @@ TEST_F(ReflectionTest, RegistryHasComponentByHash)
     using namespace Astra;
 
     Registry registry;
-    registry.GetComponentRegistry()->RegisterComponent<Position>();
-    registry.GetComponentRegistry()->RegisterComponent<Velocity>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflPosition>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflVelocity>();
 
-    Entity entity = registry.CreateEntityWith(Position{1.0f, 2.0f, 3.0f});
+    Entity entity = registry.CreateEntityWith(ReflPosition{1.0f, 2.0f, 3.0f});
 
-    EXPECT_TRUE(registry.HasComponentByHash(entity, TypeID<Position>::Hash()));
-    EXPECT_FALSE(registry.HasComponentByHash(entity, TypeID<Velocity>::Hash()));
+    EXPECT_TRUE(registry.HasComponentByHash(entity, TypeID<ReflPosition>::Hash()));
+    EXPECT_FALSE(registry.HasComponentByHash(entity, TypeID<ReflVelocity>::Hash()));
 }
 
 TEST_F(ReflectionTest, RegistryGetEntityComponents)
@@ -632,12 +632,12 @@ TEST_F(ReflectionTest, RegistryGetEntityComponents)
     using namespace Astra;
 
     Registry registry;
-    registry.GetComponentRegistry()->RegisterComponent<Position>();
-    registry.GetComponentRegistry()->RegisterComponent<Velocity>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflPosition>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflVelocity>();
 
     Entity entity = registry.CreateEntityWith(
-        Position{1.0f, 2.0f, 3.0f},
-        Velocity{0.1f, 0.2f, 0.3f}
+        ReflPosition{1.0f, 2.0f, 3.0f},
+        ReflVelocity{0.1f, 0.2f, 0.3f}
     );
 
     auto components = registry.GetEntityComponents(entity);
@@ -648,8 +648,8 @@ TEST_F(ReflectionTest, RegistryGetEntityComponents)
     bool hasVelocity = false;
     for (const auto* desc : components)
     {
-        if (desc->hash == TypeID<Position>::Hash()) hasPosition = true;
-        if (desc->hash == TypeID<Velocity>::Hash()) hasVelocity = true;
+        if (desc->hash == TypeID<ReflPosition>::Hash()) hasPosition = true;
+        if (desc->hash == TypeID<ReflVelocity>::Hash()) hasVelocity = true;
     }
     EXPECT_TRUE(hasPosition);
     EXPECT_TRUE(hasVelocity);
@@ -660,16 +660,16 @@ TEST_F(ReflectionTest, ReflectionWithECS)
     using namespace Astra;
 
     Registry registry;
-    registry.GetComponentRegistry()->RegisterComponent<Position>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflPosition>();
 
-    Entity entity = registry.CreateEntityWith(Position{1.0f, 2.0f, 3.0f});
+    Entity entity = registry.CreateEntityWith(ReflPosition{1.0f, 2.0f, 3.0f});
 
     // Get component through reflection
-    void* comp = registry.GetComponentByHash(entity, TypeID<Position>::Hash());
+    void* comp = registry.GetComponentByHash(entity, TypeID<ReflPosition>::Hash());
     ASSERT_NE(comp, nullptr);
 
     // Use TypeMeta to access fields
-    const TypeMeta* meta = GetMeta<Position>();
+    const TypeMeta* meta = GetMeta<ReflPosition>();
     ASSERT_NE(meta, nullptr);
 
     // Read field through reflection
@@ -682,7 +682,7 @@ TEST_F(ReflectionTest, ReflectionWithECS)
     EXPECT_TRUE(success);
 
     // Verify modification
-    Position* pos = static_cast<Position*>(comp);
+    ReflPosition* pos = static_cast<ReflPosition*>(comp);
     EXPECT_FLOAT_EQ(pos->y, 100.0f);
 }
 
@@ -704,8 +704,8 @@ TEST_F(ReflectionTest, IsReflected)
 {
     using namespace Astra;
 
-    EXPECT_TRUE(IsReflected<Position>());
-    EXPECT_TRUE(IsReflected<Health>());
+    EXPECT_TRUE(IsReflected<ReflPosition>());
+    EXPECT_TRUE(IsReflected<ReflHealth>());
     EXPECT_TRUE(IsReflected<DamageType>());
 
     // Type that hasn't been registered
@@ -718,7 +718,7 @@ TEST_F(ReflectionTest, MetaRegistryCount)
     using namespace Astra;
 
     size_t count = MetaRegistry::Instance().GetRegisteredCount();
-    // We registered Position, Velocity, Health, Player, DamageType, StatusFlags
+    // We registered ReflPosition, ReflVelocity, ReflHealth, Player, DamageType, StatusFlags
     EXPECT_GE(count, 6u);
 }
 
@@ -731,15 +731,15 @@ TEST_F(ReflectionTest, ComponentDescriptorHasTypeMeta)
     using namespace Astra;
 
     Registry registry;
-    registry.GetComponentRegistry()->RegisterComponent<Position>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflPosition>();
 
-    const ComponentDescriptor* desc = registry.GetComponentRegistry()->GetComponentDescriptor(TypeID<Position>::Value());
+    const ComponentDescriptor* desc = registry.GetComponentRegistry()->GetComponentDescriptor(TypeID<ReflPosition>::Value());
     ASSERT_NE(desc, nullptr);
 
     // ComponentDescriptor should have TypeMeta linked
     EXPECT_NE(desc->meta, nullptr);
-    EXPECT_EQ(desc->meta->typeHash, TypeID<Position>::Hash());
-    EXPECT_EQ(desc->meta->typeName, TypeID<Position>::Name());
+    EXPECT_EQ(desc->meta->typeHash, TypeID<ReflPosition>::Hash());
+    EXPECT_EQ(desc->meta->typeName, TypeID<ReflPosition>::Name());
 }
 
 TEST_F(ReflectionTest, MetaRegistryLinkToComponent)
@@ -747,15 +747,15 @@ TEST_F(ReflectionTest, MetaRegistryLinkToComponent)
     using namespace Astra;
 
     Registry registry;
-    registry.GetComponentRegistry()->RegisterComponent<Position>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflPosition>();
 
     // Should be able to get ComponentID from type hash
-    ComponentID id = MetaRegistry::Instance().GetComponentId(TypeID<Position>::Hash());
-    EXPECT_EQ(id, TypeID<Position>::Value());
+    ComponentID id = MetaRegistry::Instance().GetComponentId(TypeID<ReflPosition>::Hash());
+    EXPECT_EQ(id, TypeID<ReflPosition>::Value());
 
     // Should be able to get type hash from ComponentID
-    uint64_t hash = MetaRegistry::Instance().GetTypeHash(TypeID<Position>::Value());
-    EXPECT_EQ(hash, TypeID<Position>::Hash());
+    uint64_t hash = MetaRegistry::Instance().GetTypeHash(TypeID<ReflPosition>::Value());
+    EXPECT_EQ(hash, TypeID<ReflPosition>::Hash());
 }
 
 TEST_F(ReflectionTest, MetaRegistryGetByComponentId)
@@ -763,15 +763,15 @@ TEST_F(ReflectionTest, MetaRegistryGetByComponentId)
     using namespace Astra;
 
     Registry registry;
-    registry.GetComponentRegistry()->RegisterComponent<Position>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflPosition>();
 
     // Should be able to get TypeMeta from ComponentID
-    const TypeMeta* meta = MetaRegistry::Instance().GetByComponentId(TypeID<Position>::Value());
+    const TypeMeta* meta = MetaRegistry::Instance().GetByComponentId(TypeID<ReflPosition>::Value());
     ASSERT_NE(meta, nullptr);
-    EXPECT_EQ(meta->typeHash, TypeID<Position>::Hash());
+    EXPECT_EQ(meta->typeHash, TypeID<ReflPosition>::Hash());
 
     // Also test convenience function
-    const TypeMeta* meta2 = GetMeta(TypeID<Position>::Value());
+    const TypeMeta* meta2 = GetMeta(TypeID<ReflPosition>::Value());
     EXPECT_EQ(meta, meta2);
 }
 
@@ -780,51 +780,51 @@ TEST_F(ReflectionTest, InspectEntity)
     using namespace Astra;
 
     Registry registry;
-    registry.GetComponentRegistry()->RegisterComponent<Position>();
-    registry.GetComponentRegistry()->RegisterComponent<Velocity>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflPosition>();
+    registry.GetComponentRegistry()->RegisterComponent<ReflVelocity>();
 
     Entity entity = registry.CreateEntityWith(
-        Position{10.0f, 20.0f, 30.0f},
-        Velocity{1.0f, 2.0f, 3.0f}
+        ReflPosition{10.0f, 20.0f, 30.0f},
+        ReflVelocity{1.0f, 2.0f, 3.0f}
     );
 
     auto components = registry.InspectEntity(entity);
     EXPECT_EQ(components.size(), 2u);
 
-    // Find the Position component info
+    // Find the ReflPosition component info
     const Registry::ComponentInfo* posInfo = nullptr;
     const Registry::ComponentInfo* velInfo = nullptr;
     for (const auto& info : components)
     {
-        if (info.descriptor->hash == TypeID<Position>::Hash())
+        if (info.descriptor->hash == TypeID<ReflPosition>::Hash())
             posInfo = &info;
-        if (info.descriptor->hash == TypeID<Velocity>::Hash())
+        if (info.descriptor->hash == TypeID<ReflVelocity>::Hash())
             velInfo = &info;
     }
 
-    // Verify Position
+    // Verify ReflPosition
     ASSERT_NE(posInfo, nullptr);
     ASSERT_NE(posInfo->descriptor, nullptr);
     ASSERT_NE(posInfo->meta, nullptr);
     ASSERT_NE(posInfo->data, nullptr);
 
-    // Use reflection to read Position fields
+    // Use reflection to read ReflPosition fields
     auto xValue = posInfo->meta->GetFieldValue<float>(posInfo->data, "x");
     ASSERT_TRUE(xValue.has_value());
     EXPECT_FLOAT_EQ(*xValue, 10.0f);
 
-    // Verify Velocity
+    // Verify ReflVelocity
     ASSERT_NE(velInfo, nullptr);
     ASSERT_NE(velInfo->descriptor, nullptr);
     ASSERT_NE(velInfo->meta, nullptr);
     ASSERT_NE(velInfo->data, nullptr);
 
-    // Use reflection to modify Velocity
+    // Use reflection to modify ReflVelocity
     bool success = velInfo->meta->SetFieldValue<float>(velInfo->data, "dx", 100.0f);
     EXPECT_TRUE(success);
 
     // Verify the change
-    auto* vel = registry.GetComponent<Velocity>(entity);
+    auto* vel = registry.GetComponent<ReflVelocity>(entity);
     EXPECT_FLOAT_EQ(vel->dx, 100.0f);
 }
 
@@ -835,12 +835,12 @@ TEST_F(ReflectionTest, InspectResources)
     Registry registry;
 
     // Set a resource
-    registry.SetResource(Position{1.0f, 2.0f, 3.0f});
+    registry.SetResource(ReflPosition{1.0f, 2.0f, 3.0f});
 
     auto resources = registry.InspectResources();
     EXPECT_EQ(resources.size(), 1u);
 
-    // Find the Position resource
+    // Find the ReflPosition resource
     ASSERT_EQ(resources.size(), 1u);
     const auto& resInfo = resources[0];
 
@@ -848,7 +848,7 @@ TEST_F(ReflectionTest, InspectResources)
     ASSERT_NE(resInfo.meta, nullptr);
     ASSERT_NE(resInfo.data, nullptr);
 
-    EXPECT_EQ(resInfo.descriptor->hash, TypeID<Position>::Hash());
+    EXPECT_EQ(resInfo.descriptor->hash, TypeID<ReflPosition>::Hash());
 
     // Use reflection to read resource fields
     auto zValue = resInfo.meta->GetFieldValue<float>(resInfo.data, "z");
@@ -861,20 +861,20 @@ TEST_F(ReflectionTest, ResourceReflectionByHash)
     using namespace Astra;
 
     Registry registry;
-    registry.SetResource(Position{5.0f, 10.0f, 15.0f});
+    registry.SetResource(ReflPosition{5.0f, 10.0f, 15.0f});
 
     // Get resource by hash
-    void* res = registry.GetResourceByHash(TypeID<Position>::Hash());
+    void* res = registry.GetResourceByHash(TypeID<ReflPosition>::Hash());
     ASSERT_NE(res, nullptr);
 
-    Position* pos = static_cast<Position*>(res);
+    ReflPosition* pos = static_cast<ReflPosition*>(res);
     EXPECT_FLOAT_EQ(pos->x, 5.0f);
     EXPECT_FLOAT_EQ(pos->y, 10.0f);
     EXPECT_FLOAT_EQ(pos->z, 15.0f);
 
     // Has resource by hash
-    EXPECT_TRUE(registry.HasResourceByHash(TypeID<Position>::Hash()));
-    EXPECT_FALSE(registry.HasResourceByHash(TypeID<Velocity>::Hash()));
+    EXPECT_TRUE(registry.HasResourceByHash(TypeID<ReflPosition>::Hash()));
+    EXPECT_FALSE(registry.HasResourceByHash(TypeID<ReflVelocity>::Hash()));
 }
 
 TEST_F(ReflectionTest, GetAllResources)
@@ -882,8 +882,8 @@ TEST_F(ReflectionTest, GetAllResources)
     using namespace Astra;
 
     Registry registry;
-    registry.SetResource(Position{1.0f, 2.0f, 3.0f});
-    registry.SetResource(Velocity{0.1f, 0.2f, 0.3f});
+    registry.SetResource(ReflPosition{1.0f, 2.0f, 3.0f});
+    registry.SetResource(ReflVelocity{0.1f, 0.2f, 0.3f});
 
     auto resources = registry.GetAllResources();
     EXPECT_EQ(resources.size(), 2u);
@@ -892,8 +892,8 @@ TEST_F(ReflectionTest, GetAllResources)
     bool hasVelocity = false;
     for (const auto* desc : resources)
     {
-        if (desc->hash == TypeID<Position>::Hash()) hasPosition = true;
-        if (desc->hash == TypeID<Velocity>::Hash()) hasVelocity = true;
+        if (desc->hash == TypeID<ReflPosition>::Hash()) hasPosition = true;
+        if (desc->hash == TypeID<ReflVelocity>::Hash()) hasVelocity = true;
     }
     EXPECT_TRUE(hasPosition);
     EXPECT_TRUE(hasVelocity);
@@ -908,8 +908,8 @@ TEST_F(ReflectionTest, FullInspectionWorkflow)
 
     // Create an entity with components
     Entity entity = registry.CreateEntityWith(
-        Position{100.0f, 200.0f, 300.0f},
-        Health{80, 100, true}
+        ReflPosition{100.0f, 200.0f, 300.0f},
+        ReflHealth{80, 100, true}
     );
 
     // Inspect the entity (like an editor would)

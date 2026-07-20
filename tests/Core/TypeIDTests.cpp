@@ -3,6 +3,8 @@
 #include <iostream>
 #include <set>
 
+#include "../Support/DiagnosticsTestGuards.hpp"
+
 namespace
 {
     struct Position { float x, y, z; };
@@ -182,3 +184,56 @@ TEST_F(TypeIDTests, CompileTimeConstexpr)
     static_assert(hasHash);
     static_assert(!name.empty());
 }
+
+namespace  // Theme E factory checks (local types; MakeTypeIdentity does NOT assign an id)
+{
+    struct Sz16 { char data[16]; };
+    struct EmptyTag {};
+}
+
+// The factory captures structural fields from T.
+TEST(TypeIdentityFactory, CapturesStructuralFields)
+{
+    const auto a = Astra::MakeTypeIdentity<Sz16>();
+    EXPECT_EQ(a.size, 16u);
+    EXPECT_EQ(a.align, static_cast<uint32_t>(alignof(Sz16)));
+    EXPECT_NE(a.flags & Astra::TIF_TriviallyCopyable, 0);
+
+    const auto e = Astra::MakeTypeIdentity<EmptyTag>();
+    EXPECT_NE(e.flags & Astra::TIF_Empty, 0);
+    EXPECT_NE(e.size, 0u);  // sizeof is always >= 1, so "present" is detectable
+}
+
+// Wiring smoke test: distinct real types still get distinct ids (built-in types,
+// no fresh component registration -> no TypeID-ceiling pressure).
+TEST(TypeIdentityFactory, DistinctRealTypesStillGetDistinctIds)
+{
+    EXPECT_NE(Astra::TypeID<int>::Value(), Astra::TypeID<double>::Value());
+}
+
+#if defined(__cpp_rtti) || defined(_CPPRTTI)
+namespace { struct LayoutA { int x; }; struct LayoutB { int x; }; }  // identical layout, distinct types
+TEST(TypeIdentityFactory, RttiCatchesSameLayoutDistinctTypes)
+{
+    // Capture the refuse-path Error log; install ScopedAssertHandler(nullptr) so the
+    // ENSURE routes through the sink instead of the default (potentially fatal) path.
+    struct Capture { int errors = 0; };
+    Capture cap;
+    Astra::Testing::ScopedLogSink sink(
+        [](const Astra::LogRecord& r, void* user) noexcept
+        {
+            if (r.level == Astra::LogLevel::Error) static_cast<Capture*>(user)->errors++;
+        },
+        &cap);
+    Astra::Testing::ScopedAssertHandler handler(nullptr);
+
+    Astra::TypeContext ctx;
+    const auto id0 = ctx.GetOrAssignComponentID(9999, "Layout", Astra::MakeTypeIdentity<LayoutA>());
+    ASSERT_NE(id0, Astra::INVALID_COMPONENT);
+    // Same hash+name; structural fields are IDENTICAL (both {int x;}), so ONLY the RTTI
+    // type_info cross-check can distinguish them -> the second is refused.
+    const auto id1 = ctx.GetOrAssignComponentID(9999, "Layout", Astra::MakeTypeIdentity<LayoutB>());
+    EXPECT_EQ(id1, Astra::INVALID_COMPONENT);
+    EXPECT_GE(cap.errors, 1);
+}
+#endif

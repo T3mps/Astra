@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
 
-namespace { struct CPos { float x, y, z; }; }
+namespace { struct ConfigPos { float x, y, z; }; }
 
 TEST(ConfigPreservation, ClearKeepsChunkPoolConfig)
 {
@@ -19,15 +19,15 @@ TEST(ConfigPreservation, LoadHonorsChunkPoolConfig)
     Astra::Registry::Config cfg;
     cfg.chunkPoolConfig.chunkSize = 65536;
     Astra::Registry reg(cfg);
-    reg.GetComponentRegistry()->RegisterComponent<CPos>();
+    reg.GetComponentRegistry()->RegisterComponent<ConfigPos>();
     for (int i = 0; i < 10000; ++i)
-        reg.CreateEntityWith(CPos{float(i), 0, 0});
+        reg.CreateEntityWith(ConfigPos{float(i), 0, 0});
 
     auto saved = reg.Save();
     ASSERT_TRUE(saved.IsOk());
 
     auto creg = std::make_shared<Astra::ComponentRegistry>();
-    creg->RegisterComponent<CPos>();
+    creg->RegisterComponent<ConfigPos>();
 
     // Same config: must load and preserve pool size.
     auto ok = Astra::Registry::Load(std::span<const std::byte>(*saved.GetValue()), creg, cfg);

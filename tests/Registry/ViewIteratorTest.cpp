@@ -7,17 +7,17 @@ using namespace Astra;
 
 namespace
 {
-    struct Position
+    struct VITPosition
     {
         float x, y, z;
     };
 
-    struct Velocity
+    struct VITVelocity
     {
         float vx, vy, vz;
     };
 
-    struct Health
+    struct VITHealth
     {
         int value;
     };
@@ -41,18 +41,18 @@ protected:
 
 TEST_F(ViewIteratorTest, BasicIteration)
 {
-    // Create entities with Position and Velocity
+    // Create entities with VITPosition and VITVelocity
     std::vector<Entity> entities;
     for (int i = 0; i < 10; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{static_cast<float>(i), 0.0f, 0.0f});
-        registry->AddComponent(e, Velocity{1.0f, 0.0f, 0.0f});
+        registry->AddComponent(e, VITPosition{static_cast<float>(i), 0.0f, 0.0f});
+        registry->AddComponent(e, VITVelocity{1.0f, 0.0f, 0.0f});
         entities.push_back(e);
     }
 
     // Iterate using range-based for loop
-    auto view = registry->CreateView<Position, Velocity>();
+    auto view = registry->CreateView<VITPosition, VITVelocity>();
 
     int count = 0;
     for (auto [entity, pos, vel] : view)
@@ -67,7 +67,7 @@ TEST_F(ViewIteratorTest, BasicIteration)
     // Verify the modifications took effect
     for (Entity e : entities)
     {
-        auto* pos = registry->GetComponent<Position>(e);
+        auto* pos = registry->GetComponent<VITPosition>(e);
         EXPECT_NE(pos, nullptr);
         // Original x was the index, now it should be index + 1
     }
@@ -79,11 +79,11 @@ TEST_F(ViewIteratorTest, EmptyView)
     for (int i = 0; i < 5; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Health{100});
+        registry->AddComponent(e, VITHealth{100});
     }
 
-    // View for Position/Velocity should be empty
-    auto view = registry->CreateView<Position, Velocity>();
+    // View for VITPosition/VITVelocity should be empty
+    auto view = registry->CreateView<VITPosition, VITVelocity>();
 
     int count = 0;
     for (auto [entity, pos, vel] : view)
@@ -99,14 +99,14 @@ TEST_F(ViewIteratorTest, EmptyView)
 
 TEST_F(ViewIteratorTest, SingleComponent)
 {
-    // Create entities with just Position
+    // Create entities with just VITPosition
     for (int i = 0; i < 100; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{static_cast<float>(i), 0.0f, 0.0f});
+        registry->AddComponent(e, VITPosition{static_cast<float>(i), 0.0f, 0.0f});
     }
 
-    auto view = registry->CreateView<Position>();
+    auto view = registry->CreateView<VITPosition>();
 
     int count = 0;
     float sum = 0.0f;
@@ -125,31 +125,31 @@ TEST_F(ViewIteratorTest, SingleComponent)
 TEST_F(ViewIteratorTest, MultipleArchetypes)
 {
     // Create entities in different archetypes
-    // Archetype 1: Position only
+    // Archetype 1: VITPosition only
     for (int i = 0; i < 5; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{1.0f, 0.0f, 0.0f});
+        registry->AddComponent(e, VITPosition{1.0f, 0.0f, 0.0f});
     }
 
-    // Archetype 2: Position + Velocity
+    // Archetype 2: VITPosition + VITVelocity
     for (int i = 0; i < 5; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{2.0f, 0.0f, 0.0f});
-        registry->AddComponent(e, Velocity{0.0f, 0.0f, 0.0f});
+        registry->AddComponent(e, VITPosition{2.0f, 0.0f, 0.0f});
+        registry->AddComponent(e, VITVelocity{0.0f, 0.0f, 0.0f});
     }
 
-    // Archetype 3: Position + Health
+    // Archetype 3: VITPosition + VITHealth
     for (int i = 0; i < 5; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{3.0f, 0.0f, 0.0f});
-        registry->AddComponent(e, Health{100});
+        registry->AddComponent(e, VITPosition{3.0f, 0.0f, 0.0f});
+        registry->AddComponent(e, VITHealth{100});
     }
 
-    // View for Position should see all 15 entities
-    auto view = registry->CreateView<Position>();
+    // View for VITPosition should see all 15 entities
+    auto view = registry->CreateView<VITPosition>();
 
     int count = 0;
     float sum = 0.0f;
@@ -172,11 +172,11 @@ TEST_F(ViewIteratorTest, CompareWithForEach)
     for (int i = 0; i < NUM_ENTITIES; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{static_cast<float>(i), 0.0f, 0.0f});
-        registry->AddComponent(e, Velocity{1.0f, 0.0f, 0.0f});
+        registry->AddComponent(e, VITPosition{static_cast<float>(i), 0.0f, 0.0f});
+        registry->AddComponent(e, VITVelocity{1.0f, 0.0f, 0.0f});
     }
 
-    auto view = registry->CreateView<Position, Velocity>();
+    auto view = registry->CreateView<VITPosition, VITVelocity>();
 
     // Collect entities via iterator
     std::vector<Entity> iteratorEntities;
@@ -189,7 +189,7 @@ TEST_F(ViewIteratorTest, CompareWithForEach)
 
     // Collect entities via ForEach
     std::vector<Entity> forEachEntities;
-    view.ForEach([&](Entity e, Position&, Velocity&) {
+    view.ForEach([&](Entity e, VITPosition&, VITVelocity&) {
         forEachEntities.push_back(e);
     });
 
@@ -209,10 +209,10 @@ TEST_F(ViewIteratorTest, ModifyDuringIteration)
     for (int i = 0; i < 10; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{static_cast<float>(i), 0.0f, 0.0f});
+        registry->AddComponent(e, VITPosition{static_cast<float>(i), 0.0f, 0.0f});
     }
 
-    auto view = registry->CreateView<Position>();
+    auto view = registry->CreateView<VITPosition>();
 
     // Modify component values during iteration
     for (auto [entity, pos] : view)
@@ -225,7 +225,7 @@ TEST_F(ViewIteratorTest, ModifyDuringIteration)
     // Verify modifications
     float sumX = 0.0f;
     float sumY = 0.0f;
-    view.ForEach([&](Entity, Position& pos) {
+    view.ForEach([&](Entity, VITPosition& pos) {
         sumX += pos.x;
         sumY += pos.y;
     });
@@ -244,10 +244,10 @@ TEST_F(ViewIteratorTest, LargeEntityCount)
     for (int i = 0; i < NUM_ENTITIES; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{1.0f, 1.0f, 1.0f});
+        registry->AddComponent(e, VITPosition{1.0f, 1.0f, 1.0f});
     }
 
-    auto view = registry->CreateView<Position>();
+    auto view = registry->CreateView<VITPosition>();
 
     int count = 0;
     for (auto [entity, pos] : view)
@@ -266,12 +266,12 @@ TEST_F(ViewIteratorTest, ThreeComponents)
     for (int i = 0; i < 50; ++i)
     {
         Entity e = registry->CreateEntity();
-        registry->AddComponent(e, Position{static_cast<float>(i), 0.0f, 0.0f});
-        registry->AddComponent(e, Velocity{1.0f, 1.0f, 1.0f});
-        registry->AddComponent(e, Health{100 + i});
+        registry->AddComponent(e, VITPosition{static_cast<float>(i), 0.0f, 0.0f});
+        registry->AddComponent(e, VITVelocity{1.0f, 1.0f, 1.0f});
+        registry->AddComponent(e, VITHealth{100 + i});
     }
 
-    auto view = registry->CreateView<Position, Velocity, Health>();
+    auto view = registry->CreateView<VITPosition, VITVelocity, VITHealth>();
 
     int count = 0;
     int healthSum = 0;

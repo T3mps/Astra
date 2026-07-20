@@ -796,16 +796,16 @@ namespace
 {
     // A deferred-added marker so the test can count, after the flush, exactly
     // which entities the chunk-parallel bodies tagged. A distinct type means
-    // reg.CreateView<Tag>() finds precisely the tagged entities.
-    struct Tag
+    // reg.CreateView<MarkerTag>() finds precisely the tagged entities.
+    struct MarkerTag
     {
         int v = 0;
     };
-    static_assert(Astra::Component<Tag>, "Tag must satisfy Component concept");
+    static_assert(Astra::Component<MarkerTag>, "MarkerTag must satisfy Component concept");
 
     // A void(SystemContext&) system that fans its Position view out across
     // worker threads by chunk (ctx.ParallelForEach) and defers an
-    // AddComponent<Tag> per entity into each chunk-worker's OWN sub-context.
+    // AddComponent<MarkerTag> per entity into each chunk-worker's OWN sub-context.
     // Struct-typed only for readability; a context lambda would behave
     // identically (both get a solo execution group -> the outer system runs on
     // the submitting thread, so the inner view fans out to real workers).
@@ -817,7 +817,7 @@ namespace
             ctx.ParallelForEach(view,
                 [](Astra::Entity e, const Position&, Astra::SystemContext& sub)
                 {
-                    sub.Commands().AddComponent<Tag>(e, Tag{1});
+                    sub.Commands().AddComponent<MarkerTag>(e, MarkerTag{1});
                 });
         }
     };
@@ -832,11 +832,11 @@ TEST(SystemContext, ParallelForEachRecordsDeferredChangesPerChunkThatApplyAtFlus
     cfg.workScheduler = pool;
     Astra::Registry reg(cfg);
 
-    // Pre-register Tag on the main thread: CommandBuffer::AddComponent<Tag>
-    // registers Tag at RECORD time, and here many chunk-workers first-add Tag
+    // Pre-register MarkerTag on the main thread: CommandBuffer::AddComponent<MarkerTag>
+    // registers MarkerTag at RECORD time, and here many chunk-workers first-add MarkerTag
     // concurrently. (Module 1 makes registration thread-safe; keep the
     // main-thread pre-registration pattern regardless.)
-    reg.GetComponentRegistry()->RegisterComponent<Tag>();
+    reg.GetComponentRegistry()->RegisterComponent<MarkerTag>();
 
     // Seed enough Position entities to cross every parallel threshold and span
     // many chunks (AVG_ENTITIES_PER_CHUNK=256, MIN_CHUNKS_FOR_PARALLEL=8,
@@ -853,12 +853,12 @@ TEST(SystemContext, ParallelForEachRecordsDeferredChangesPerChunkThatApplyAtFlus
     Astra::ParallelExecutor exec(pool);
     s.Execute(reg, &exec);
 
-    // Every seeded entity now carries Tag: each chunk's per-entity deferred
-    // AddComponent<Tag> was recorded into its chunk-worker's own buffer and
+    // Every seeded entity now carries MarkerTag: each chunk's per-entity deferred
+    // AddComponent<MarkerTag> was recorded into its chunk-worker's own buffer and
     // applied at the deterministic depth==0 flush. No crash, nothing left
     // pending.
     EXPECT_EQ(s.PendingCommandCount(), 0u);
-    EXPECT_EQ(reg.CreateView<Tag>().Size(), kCount);
+    EXPECT_EQ(reg.CreateView<MarkerTag>().Size(), kCount);
 }
 
 // ---- Theme B2 Phase B, Task 4: the chunk-parallel acceptance gate ---------
@@ -927,7 +927,7 @@ TEST(SystemContext, ChunkParallelDeferredChangesFlushIdenticallyAcross50Runs)
         reg.GetComponentRegistry()->RegisterComponent<Position>();
         reg.GetComponentRegistry()->RegisterComponent<Velocity>();
         reg.GetComponentRegistry()->RegisterComponent<Health>();
-        reg.GetComponentRegistry()->RegisterComponent<Tag>();
+        reg.GetComponentRegistry()->RegisterComponent<MarkerTag>();
 
         // Seed the rich, MULTI-ARCHETYPE world (see the constants' comment
         // above for why this shape matters). Position.x is set to a stable
@@ -993,7 +993,7 @@ TEST(SystemContext, ChunkParallelDeferredChangesFlushIdenticallyAcross50Runs)
 
                         // Mix item 1: every entity tags itself
                         // (deterministic, unconditional).
-                        sub.Commands().AddComponent<Tag>(e, Tag{idx});
+                        sub.Commands().AddComponent<MarkerTag>(e, MarkerTag{idx});
 
                         // Mix item 2: a sparse deterministic subset spawns a
                         // placeholder related entity via CreateEntity() +
@@ -1035,7 +1035,7 @@ TEST(SystemContext, ChunkParallelDeferredChangesFlushIdenticallyAcross50Runs)
         // the 3 destroyed originals' self-tag deterministically failed
         // (item 3), and the kChunkGateExpectedCreated placeholder children
         // are never tagged (only the outer view's original entities are).
-        EXPECT_EQ(reg.CreateView<Tag>().Size(), kChunkGateTotal - kChunkGateExpectedDestroyed) << "run " << run;
+        EXPECT_EQ(reg.CreateView<MarkerTag>().Size(), kChunkGateTotal - kChunkGateExpectedDestroyed) << "run " << run;
 
         // Exactly 3 deterministic skip+report failures every run (special1A
         // via special0A, special1B via special0B, special1C via special0C).
@@ -1062,7 +1062,7 @@ TEST(SystemContext, ChunkParallelDeferredChangesFlushIdenticallyAcross50Runs)
                 out += "V(" + std::to_string(v->dx) + ")";
             if (auto* h = r.GetComponent<Health>(e))
                 out += "H(" + std::to_string(h->current) + ")";
-            if (auto* t = r.GetComponent<Tag>(e))
+            if (auto* t = r.GetComponent<MarkerTag>(e))
                 out += "T(" + std::to_string(t->v) + ")";
             return out;
         };
