@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
+#include "../Support/DiagnosticsTestGuards.hpp"
 #include "../Support/TestWorkerPool.hpp"
 #include "../TestComponents.hpp"
 
@@ -587,4 +588,106 @@ TEST(SystemSchedulerOrdering, ReorderedDeferredScheduleIsDeterministicAcrossRuns
     EXPECT_FALSE(oracle) << "AddsTag must run/apply before RemovesTag per scheduleOrder";
     for (int i = 0; i < 20; ++i)
         EXPECT_EQ(run(), oracle) << "run " << i;
+}
+
+// ---- Theme B2 Phase D Task 5: opt-in ambiguity detection + AmbiguousWith suppression --
+
+namespace  // Phase D ambiguity systems
+{
+    struct AmbW1 : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct AmbW2 : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct AmbOrdered1 : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct AmbOrdered2 : Astra::SystemTraits<Astra::Writes<Position>, Astra::After<AmbOrdered1>> { void operator()(Astra::Registry&) {} };
+    struct AmbSup2;
+    struct AmbSup1 : Astra::SystemTraits<Astra::Writes<Position>, Astra::AmbiguousWith<AmbSup2>> { void operator()(Astra::Registry&) {} };
+    struct AmbSup2 : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct AmbWRes1 : Astra::SystemTraits<Astra::WritesResources<ResA>> { void operator()(Astra::Registry&) {} };
+    struct AmbWRes2 : Astra::SystemTraits<Astra::WritesResources<ResA>> { void operator()(Astra::Registry&) {} };
+
+    struct AmbCapture { int warnCount = 0; std::string last; };
+    inline void AmbSink(const Astra::LogRecord& r, void* user) noexcept
+    {
+        if (r.level == Astra::LogLevel::Warn)
+        {
+            auto* c = static_cast<AmbCapture*>(user);
+            c->warnCount++;
+            c->last = std::string(r.message);
+        }
+    }
+}
+
+// Opt-in ambiguity report fires for a conflicting, unordered pair.
+TEST(SystemSchedulerOrdering, AmbiguityReportedForUnorderedConflict)
+{
+    AmbCapture cap;
+    Astra::Testing::ScopedLogSink guard(&AmbSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // defensive: don't depend on a prior test's restore
+    Astra::SystemScheduler s;
+    s.SetAmbiguityReporting(true);
+    ASSERT_TRUE(s.AddSystem<AmbW1>().IsOk());
+    ASSERT_TRUE(s.AddSystem<AmbW2>().IsOk());
+    (void)s.GetExecutionPlan();   // triggers the build + report
+    EXPECT_EQ(cap.warnCount, 1);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
+}
+
+// Off by default: no report.
+TEST(SystemSchedulerOrdering, AmbiguityNotReportedWhenDisabled)
+{
+    AmbCapture cap;
+    Astra::Testing::ScopedLogSink guard(&AmbSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // defensive: don't depend on a prior test's restore
+    Astra::SystemScheduler s;  // reporting NOT enabled
+    ASSERT_TRUE(s.AddSystem<AmbW1>().IsOk());
+    ASSERT_TRUE(s.AddSystem<AmbW2>().IsOk());
+    (void)s.GetExecutionPlan();
+    EXPECT_EQ(cap.warnCount, 0);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
+}
+
+// An explicit ordering edge silences the report.
+TEST(SystemSchedulerOrdering, AmbiguitySilencedByOrderingEdge)
+{
+    AmbCapture cap;
+    Astra::Testing::ScopedLogSink guard(&AmbSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // defensive: don't depend on a prior test's restore
+    Astra::SystemScheduler s;
+    s.SetAmbiguityReporting(true);
+    ASSERT_TRUE(s.AddSystem<AmbOrdered1>().IsOk());
+    ASSERT_TRUE(s.AddSystem<AmbOrdered2>().IsOk());   // After<AmbOrdered1>
+    (void)s.GetExecutionPlan();
+    EXPECT_EQ(cap.warnCount, 0);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
+}
+
+// AmbiguousWith suppresses the report for a genuinely order-independent pair.
+TEST(SystemSchedulerOrdering, AmbiguitySilencedByAmbiguousWith)
+{
+    AmbCapture cap;
+    Astra::Testing::ScopedLogSink guard(&AmbSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // defensive: don't depend on a prior test's restore
+    Astra::SystemScheduler s;
+    s.SetAmbiguityReporting(true);
+    ASSERT_TRUE(s.AddSystem<AmbSup1>().IsOk());   // AmbiguousWith<AmbSup2>
+    ASSERT_TRUE(s.AddSystem<AmbSup2>().IsOk());
+    (void)s.GetExecutionPlan();
+    EXPECT_EQ(cap.warnCount, 0);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
+}
+
+// Resource-path: two WritesResources<ResA> systems with no order also trip the
+// detector, proving Phase C's resource conflict predicate feeds ambiguity (not
+// just the component predicate).
+TEST(SystemSchedulerOrdering, AmbiguityReportedForUnorderedResourceConflict)
+{
+    AmbCapture cap;
+    Astra::Testing::ScopedLogSink guard(&AmbSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // defensive: don't depend on a prior test's restore
+    Astra::SystemScheduler s;
+    s.SetAmbiguityReporting(true);
+    ASSERT_TRUE(s.AddSystem<AmbWRes1>().IsOk());
+    ASSERT_TRUE(s.AddSystem<AmbWRes2>().IsOk());
+    (void)s.GetExecutionPlan();
+    EXPECT_EQ(cap.warnCount, 1);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
 }

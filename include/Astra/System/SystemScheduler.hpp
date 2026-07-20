@@ -432,6 +432,14 @@ namespace Astra
             return Result<void, SystemError>::Ok();
         }
 
+        // Opt-in (default off): after each plan build, report every pair of
+        // systems that mutably conflict (share a component or resource with a
+        // write on either side) whose relative order is fixed only by an
+        // insertion-order accident -- no Before/After edge (direct or transitive)
+        // orders them and neither declares AmbiguousWith the other. Reported via
+        // ASTRA_LOG_WARN; a development aid, never an error.
+        void SetAmbiguityReporting(bool enabled) noexcept { m_reportAmbiguities = enabled; }
+
     private:
         struct SystemEntry
         {
@@ -598,6 +606,95 @@ namespace Astra
             return false;
         }
 
+        // Pairwise mutable conflict: share a component OR resource with a write on
+        // either side. (Same semantics as the grouping conflict test, in pairwise
+        // form.) Returns the first conflicting component bit in `outComp` (or
+        // MAX_COMPONENTS if the conflict is resource-only), and likewise the first
+        // resource bit in `outRes`, for the report.
+        ASTRA_NODISCARD static bool Conflicts(const SystemMetadata& a, const SystemMetadata& b,
+                                              size_t& outComp, size_t& outRes)
+        {
+            const ComponentMask comp = (a.writes & b.writes) | (a.writes & b.reads) | (a.reads & b.writes);
+            const ComponentMask res  = (a.resourceWrites & b.resourceWrites)
+                                     | (a.resourceWrites & b.resourceReads)
+                                     | (a.resourceReads  & b.resourceWrites);
+            outComp = MAX_COMPONENTS;
+            outRes  = MAX_COMPONENTS;
+            for (size_t bit = 0; bit < MAX_COMPONENTS; ++bit)
+            {
+                if (outComp == MAX_COMPONENTS && comp.Test(bit)) outComp = bit;
+                if (outRes  == MAX_COMPONENTS && res.Test(bit))  outRes  = bit;
+            }
+            return comp.Any() || res.Any();
+        }
+
+        // Reachability over the resolved ordering DAG: can `from` reach `to` by
+        // following Before/After edges (transitively)? Used to decide whether a
+        // conflicting pair is already ordered. n is small (tens); a per-query DFS
+        // is fine.
+        ASTRA_NODISCARD bool OrderingReaches(size_t from, size_t to,
+                                             const std::vector<std::vector<size_t>>& succ) const
+        {
+            std::vector<bool> seen(succ.size(), false);
+            std::vector<size_t> stack{from};
+            while (!stack.empty())
+            {
+                size_t cur = stack.back(); stack.pop_back();
+                if (cur == to) return true;
+                if (seen[cur]) continue;
+                seen[cur] = true;
+                for (size_t nx : succ[cur]) stack.push_back(nx);
+            }
+            return false;
+        }
+
+        // True if a declares AmbiguousWith b, or b declares AmbiguousWith a.
+        ASTRA_NODISCARD bool SuppressedAsAmbiguous(size_t aIdx, size_t bIdx) const
+        {
+            const auto& a = m_systems[aIdx].metadata;
+            const auto& b = m_systems[bIdx].metadata;
+            const uint64_t aHash = static_cast<uint64_t>(a.typeId);
+            const uint64_t bHash = static_cast<uint64_t>(b.typeId);
+            for (uint64_t h : a.ambiguousWithIds) if (h == bHash) return true;
+            for (uint64_t h : b.ambiguousWithIds) if (h == aHash) return true;
+            return false;
+        }
+
+        void ReportAmbiguities()
+        {
+            const size_t n = m_systems.size();
+            const size_t UNKNOWN = n;
+            auto resolve = [&](uint64_t hash) -> size_t
+            {
+                auto it = m_systemIndices.Find(hash);
+                return it == m_systemIndices.end() ? UNKNOWN : it->second;
+            };
+            // Rebuild the successor adjacency (same convention as ComputeScheduleOrder).
+            std::vector<std::vector<size_t>> succ(n);
+            for (size_t s = 0; s < n; ++s)
+            {
+                const auto& md = m_systems[s].metadata;
+                for (uint64_t h : md.afterIds)  { size_t t = resolve(h); if (t != UNKNOWN && t != s) succ[t].push_back(s); }
+                for (uint64_t h : md.beforeIds) { size_t t = resolve(h); if (t != UNKNOWN && t != s) succ[s].push_back(t); }
+            }
+            for (size_t a = 0; a < n; ++a)
+                for (size_t b = a + 1; b < n; ++b)
+                {
+                    size_t comp = 0, res = 0;
+                    if (!Conflicts(m_systems[a].metadata, m_systems[b].metadata, comp, res)) continue;
+                    if (OrderingReaches(a, b, succ) || OrderingReaches(b, a, succ)) continue;   // ordered
+                    if (SuppressedAsAmbiguous(a, b)) continue;                                  // opted out
+                    std::string msg = "SystemScheduler: ambiguous system order -- systems (insertionOrder) "
+                        + std::to_string(m_systems[a].metadata.insertionOrder) + " and "
+                        + std::to_string(m_systems[b].metadata.insertionOrder)
+                        + " mutably conflict but declare no relative order.";
+                    if (comp != MAX_COMPONENTS) msg += " component id " + std::to_string(comp) + '.';
+                    if (res  != MAX_COMPONENTS) msg += " resource id "  + std::to_string(res)  + '.';
+                    msg += " Add Before/After, or AmbiguousWith to silence.";
+                    ASTRA_LOG_WARN(msg);
+                }
+        }
+
         // Partition systems into sequential groups of concurrently-runnable
         // systems. The plan is a set of CONTIGUOUS insertion-order runs: a run
         // grows from its opener until the first system that conflicts (mask
@@ -693,6 +790,9 @@ namespace Astra
             }
 
             m_needsRebuild = false;
+
+            if (m_reportAmbiguities)
+                ReportAmbiguities();
         }
 
         // Helper to extract signature from const lambda
@@ -816,6 +916,7 @@ namespace Astra
         FlatMap<uint64_t, size_t> m_systemIndices;                      // key: TypeID<T>::Hash() — systems must not consume dense ComponentIDs
         bool m_scheduleHadCycle = false;            // set by ComputeScheduleOrder; surfaced in Task 3
         std::vector<size_t> m_cycleMembers;         // insertionOrders forced during a cycle break (Task 3 log)
+        bool m_reportAmbiguities = false;  // opt-in ambiguity reporting (Phase D §12)
         mutable std::vector<std::vector<size_t>> m_executionPlan;       // Cached parallel groups
         mutable bool m_needsRebuild = true;                             // Whether execution plan needs rebuild
         mutable std::atomic<int> m_executionDepth{0};                   // reentrancy-safe; ==0 is the B2 sync point
