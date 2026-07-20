@@ -15,6 +15,11 @@
 
 namespace Astra
 {
+    // Forward declaration so Detail::TypeIDStorage::Value() can name it under
+    // two-phase lookup (gcc/clang); defined after struct TypeID below.
+    template<typename T>
+    ASTRA_NODISCARD TypeIdentity MakeTypeIdentity() noexcept;
+
     namespace Detail
     {
         // Compile-time XXHash64 implementation for type name hashing
@@ -225,6 +230,15 @@ namespace Astra
         };
     }
 
+    // NOTE: type identity derives from the compiler pretty-name, so every type
+    // must have a UNIQUE unqualified name. Two distinct types that share a
+    // pretty-name (e.g. same-named types in anonymous namespaces in different
+    // translation units) collide; the collision is DETECTED at id assignment and
+    // the second type is refused with a logged error (see
+    // TypeContext::GetOrAssignComponentID). Detection is complete wherever RTTI is
+    // enabled; in RTTI-off builds it catches every collision whose types differ in
+    // size/alignment/triviality (the memory-corrupting cases), but two distinct
+    // types with identical layout evade detection (logical mislabel, not corruption).
     template<typename T>
     struct TypeID
     {

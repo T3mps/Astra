@@ -34,6 +34,9 @@ namespace Astra
             m_hashToID.Reserve(MAX_COMPONENTS * 2);
         }
 
+        // A type whose identity collided with an already-registered type (see
+        // TypeContext::GetOrAssignComponentID) resolves to INVALID_COMPONENT and
+        // is refused here -- no descriptor is written for it.
         template<Component T>
         void RegisterComponent()
         {
@@ -158,22 +161,6 @@ namespace Astra
                          "Component alignment above 64 bytes is not supported by chunk storage");
 
             desc.hash = TypeID<T>::Hash();
-
-            #ifdef ASTRA_BUILD_DEBUG
-            if (auto it = m_hashToID.Find(desc.hash); it != m_hashToID.end())
-            {
-                auto existing = GetComponentDescriptor(it->second);
-                if (existing)
-                {
-                    // We're comparing type names to detect collision.
-                    // If names are different but hash is same = collision!
-                    // A re-register finds its own hash with the same name -- assert is safe.
-                    auto currentName = TypeID<T>::Name();
-                    std::string_view existingName = existing->name ? existing->name : "";
-                    ASTRA_ASSERT(currentName == existingName, "Hash collision detected! Components have same hash but different types");
-                }
-            }
-            #endif
 
             // m_componentNames grows by one entry per (re)registration -- accepted cost
             // (tiny strings, rare path) in exchange for pointer-stable c_str() storage.

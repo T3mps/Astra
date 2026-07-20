@@ -96,6 +96,9 @@ namespace Astra
     {
     public:
         // Not noexcept: allocates on first sight of a hash.
+        // On a name-hash collision (differing name, or a differing TypeIdentity for
+        // the same name), refuses the second type: returns INVALID_COMPONENT and
+        // logs an error instead of aliasing it onto the existing id.
         ASTRA_NODISCARD ComponentID GetOrAssignComponentID(uint64_t hash, std::string_view name,
                                                            TypeIdentity identity = {})
         {
