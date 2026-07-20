@@ -855,3 +855,18 @@ TEST(SystemSchedulerSyncPoint, BarrieredDeferredScheduleIsDeterministic)
     for (int i = 0; i < 20; ++i)
         EXPECT_EQ(run(), oracle);
 }
+
+// ---- Task 4: lambda polish -- reject non-reference component params --------
+
+// A view-lambda with reference component params still schedules and runs.
+TEST(SystemSchedulerLambdaPolish, ReferenceParamLambdaStillWorks)
+{
+    Astra::Registry reg;
+    auto e = reg.CreateEntity();
+    reg.AddComponent<Position>(e, Position{});
+    Astra::SystemScheduler s;
+    int ran = 0;
+    ASSERT_TRUE(s.AddSystem([&](Astra::Entity, const Position&) { ++ran; }).IsOk());
+    s.Execute(reg);
+    EXPECT_EQ(ran, 1);   // the lambda iterated the one Position entity
+}

@@ -149,6 +149,28 @@ namespace Astra
 
     public:
         using ComponentArgs = typename SkipEntityArg<Args...>::Components;
+
+        // Every component parameter must be an lvalue reference ('T&' or
+        // 'const T&'). IsReadOnly's const-ness inference above is only
+        // correct for reference params: a 'const Position*' yields
+        // is_const_v<const Position*> == false (the POINTER is non-const,
+        // only the pointee is), so a pointer param is silently mis-inferred
+        // as a WRITE and builds a CreateView over the bogus type
+        // 'const Position*' -- which no entity ever has -- so the lambda
+        // silently never iterates instead of failing to compile. Reject
+        // that up front with a clear message. An empty ComponentArgs (a
+        // lambda with only Entity) makes the fold vacuously true: no
+        // component params, nothing to reject.
+        template<typename Tuple> struct AllLvalueRefs;
+        template<typename... Ts> struct AllLvalueRefs<std::tuple<Ts...>>
+            : std::bool_constant<(std::is_lvalue_reference_v<Ts> && ...)> {};
+
+        static_assert(AllLvalueRefs<ComponentArgs>::value,
+            "Astra system lambda component parameters must be 'T&' or 'const T&'. "
+            "Pointer, by-value, and optional/nullable component parameters are not "
+            "supported (a 'const T*' would be mis-inferred as a write and build a "
+            "malformed view). Use 'const T&' for read access or 'T&' for write access.");
+
         using ReadsComponents = decltype(ExtractReads<ComponentArgs>(std::make_index_sequence<std::tuple_size_v<ComponentArgs>>{}));
         using WritesComponents = decltype(ExtractWrites<ComponentArgs>(std::make_index_sequence<std::tuple_size_v<ComponentArgs>>{}));
         static constexpr bool HasTraits = true;
