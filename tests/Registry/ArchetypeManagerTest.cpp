@@ -540,3 +540,26 @@ TEST_F(ArchetypeManagerTest, RemoveEntityDestructsMovedFromSourceSlot)
     EXPECT_EQ(Tracked::s_live, 2);   // BUG leaves 3 (moved-from source slot never destructed)
     EXPECT_EQ(manager->GetComponent<Tracked>(e2)->value, 12);
 }
+
+// Theme G Fix 3: MoveAndAddByID must construct a move-only new component.
+TEST_F(ArchetypeManagerTest, MoveAndAddByIDMoveOnlyComponentPreservesValue)
+{
+    using Astra::Test::Position;
+    using Astra::Test::Tracked;
+    componentRegistry->RegisterComponents<Tracked>();
+    Tracked::s_live = 0;
+
+    Astra::Entity e(210, 1);
+    manager->AddEntityWith(e, Position{1.0f, 2.0f, 3.0f});   // e now in {Position}
+
+    // Add the move-only component via the type-erased path (as CommandBuffer flush does).
+    Tracked src{42};
+    const bool ok = manager->AddComponentByID(
+        e, Astra::TypeID<Tracked>::Value(), &src, sizeof(Tracked));
+    ASSERT_TRUE(ok);
+
+    ASSERT_TRUE(manager->HasComponent<Tracked>(e));
+    Tracked* t = manager->GetComponent<Tracked>(e);
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->value, 42);   // BUG leaves 0 (slot never constructed; chunk is zeroed)
+}

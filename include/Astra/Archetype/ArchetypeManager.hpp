@@ -1403,6 +1403,19 @@ namespace Astra
                     {
                         newDesc.copyConstruct(dstPtr, componentData);
                     }
+                    else if (newDesc.moveConstruct)
+                    {
+                        // Move-only component: the CommandBuffer move-constructed the
+                        // value into its own storage, so move it out (the buffer's copy
+                        // is destructed after flush). Without this the slot was left
+                        // uninitialized.
+                        newDesc.moveConstruct(dstPtr, const_cast<void*>(componentData));
+                    }
+                    else
+                    {
+                        // Never-UB floor (mirrors ComponentDescriptor::ConstructWith).
+                        newDesc.DefaultConstruct(dstPtr);
+                    }
                 }
                 else
                 {
