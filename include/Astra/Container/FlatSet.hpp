@@ -426,15 +426,16 @@ namespace Astra
             T* temp = std::launder(reinterpret_cast<T*>(storage));
             std::allocator_traits<AllocatorType>::construct(m_alloc, temp, std::forward<Args>(args)...);
             
-            // Use RAII to ensure cleanup
+            // Always destruct the probe temporary on scope exit. The value is
+            // copied/moved into a *separate* slot object, so the temporary must
+            // still be destructed on every exit path (duplicate found, reserve
+            // failure, or successful insert). Skipping it leaks the temporary for
+            // a copyable-non-movable T (std::move binds to the copy ctor).
             struct Cleanup {
                 AllocatorType& alloc;
                 T* ptr;
-                bool dismissed = false;
-                ~Cleanup() { 
-                    if (!dismissed) {
-                        std::allocator_traits<AllocatorType>::destroy(alloc, ptr);
-                    }
+                ~Cleanup() {
+                    std::allocator_traits<AllocatorType>::destroy(alloc, ptr);
                 }
             } cleanup{m_alloc, temp};
             
@@ -553,8 +554,6 @@ namespace Astra
                 m_slots[insertIdx].GetValue(),
                 std::move(*temp)
             );
-
-            cleanup.dismissed = true; // Prevent cleanup since we moved the value
 
             m_groups[insertGroup].Set(insertSlot, h2);
             ++m_size;

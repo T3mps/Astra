@@ -454,3 +454,39 @@ TEST_F(FlatSetTest, LoadFactor)
     // Capacity might have grown (implementation dependent on exact load factor)
     EXPECT_GE(set.Capacity(), 15u);
 }
+
+namespace
+{
+    // Copyable, non-movable, lifetime-counted. The user-declared copy ctor
+    // suppresses the implicit move ctor, so std::move(x) copies -> the leak case.
+    struct CopyOnly
+    {
+        static inline int s_live = 0;
+        int value;
+        explicit CopyOnly(int v = 0) : value(v) { ++s_live; }
+        CopyOnly(const CopyOnly& o) : value(o.value) { ++s_live; }
+        ~CopyOnly() { --s_live; }
+    };
+    struct CopyOnlyHash
+    {
+        std::size_t operator()(const CopyOnly& c) const noexcept { return std::hash<int>{}(c.value); }
+    };
+    struct CopyOnlyEq
+    {
+        bool operator()(const CopyOnly& a, const CopyOnly& b) const noexcept { return a.value == b.value; }
+    };
+}
+
+// Theme G Fix 2: Emplace must destruct its probe temporary on success.
+TEST_F(FlatSetTest, EmplaceDestructsProbeTemporary)
+{
+    CopyOnly::s_live = 0;
+    Astra::FlatSet<CopyOnly, CopyOnlyHash, CopyOnlyEq> set;
+
+    auto [it, inserted] = set.Emplace(42);
+    EXPECT_TRUE(inserted);
+
+    // Exactly one live object: the element stored in the set. The probe
+    // temporary must have been destructed (BUG leaves 2).
+    EXPECT_EQ(CopyOnly::s_live, 1);
+}
