@@ -4,6 +4,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -99,7 +100,8 @@ namespace Astra
                 .writes = ComponentMask{},
                 .typeId = static_cast<size_t>(typeId),
                 .insertionOrder = index,
-                .requiresExclusive = false
+                .requiresExclusive = false,
+                .segmentIndex = m_currentSegment
             };
             if constexpr (HasSystemTraits_v<T>)
                 ExtractSystemTraits<T>(metadata);
@@ -150,7 +152,8 @@ namespace Astra
                 .writes = ComponentMask{},
                 .typeId = static_cast<size_t>(typeId),
                 .insertionOrder = index,
-                .requiresExclusive = false
+                .requiresExclusive = false,
+                .segmentIndex = m_currentSegment
             };
             if constexpr (HasSystemTraits_v<T>)
                 ExtractSystemTraits<T>(metadata);
@@ -189,6 +192,28 @@ namespace Astra
             using SystemType = std::decay_t<Lambda>;
             return AddContextSystemInternal<SystemType>(SystemType(std::forward<Lambda>(lambda)));
         }
+
+        // Insert a sync-point fence at the current end of the registration
+        // sequence (Phase E). Systems registered after it are in a later segment
+        // and never reorder/group across it; all deferred structural commands
+        // recorded before the fence are applied before the next segment runs.
+        ASTRA_NODISCARD Result<void, SystemError> AddSyncPoint()
+        {
+            return AddSyncPoint(std::string_view{});
+        }
+
+        ASTRA_NODISCARD Result<void, SystemError> AddSyncPoint(std::string_view label)
+        {
+            if (IsExecuting())
+                return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
+            ++m_currentSegment;
+            m_fenceLabels.emplace_back(label);   // owns a copy; empty for the no-arg form
+            m_needsRebuild = true;
+            return Result<void, SystemError>::Ok();
+        }
+
+        // Number of segments = number of SyncPoint fences + 1.
+        ASTRA_NODISCARD size_t GetSegmentCount() const noexcept { return m_currentSegment + 1; }
 
         template<System T>
         void RemoveSystem()
@@ -382,6 +407,9 @@ namespace Astra
             m_systemIndices.Clear();
             m_executionPlan.clear();
             m_needsRebuild = true;
+            m_currentSegment = 0;
+            m_fenceLabels.clear();
+            m_planGroupSegment.clear();
             // Stale errors from a since-cleared set of systems must not
             // outlive the scheduler state that produced them.
             m_lastDeferredErrors.clear();
@@ -556,12 +584,16 @@ namespace Astra
                 for (uint64_t h : md.afterIds)   // After<T> on s: T runs before s => T -> s
                 {
                     size_t t = resolve(h);
-                    if (t != UNKNOWN && t != s) { succ[t].push_back(s); ++indeg[s]; }
+                    if (t != UNKNOWN && t != s
+                        && m_systems[t].metadata.segmentIndex == md.segmentIndex)
+                    { succ[t].push_back(s); ++indeg[s]; }
                 }
                 for (uint64_t h : md.beforeIds)  // Before<T> on s: s runs before T => s -> T
                 {
                     size_t t = resolve(h);
-                    if (t != UNKNOWN && t != s) { succ[s].push_back(t); ++indeg[t]; }
+                    if (t != UNKNOWN && t != s
+                        && m_systems[t].metadata.segmentIndex == md.segmentIndex)
+                    { succ[s].push_back(t); ++indeg[t]; }
                 }
             }
 
@@ -705,6 +737,7 @@ namespace Astra
         void BuildExecutionPlan()
         {
             m_executionPlan.clear();
+            m_planGroupSegment.clear();
             if (m_systems.empty())
             {
                 m_needsRebuild = false;
@@ -747,6 +780,8 @@ namespace Astra
                     const size_t jIdx = order[q];
                     const auto& sysJ = m_systems[jIdx].metadata;
 
+                    if (sysJ.segmentIndex != sysI.segmentIndex)  // never group across a fence
+                        break;
                     // Exclusive / no-trait systems never join an existing group,
                     // and any conflict ends the contiguous run (order preserved).
                     if (sysJ.requiresExclusive || !declaresAccess(sysJ))
@@ -776,6 +811,7 @@ namespace Astra
                     groupResourceWrites |= sysJ.resourceWrites;
                 }
 
+                m_planGroupSegment.push_back(sysI.segmentIndex);
                 m_executionPlan.push_back(std::move(group));
                 p = q;
             }
@@ -846,7 +882,8 @@ namespace Astra
                 .writes = ComponentMask{},
                 .typeId = static_cast<size_t>(typeId),
                 .insertionOrder = index,
-                .requiresExclusive = false
+                .requiresExclusive = false,
+                .segmentIndex = m_currentSegment
             };
             if constexpr (HasSystemTraits_v<SystemType>)
                 ExtractSystemTraits<SystemType>(metadata);
@@ -898,7 +935,8 @@ namespace Astra
                 .writes = ComponentMask{},
                 .typeId = static_cast<size_t>(typeId),
                 .insertionOrder = index,
-                .requiresExclusive = false
+                .requiresExclusive = false,
+                .segmentIndex = m_currentSegment
             };
 
             m_systems.emplace_back(SystemEntry
@@ -921,6 +959,10 @@ namespace Astra
         mutable std::vector<std::vector<size_t>> m_executionPlan;       // Cached parallel groups
         mutable bool m_needsRebuild = true;                             // Whether execution plan needs rebuild
         mutable std::atomic<int> m_executionDepth{0};                   // reentrancy-safe; ==0 is the B2 sync point
+
+        size_t m_currentSegment = 0;                 // segment stamped onto systems registered now (Phase E)
+        std::vector<std::string> m_fenceLabels;      // label of each fence i (between segment i and i+1); "" if unlabeled
+        mutable std::vector<size_t> m_planGroupSegment;  // segment index of each group in m_executionPlan (parallel)
 
         // Task 2: owned per-worker deferred-command sink, lazily (re)bound to
         // whichever Registry Execute() is called with (see Execute() above).

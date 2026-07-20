@@ -52,6 +52,12 @@ namespace Astra
         // BuildExecutionPlan). Equals insertionOrder when no ordering edges
         // exist. Primary key of the deferred-command SortKey (see Task 4).
         size_t scheduleOrder = 0;
+
+        // Sync-point segment this system belongs to (Phase E): the number of
+        // AddSyncPoint() fences registered before it. Systems never reorder or
+        // group across a segment boundary; deferred commands flush at each fence.
+        // 0 for every system when no SyncPoint is used (byte-identical to Phase D).
+        size_t segmentIndex = 0;
     };
     
     /**

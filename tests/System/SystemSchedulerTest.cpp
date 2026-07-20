@@ -691,3 +691,52 @@ TEST(SystemSchedulerOrdering, AmbiguityReportedForUnorderedResourceConflict)
     EXPECT_EQ(cap.warnCount, 1);
     Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
 }
+
+namespace  // Phase E segment systems (disjoint masks, no edges)
+{
+    struct SegPos : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct SegVel : Astra::SystemTraits<Astra::Writes<Velocity>> { void operator()(Astra::Registry&) {} };
+}
+
+// A SyncPoint between two disjoint-mask systems forces them into separate
+// segments/groups (masks alone would share one group).
+TEST(SystemSchedulerSyncPoint, FenceSplitsDisjointSystemsIntoSegments)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<SegPos>().IsOk());   // segment 0
+    ASSERT_TRUE(s.AddSyncPoint().IsOk());
+    ASSERT_TRUE(s.AddSystem<SegVel>().IsOk());   // segment 1
+    EXPECT_EQ(s.GetSegmentCount(), 2u);
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 2u);                  // NOT one group of two
+    EXPECT_EQ(plan[0][0], 0u);                   // SegPos first
+    EXPECT_EQ(plan[1][0], 1u);                   // SegVel second
+}
+
+// Control: without the fence the same disjoint systems share one group and one segment.
+TEST(SystemSchedulerSyncPoint, NoFenceKeepsOneSegment)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<SegPos>().IsOk());
+    ASSERT_TRUE(s.AddSystem<SegVel>().IsOk());
+    EXPECT_EQ(s.GetSegmentCount(), 1u);
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].size(), 2u);
+}
+
+// An empty segment (SyncPoint before any system, or two in a row) is harmless.
+TEST(SystemSchedulerSyncPoint, EmptySegmentsAreHarmless)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSyncPoint().IsOk());        // empty segment 0
+    ASSERT_TRUE(s.AddSystem<SegPos>().IsOk());   // segment 1
+    ASSERT_TRUE(s.AddSyncPoint().IsOk());
+    ASSERT_TRUE(s.AddSyncPoint().IsOk());        // empty segment 2
+    ASSERT_TRUE(s.AddSystem<SegVel>().IsOk());   // segment 3
+    EXPECT_EQ(s.GetSegmentCount(), 4u);
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 2u);                  // only the two non-empty segments contribute groups
+    EXPECT_EQ(plan[0][0], 0u);
+    EXPECT_EQ(plan[1][0], 1u);
+}
