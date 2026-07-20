@@ -114,8 +114,9 @@ namespace Astra
                 if (m_names[existingId] != name
                     || IsTypeIdentityCollision(m_identities[existingId], identity))
                 {
-                    std::string msg = "TypeContext: type-identity collision -- a distinct type shares "
-                                      "the name-hash of '";
+                    std::string msg = "TypeContext: type-identity collision -- incoming type '";
+                    msg.append(name);
+                    msg += "' shares the name-hash of already-registered '";
                     msg.append(m_names[existingId]);
                     msg += "'. The second type is refused (its ComponentID is INVALID). Give types a "
                            "unique unqualified name; do not place two same-named types in anonymous "
