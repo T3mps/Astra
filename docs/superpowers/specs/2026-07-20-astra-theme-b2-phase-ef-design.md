@@ -42,12 +42,14 @@ The two modules touch disjoint code (E: `SystemScheduler` / `Execute` / command-
 
 ```cpp
 ASTRA_NODISCARD Result<void, SystemError> AddSyncPoint();
+ASTRA_NODISCARD Result<void, SystemError> AddSyncPoint(std::string_view label);
 ```
 
-- Records a fence at the current end of the registration sequence — it sits between the systems registered before it and those registered after. Positional and no-arg (chosen over a named barrier or a per-system tag: it matches Astra's positional registration model and Bevy's `apply_deferred`/set-boundary style).
+- Records a fence at the current end of the registration sequence — it sits between the systems registered before it and those registered after. **Positional** (the fence is fixed by its registration position, exactly as the no-arg form); the no-arg overload delegates to the labeled one with an empty label.
+- The **optional label is a diagnostic aid only** — it does not affect scheduling. It is surfaced so a developer can tell *which* barrier a flush / deferred error belongs to (see Module 4). Chosen over pure-positional (adds debuggability at trivial cost) and over named-referenceable phases (which would decouple order from position and require a runtime name-resolution + `.Before`/`.After`-by-name builder — a larger feature than §13 intends; Phase D ordering stays trait/type-based).
 - Fails only with `SystemError::SchedulerExecuting` if called during `Execute` (uniform-graceful policy, same as `AddSystem`). Sets `m_needsRebuild`.
 - Consecutive `AddSyncPoint()`s, or one before any system, produce an **empty segment** — harmless: its flush is a no-op (nothing was recorded).
-- Implementation note: a fence is recorded as the count of systems registered so far (a boundary position), or equivalently each subsequently-registered system's `segmentIndex` is incremented. `RemoveSystem` / `Clear` keep the fence bookkeeping consistent (the plan will specify; likely the simplest representation is a running `m_currentSegment` counter stamped into each system's metadata at registration, plus a segment count).
+- Implementation note: the scheduler stores, per segment boundary, the label (empty when unlabeled) — e.g. a `std::vector<std::string> m_segmentLabels` indexed by the *following* segment's index — plus a running segment counter stamped into each system's `segmentIndex` at registration. `RemoveSystem` / `Clear` keep the fence bookkeeping consistent (the plan will specify; removing a system does not remove a fence — the removed system's segment simply loses a member; `Clear` resets segments and labels).
 
 #### Module 2 — Segment model (`SystemMetadata` + `BuildExecutionPlan`)
 
@@ -77,6 +79,7 @@ for each segment s in order:
 - **Placeholder resolution** (Phase A) happens at each segment's flush, so segment *k+1* sees the real entities segment *k* deferred-created — the spawn-then-process guarantee.
 - **Determinism** is preserved: within a segment, `ExecuteSorted` applies in `SortKey` order exactly as today; across segments, the segment order is absolute. `scheduleOrder`'s segment-major assignment keeps the sort key monotonic with execution order.
 - The **error channel** accumulates: `m_lastDeferredErrors` is cleared once at `Execute` start (as today) and appended-to after each segment flush (today it is assigned once; the plan changes it to accumulate).
+- **Label diagnostic surface (Module 1):** the minimum, testable surface is a `ASTRA_LOG_DEBUG`-level line at each *labeled* segment's flush (e.g. `"sync point 'post-spawn' flushed N commands"`). Debug level ⇒ **zero production cost** (off by default; a test enables the level and captures it via the log-sink). Whether a deferred error additionally carries its segment's label is a plan decision (desirable if cheap — it lets `GetLastDeferredErrors()` be traced to a barrier — but the `DeferredCommandError` type lives in the Commands layer, so the plan will judge the cost); the Debug flush line is the guaranteed surface. An empty/no-arg label emits no line (no diagnostic noise for unlabeled fences).
 - The `ExecutionGuard` depth semantics are unchanged (still about reentrant `Execute`); the intermediate flushes happen while `depth==1`, and the final flush still coincides with `depth` returning to 0. (The plan will confirm the guard scoping still reads cleanly with intermediate flushes; the flushes are driven by the segment loop, not the depth counter.)
 
 #### Module 5 — Determinism / backward-compat
@@ -115,6 +118,7 @@ For a **reference** param this is correct (`const Position&` → read; `Position
 - **Spawn-then-process (the core acceptance):** a segment-0 context system defers creating entities; a segment-1 system reads them via a view — after `Execute`, the segment-1 system observed the created entities **the same frame** (assert via an effect the segment-1 system records, or the final world state), which it would NOT with a single end-of-run flush.
 - **Intra-segment reorder still works** across a fence (Phase D edges within a segment reorder; a cross-segment edge does not reorder — fence dominates).
 - **Empty segment** (two consecutive `AddSyncPoint()`s, or one before any system) is a harmless no-op flush.
+- **Label diagnostic:** a `AddSyncPoint("name")` barrier emits its `"name"` in the Debug-level flush log line (capture via a log-sink with the level set to Debug/Trace, per the `LogTest`/ambiguity pattern); a no-arg `AddSyncPoint()` emits no line. Semantics (segment partition, reorder, flush) are identical labeled vs unlabeled.
 - **Determinism / backward-compat:** with no `SyncPoint`, the plan + deferred apply order are byte-identical to Phase D (the existing determinism gates stay green); a barriered schedule that defers structural changes is byte-identical across repeated runs under `TestWorkerPool`.
 - **Error channel:** a deferred error in an early segment is surfaced through `GetLastDeferredErrors()` and does not abort later segments.
 
@@ -126,7 +130,7 @@ For a **reference** param this is correct (`const Position&` → read; `Position
 
 1. **E and F bundled into one work item** — F is a small self-contained YAGNI removal orthogonal to E; per-task SDD reviews keep them separately gated.
 2. **`SyncPoint` is a FENCE** (partitions the schedule into ordered segments; reorder within a segment, never across) — the only coherent model once Phase D reorder exists; over a flush-only marker that leaves "before/after the barrier" ambiguous.
-3. **Positional no-arg `AddSyncPoint()`** — matches the positional registration model; over a named barrier or a per-system tag.
+3. **Positional `AddSyncPoint()` + an optional-label overload `AddSyncPoint(label)`** (user pick 2026-07-20) — the fence is positional either way; the label is a diagnostic aid (surfaced in a Debug-level flush log line, Module 4), not a scheduling input. Chosen over pure-positional (label adds debuggability at trivial cost) and over named-referenceable phases (a larger feature that would decouple order from registration position and need runtime name resolution + a `.Before`/`.After`-by-name builder).
 4. **Cross-segment ordering edges silently ignored** (fence dominates); a contradicting-edge Debug warn is a deferred enhancement.
 5. **Executor unchanged; the scheduler orchestrates the segment loop + between-segment flushes** — keeps `ISystemExecutor` simple.
 6. **`scheduleOrder` is segment-major** so the deferred `SortKey` primary stays monotonic with execution order and per-segment `ExecuteSorted` remains correct.
