@@ -3,6 +3,7 @@
 #include <atomic>
 #include <limits>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -13,6 +14,7 @@
 #include "../Component/Component.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/Delegate.hpp"
+#include "../Core/Log.hpp"
 #include "../Core/Result.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Registry/Registry.hpp"
@@ -26,7 +28,8 @@ namespace Astra
     {
         AlreadyRegistered,  // a system of this type is already registered
         AllocationFailed,   // nothrow allocation of the system instance failed
-        SchedulerExecuting  // registration attempted while Execute() is running
+        SchedulerExecuting, // registration attempted while Execute() is running
+        OrderingCycle       // a Before/After cycle was detected at plan build
     };
 
     class SystemScheduler
@@ -415,7 +418,20 @@ namespace Astra
             }
             return m_executionPlan;
         }
-        
+
+        // Forces a plan build if needed, then reports whether the last build hit
+        // a Before/After cycle. Ok() means the declared ordering is acyclic.
+        // (A cycle is still handled gracefully -- Execute() runs with a
+        // deterministic fallback order -- this is the explicit programmatic check.)
+        ASTRA_NODISCARD Result<void, SystemError> ValidateSchedule()
+        {
+            if (m_needsRebuild)
+                BuildExecutionPlan();
+            if (m_scheduleHadCycle)
+                return Result<void, SystemError>::Err(SystemError::OrderingCycle);
+            return Result<void, SystemError>::Ok();
+        }
+
     private:
         struct SystemEntry
         {
@@ -664,6 +680,16 @@ namespace Astra
 
                 m_executionPlan.push_back(std::move(group));
                 p = q;
+            }
+
+            if (m_scheduleHadCycle)
+            {
+                std::string msg = "SystemScheduler: Before/After ordering cycle detected and broken "
+                                  "deterministically (insertion-order fallback). Systems forced during "
+                                  "the break (by insertionOrder):";
+                for (size_t io : m_cycleMembers)
+                    msg += ' ' + std::to_string(io);
+                ASTRA_LOG_ERROR(msg);
             }
 
             m_needsRebuild = false;

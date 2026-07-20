@@ -457,3 +457,64 @@ TEST(SystemSchedulerOrdering, DisjointMaskSystemsWithoutEdgeShareGroup)
     ASSERT_EQ(plan.size(), 1u);
     EXPECT_EQ(plan[0].size(), 2u);
 }
+
+// ---- Theme B2 Phase D Task 3: cycle surfacing (ValidateSchedule + diagnostics) --
+
+namespace  // Phase D cycle systems
+{
+    struct CycA;
+    struct CycB;
+    struct CycA : Astra::SystemTraits<Astra::Writes<Position>, Astra::After<CycB>> { void operator()(Astra::Registry&) {} };
+    struct CycB : Astra::SystemTraits<Astra::Writes<Velocity>, Astra::After<CycA>> { void operator()(Astra::Registry&) {} };
+    struct AcyclicPos : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+}
+
+// A Before/After cycle is reported through ValidateSchedule(), not aborted.
+TEST(SystemSchedulerOrdering, CycleReportedViaValidateSchedule)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<CycA>().IsOk());
+    ASSERT_TRUE(s.AddSystem<CycB>().IsOk());
+    auto r = s.ValidateSchedule();
+    ASSERT_TRUE(r.IsErr());
+    EXPECT_EQ(*r.GetError(), Astra::SystemError::OrderingCycle);
+}
+
+// Despite the cycle, the broken order is deterministic (two independently-built
+// schedulers with identical registration produce the identical plan) and Execute
+// still runs without aborting.
+TEST(SystemSchedulerOrdering, CycleStillProducesDeterministicPlan)
+{
+    Astra::SystemScheduler s1;
+    ASSERT_TRUE(s1.AddSystem<CycA>().IsOk());
+    ASSERT_TRUE(s1.AddSystem<CycB>().IsOk());
+    Astra::SystemScheduler s2;
+    ASSERT_TRUE(s2.AddSystem<CycA>().IsOk());
+    ASSERT_TRUE(s2.AddSystem<CycB>().IsOk());
+    const auto plan1 = s1.GetExecutionPlan();    // copy
+    const auto plan2 = s2.GetExecutionPlan();
+    EXPECT_EQ(plan1, plan2);                      // deterministic break, independent of build instance
+    EXPECT_EQ(plan1.size(), 2u);                 // both systems present after the break
+    Astra::Registry reg;
+    EXPECT_NO_FATAL_FAILURE(s1.Execute(reg));     // does not abort
+}
+
+// No cycle => ValidateSchedule() is Ok.
+TEST(SystemSchedulerOrdering, AcyclicScheduleValidatesOk)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<AcyclicPos>().IsOk());
+    ASSERT_TRUE(s.AddSystem<OrdA>().IsOk());
+    EXPECT_TRUE(s.ValidateSchedule().IsOk());
+}
+
+// An edge to a system not registered here is ignored (no cycle, no reorder, Ok).
+TEST(SystemSchedulerOrdering, UnknownEdgeTargetIsIgnored)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<OrdB>().IsOk());   // declares After<OrdA>, but OrdA is NOT registered here
+    EXPECT_TRUE(s.ValidateSchedule().IsOk());
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0][0], 0u);
+}
