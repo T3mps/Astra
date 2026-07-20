@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <span>
 #include <vector>
 #include "../TestComponents.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
@@ -562,4 +563,42 @@ TEST_F(ArchetypeManagerTest, MoveAndAddByIDMoveOnlyComponentPreservesValue)
     Tracked* t = manager->GetComponent<Tracked>(e);
     ASSERT_NE(t, nullptr);
     EXPECT_EQ(t->value, 42);   // BUG leaves 0 (slot never constructed; chunk is zeroed)
+}
+
+// Theme G Fix 4: RemoveComponents<T> must report the true moved count, and must
+// not lose entities, when the destination archetype cannot allocate a chunk.
+TEST_F(ArchetypeManagerTest, RemoveComponentsReportsActualCountOnChunkExhaustion)
+{
+    using Astra::Test::Position;
+    using Astra::Test::Velocity;
+
+    // Pool room for root (chunk #1) + {Position,Velocity} (chunk #2) only; the
+    // remove target {Position} cannot get a 3rd chunk.
+    Astra::ArchetypeChunkPool::Config poolConfig;
+    poolConfig.chunkSize      = 4096;   // MIN_CHUNK_SIZE
+    poolConfig.chunksPerBlock = 1;
+    poolConfig.maxChunks      = 2;
+    poolConfig.useHugePages   = false;
+
+    Astra::ArchetypeManager localManager(componentRegistry, poolConfig);
+
+    std::vector<Astra::Entity> ents;
+    for (int i = 0; i < 5; ++i)
+    {
+        Astra::Entity e(300 + i, 1);
+        localManager.AddEntityWith(e, Position{1, 2, 3}, Velocity{4, 5, 6});
+        ents.push_back(e);
+    }
+    ASSERT_TRUE(localManager.HasComponent<Velocity>(ents[0]));   // src built OK (1 chunk)
+
+    // Removing Velocity needs a fresh chunk for {Position}; the pool is exhausted,
+    // so nothing actually moves.
+    std::span<Astra::Entity> span(ents.data(), ents.size());
+    size_t removed = localManager.RemoveComponents<Velocity>(span);
+
+    EXPECT_EQ(removed, 0u);   // BUG reports 5
+    for (auto e : ents)
+    {
+        EXPECT_TRUE(localManager.HasComponent<Velocity>(e));   // entities untouched in src
+    }
 }

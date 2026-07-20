@@ -361,8 +361,7 @@ namespace Astra
                 if (entityBatch.empty()) continue;
 
                 Archetype* dstArchetype = GetArchetypeWithRemoved(srcArchetype, componentId);
-                BatchMoveEntitiesWithoutComponent(srcArchetype, dstArchetype, entityBatch);
-                removedCount += entityBatch.size();
+                removedCount += BatchMoveEntitiesWithoutComponent(srcArchetype, dstArchetype, entityBatch);
             }
 
             return removedCount;
@@ -1241,7 +1240,7 @@ namespace Astra
         }
         
         template<typename PostMoveOp>
-        void BatchMoveEntitiesInternal(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch, PostMoveOp&& postMoveOp)
+        size_t BatchMoveEntitiesInternal(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch, PostMoveOp&& postMoveOp)
         {
             // Check if already sorted (common case for batch-created entities)
             bool needsSort = false;
@@ -1288,7 +1287,7 @@ namespace Astra
                 // post-move op, entity-map update, and RemoveEntities all happen
                 // below) - so bailing here leaves entityBatch exactly as it was
                 // before the call, and the batch simply remains in srcArchetype.
-                return;
+                return 0;
             }
             
             // Execute post-move operation (e.g., setting component)
@@ -1300,9 +1299,22 @@ namespace Astra
                 m_entityMap[entityBatch[i].first] = {dstArchetype, newLocations[i]};
             }
             
+            // Normally every entity is placed (dst chunks are pre-allocated to fit
+            // the whole batch). If BatchMoveEntitiesFrom ever returns a short result,
+            // remove ONLY the entities actually moved to dst -- removing all of
+            // srcLocations would drop the un-moved entities from src without ever
+            // placing them in dst (silent entity loss).
+            if (!ASTRA_ENSURE(newLocations.size() == entityBatch.size(),
+                              "BatchMoveEntitiesFrom placed fewer entities than requested")) ASTRA_UNLIKELY
+            {
+                // Diagnostic only; the prefix-limited removal below keeps the
+                // un-moved entities valid in src.
+            }
+
             // Batch remove from source (defer chunk cleanup to avoid invalidating locations)
-            auto movedEntities = srcArchetype->RemoveEntities(srcLocations, true);
-            
+            std::span<const EntityLocation> movedSrcLocations(srcLocations.data(), newLocations.size());
+            auto movedEntities = srcArchetype->RemoveEntities(movedSrcLocations, true);
+
             // Update locations of entities moved during removal
             for (const auto& [movedEntity, newLocation] : movedEntities)
             {
@@ -1312,20 +1324,22 @@ namespace Astra
                     it->second.location = newLocation;
                 }
             }
+
+            return newLocations.size();
         }
-        
+
         template<Component T, typename... Args>
-        void BatchMoveEntitiesWithComponent(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch, Args&&... args)
+        size_t BatchMoveEntitiesWithComponent(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch, Args&&... args)
         {
             // Create component value upfront and capture by value to avoid dangling reference
             // The lambda may be invoked after args go out of scope in optimized builds
             T component{std::forward<Args>(args)...};
-            BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch, [component](Archetype* dst, const std::vector<EntityLocation>& locs) { dst->SetComponents<T>(locs, component); });
+            return BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch, [component](Archetype* dst, const std::vector<EntityLocation>& locs) { dst->SetComponents<T>(locs, component); });
         }
 
-        void BatchMoveEntitiesWithoutComponent(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch)
+        size_t BatchMoveEntitiesWithoutComponent(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch)
         {
-            BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch, [](Archetype*, const std::vector<EntityLocation>&) { /* No component operation needed for removal */ });
+            return BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch, [](Archetype*, const std::vector<EntityLocation>&) { /* No component operation needed for removal */ });
         }
 
         /**
@@ -1433,11 +1447,11 @@ namespace Astra
         /**
          * Type-erased version of BatchMoveEntitiesWithComponent for CommandBuffer use.
          */
-        void BatchMoveEntitiesWithComponentByID(Archetype* srcArchetype, Archetype* dstArchetype,
+        size_t BatchMoveEntitiesWithComponentByID(Archetype* srcArchetype, Archetype* dstArchetype,
                                                 SmallVector<std::pair<Entity, EntityLocation>, 8>& entityBatch,
                                                 ComponentID componentId, const void* data, const ComponentDescriptor& desc)
         {
-            BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch,
+            return BatchMoveEntitiesInternal(srcArchetype, dstArchetype, entityBatch,
                 [componentId, data, &desc](Archetype* dst, const std::vector<EntityLocation>& locs)
                 {
                     // Set the new component for all entities at their new locations
