@@ -42,7 +42,8 @@ namespace Astra
         // must not race Execute. The counter exists to (a) make the one
         // practical mistake safe (a system, on a worker, calling Remove/Add
         // mid-frame no-ops) and (b) stay truthful under reentrant Execute.
-        // Depth returning to zero is the designated B2 command-buffer sync point.
+        // A deferred-command flush happens at EVERY SyncPoint segment boundary
+        // (Phase E); depth returning to zero is only the LAST such flush point.
         class ExecutionGuard
         {
         public:
@@ -413,12 +414,21 @@ namespace Astra
                     // size()` also means "this was not the last segment" (the
                     // last segment has no following fence). ASTRA_LOG_DEBUG is
                     // off at the default Info level -> zero production cost.
+                    //
+                    // Final-review M2: the whole block (including the message
+                    // construction) is behind this compile-time floor check, not
+                    // just the ASTRA_LOG_DEBUG call, so a labeled fence does not
+                    // heap-allocate `msg` on every flush in Release/Dist -- there
+                    // the macro compiles to nothing, so building `msg` first and
+                    // then handing it to a no-op call was pure waste.
+#if MOSAIC_ACTIVE_LEVEL <= MOSAIC_LEVEL_DEBUG
                     if (seg < m_fenceLabels.size() && !m_fenceLabels[seg].empty())
                     {
                         std::string msg = "SystemScheduler: sync point '" + m_fenceLabels[seg]
                                         + "' flushed segment " + std::to_string(seg);
                         ASTRA_LOG_DEBUG(msg);
                     }
+#endif
 
                     g = gEnd;
                 }
@@ -768,17 +778,26 @@ namespace Astra
                 auto it = m_systemIndices.Find(hash);
                 return it == m_systemIndices.end() ? UNKNOWN : it->second;
             };
-            // Rebuild the successor adjacency (same convention as ComputeScheduleOrder).
+            // Rebuild the successor adjacency (same convention as ComputeScheduleOrder,
+            // INCLUDING its same-segment filter (Phase E/final-review I1): a Before/After
+            // edge whose endpoints sit in different segments is never followed by the
+            // scheduler either, so an edge like that must not manufacture a transitive
+            // ordering path here -- otherwise this function could believe a same-segment
+            // conflicting pair is "ordered" via a path that only exists by bouncing
+            // through another segment (false negative).
             std::vector<std::vector<size_t>> succ(n);
             for (size_t s = 0; s < n; ++s)
             {
                 const auto& md = m_systems[s].metadata;
-                for (uint64_t h : md.afterIds)  { size_t t = resolve(h); if (t != UNKNOWN && t != s) succ[t].push_back(s); }
-                for (uint64_t h : md.beforeIds) { size_t t = resolve(h); if (t != UNKNOWN && t != s) succ[s].push_back(t); }
+                for (uint64_t h : md.afterIds)  { size_t t = resolve(h); if (t != UNKNOWN && t != s && m_systems[t].metadata.segmentIndex == md.segmentIndex) succ[t].push_back(s); }
+                for (uint64_t h : md.beforeIds) { size_t t = resolve(h); if (t != UNKNOWN && t != s && m_systems[t].metadata.segmentIndex == md.segmentIndex) succ[s].push_back(t); }
             }
             for (size_t a = 0; a < n; ++a)
                 for (size_t b = a + 1; b < n; ++b)
                 {
+                    // Systems in different segments are deterministically ordered by the
+                    // SyncPoint fence between them -- never ambiguous.
+                    if (m_systems[a].metadata.segmentIndex != m_systems[b].metadata.segmentIndex) continue;
                     size_t comp = 0, res = 0;
                     if (!Conflicts(m_systems[a].metadata, m_systems[b].metadata, comp, res)) continue;
                     if (OrderingReaches(a, b, succ) || OrderingReaches(b, a, succ)) continue;   // ordered
@@ -1024,7 +1043,7 @@ namespace Astra
         bool m_reportAmbiguities = false;  // opt-in ambiguity reporting (Phase D §12)
         mutable std::vector<std::vector<size_t>> m_executionPlan;       // Cached parallel groups
         mutable bool m_needsRebuild = true;                             // Whether execution plan needs rebuild
-        mutable std::atomic<int> m_executionDepth{0};                   // reentrancy-safe; ==0 is the B2 sync point
+        mutable std::atomic<int> m_executionDepth{0};                   // reentrancy-safe; each segment boundary is a sync point, ==0 is the last
 
         size_t m_currentSegment = 0;                 // segment stamped onto systems registered now (Phase E)
         std::vector<std::string> m_fenceLabels;      // label of each fence i (between segment i and i+1); "" if unlabeled

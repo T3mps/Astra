@@ -870,3 +870,97 @@ TEST(SystemSchedulerLambdaPolish, ReferenceParamLambdaStillWorks)
     s.Execute(reg);
     EXPECT_EQ(ran, 1);   // the lambda iterated the one Position entity
 }
+
+// ---- Final-review fix: ReportAmbiguities() segment-awareness (I1) ----------
+//
+// ReportAmbiguities() must agree with ComputeScheduleOrder() about what
+// "ordered" means once a SyncPoint fence exists: a pair split across
+// different segments is deterministically ordered by the fence and must
+// never be reported ambiguous, and the successor adjacency it builds for
+// transitive reachability must only follow INTRA-segment edges (mirroring
+// ComputeScheduleOrder's own filter) so it doesn't imagine an ordering path
+// that bounces through another segment.
+
+namespace  // final-review ambiguity-segment systems
+{
+    struct FenceAmbA : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct FenceAmbB : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+
+    struct FenceAmbCapture { int warnCount = 0; std::string last; };
+    inline void FenceAmbSink(const Astra::LogRecord& r, void* user) noexcept
+    {
+        if (r.level == Astra::LogLevel::Warn && std::string(r.message).find("ambiguous") != std::string::npos)
+        {
+            auto* c = static_cast<FenceAmbCapture*>(user);
+            c->warnCount++;
+            c->last = std::string(r.message);
+        }
+    }
+}
+
+// Control: two conflicting, unordered systems in the SAME segment (no fence)
+// are reported ambiguous -- this is just AmbiguityReportedForUnorderedConflict
+// again, restated here as the control half of the fenced case below.
+TEST(SystemSchedulerSyncPointAmbiguity, ConflictWithoutFenceIsAmbiguous)
+{
+    FenceAmbCapture cap;
+    Astra::Testing::ScopedLogSink guard(&FenceAmbSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // defensive: don't depend on a prior test's restore
+    Astra::SystemScheduler s;
+    s.SetAmbiguityReporting(true);
+    ASSERT_TRUE(s.AddSystem<FenceAmbA>().IsOk());
+    ASSERT_TRUE(s.AddSystem<FenceAmbB>().IsOk());   // same segment, no fence
+    (void)s.GetExecutionPlan();
+    EXPECT_EQ(cap.warnCount, 1);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
+}
+
+// I1 regression lock: the SAME two conflicting systems, but with a SyncPoint
+// between them, must NOT be reported ambiguous -- they are deterministically
+// ordered by the fence (different segments), even though neither declares an
+// explicit Before/After edge. Before the fix, ReportAmbiguities() was
+// segment-unaware and warned here (false positive).
+TEST(SystemSchedulerSyncPointAmbiguity, ConflictAcrossFenceIsNotAmbiguous)
+{
+    FenceAmbCapture cap;
+    Astra::Testing::ScopedLogSink guard(&FenceAmbSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // defensive: don't depend on a prior test's restore
+    Astra::SystemScheduler s;
+    s.SetAmbiguityReporting(true);
+    ASSERT_TRUE(s.AddSystem<FenceAmbA>().IsOk());   // segment 0
+    ASSERT_TRUE(s.AddSyncPoint().IsOk());
+    ASSERT_TRUE(s.AddSystem<FenceAmbB>().IsOk());   // segment 1
+    (void)s.GetExecutionPlan();
+    EXPECT_EQ(cap.warnCount, 0);
+    Astra::SetLogLevel(Astra::LogLevel::Info);  // restore documented default for other tests
+}
+
+namespace  // final-review cross-segment-edge-is-ignored systems
+{
+    struct FenceOrdTarget;
+    // Before<FenceOrdTarget>, declared on a system registered AFTER a fence
+    // that separates it from FenceOrdTarget. If the cross-segment edge were
+    // honored (it must not be), this would pull FenceOrdEarlier ahead of
+    // FenceOrdTarget despite FenceOrdTarget being in the earlier segment.
+    struct FenceOrdTarget : Astra::SystemTraits<Astra::Writes<Position>> { void operator()(Astra::Registry&) {} };
+    struct FenceOrdEarlier : Astra::SystemTraits<Astra::Writes<Position>, Astra::Before<FenceOrdTarget>> { void operator()(Astra::Registry&) {} };
+}
+
+// A cross-segment Before/After edge is IGNORED (not merely inert): the
+// resulting schedule/execution-plan order follows the fence (segment) order,
+// not the edge. FenceOrdTarget is registered first (segment 0);
+// FenceOrdEarlier is registered after a SyncPoint (segment 1) and declares
+// Before<FenceOrdTarget>, which -- absent the cross-segment filter -- would
+// force it ahead of FenceOrdTarget. With the filter, FenceOrdTarget (segment
+// 0) must still run first.
+TEST(SystemSchedulerSyncPointAmbiguity, CrossSegmentOrderingEdgeIsIgnored)
+{
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<FenceOrdTarget>().IsOk());    // index 0, segment 0
+    ASSERT_TRUE(s.AddSyncPoint().IsOk());
+    ASSERT_TRUE(s.AddSystem<FenceOrdEarlier>().IsOk());   // index 1, segment 1, Before<FenceOrdTarget>
+    const auto& plan = s.GetExecutionPlan();
+    ASSERT_EQ(plan.size(), 2u);                // never grouped across the fence either way
+    EXPECT_EQ(plan[0][0], 0u);                 // FenceOrdTarget (segment 0) still runs first
+    EXPECT_EQ(plan[1][0], 1u);                 // FenceOrdEarlier (segment 1) still runs second
+}
