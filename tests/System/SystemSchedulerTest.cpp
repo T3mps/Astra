@@ -780,3 +780,78 @@ TEST(SystemSchedulerSyncPoint, DeferredSpawnsVisibleAfterFenceSameFrame)
     s.Execute(reg);
     EXPECT_EQ(g_syncSeenCount, 3);                     // counter saw the 3 spawned entities
 }
+
+// ---- Phase E Task 3: label diagnostic + determinism/backward-compat gate ----
+
+namespace  // Phase E label + determinism
+{
+    struct LblSpawn : Astra::SystemTraits<Astra::Exclusive>
+    {
+        void operator()(Astra::SystemContext& ctx)
+        {
+            auto e = ctx.Commands().CreateEntity();
+            ctx.Commands().AddComponent<Position>(e, Position{});
+        }
+    };
+    struct LblNoop : Astra::SystemTraits<Astra::Exclusive> { void operator()(Astra::Registry&) {} };
+
+    struct LblCapture { int debugWithLabel = 0; };
+    inline void LblSink(const Astra::LogRecord& r, void* user) noexcept
+    {
+        if (r.level == Astra::LogLevel::Debug &&
+            std::string(r.message).find("post-spawn") != std::string::npos)
+            static_cast<LblCapture*>(user)->debugWithLabel++;
+    }
+}
+
+// A labeled SyncPoint emits its label in a Debug-level flush log line.
+//
+// Compile-time-floor note: ASTRA_LOG_DEBUG (Core/Log.hpp -> vendor Mosaic/Log.hpp)
+// is gated by MOSAIC_ACTIVE_LEVEL, which defaults to MOSAIC_LEVEL_TRACE when NDEBUG
+// is undefined (this project's Debug config) and MOSAIC_LEVEL_INFO when NDEBUG IS
+// defined (this project's Release/Dist configs -- see premake5.lua). So in Debug the
+// label line is compiled in and reaches the sink once SetLogLevel(Debug) is in
+// effect; in Release/Dist the ASTRA_LOG_DEBUG call site is stripped to nothing at
+// compile time (MOSAIC_DETAIL_LOG_DISABLED) regardless of the runtime level, so the
+// sink can never see it. Assert both sides of that split instead of only the
+// Debug-config-happy path, so this stays a real regression guard in all 3 configs.
+TEST(SystemSchedulerSyncPoint, LabeledFenceEmitsDebugLogLine)
+{
+    LblCapture cap;
+    Astra::Testing::ScopedLogSink guard(&LblSink, &cap);
+    Astra::SetLogLevel(Astra::LogLevel::Debug);   // Debug lines are off by default
+    Astra::Registry reg;
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<LblSpawn>().IsOk());
+    ASSERT_TRUE(s.AddSyncPoint("post-spawn").IsOk());
+    ASSERT_TRUE(s.AddSystem<LblNoop>().IsOk());
+    s.Execute(reg);
+    Astra::SetLogLevel(Astra::LogLevel::Info);     // restore documented default
+#if MOSAIC_ACTIVE_LEVEL <= MOSAIC_LEVEL_DEBUG
+    EXPECT_GE(cap.debugWithLabel, 1);   // Debug config: floor keeps ASTRA_LOG_DEBUG live
+#else
+    EXPECT_EQ(cap.debugWithLabel, 0);   // Release/Dist: floor strips ASTRA_LOG_DEBUG at compile time
+#endif
+}
+
+// A barriered schedule that defers structural changes is deterministic across runs.
+TEST(SystemSchedulerSyncPoint, BarrieredDeferredScheduleIsDeterministic)
+{
+    auto run = []{
+        Astra::Registry reg;
+        Astra::SystemScheduler s;
+        (void)s.AddSystem<LblSpawn>();       // segment 0 defers a create
+        (void)s.AddSyncPoint();
+        (void)s.AddSystem<LblNoop>();        // segment 1
+        s.Execute(reg);
+        // observable: final Position-entity count is stable
+        int n = 0;
+        auto v = reg.CreateView<Position>();
+        v.ForEach([&](Astra::Entity, Position&){ ++n; });
+        return n;
+    };
+    const int oracle = run();
+    EXPECT_EQ(oracle, 1);
+    for (int i = 0; i < 20; ++i)
+        EXPECT_EQ(run(), oracle);
+}

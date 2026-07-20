@@ -405,6 +405,21 @@ namespace Astra
                     // ExecuteSorted's internals never changing.
                     m_commandBuffer->Clear();
 
+                    // Task 3: if the fence that just flushed this segment was
+                    // labeled, surface that label in a Debug-level log line.
+                    // Fence `seg` sits between segment `seg` and `seg + 1`, so
+                    // it's the fence THIS flush corresponds to; m_fenceLabels.
+                    // size() == m_currentSegment, so `seg < m_fenceLabels.
+                    // size()` also means "this was not the last segment" (the
+                    // last segment has no following fence). ASTRA_LOG_DEBUG is
+                    // off at the default Info level -> zero production cost.
+                    if (seg < m_fenceLabels.size() && !m_fenceLabels[seg].empty())
+                    {
+                        std::string msg = "SystemScheduler: sync point '" + m_fenceLabels[seg]
+                                        + "' flushed segment " + std::to_string(seg);
+                        ASTRA_LOG_DEBUG(msg);
+                    }
+
                     g = gEnd;
                 }
 
