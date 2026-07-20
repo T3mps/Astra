@@ -519,3 +519,24 @@ TEST_F(ArchetypeManagerTest, DuplicateComponentAddition)
     EXPECT_EQ(original->y, 2.0f);
     EXPECT_EQ(original->z, 3.0f);
 }
+
+// Theme G Fix 1: swap-and-pop removal must destruct the moved-from source slot.
+TEST_F(ArchetypeManagerTest, RemoveEntityDestructsMovedFromSourceSlot)
+{
+    using Astra::Test::Tracked;
+    componentRegistry->RegisterComponents<Tracked>();
+    Tracked::s_live = 0;
+
+    Astra::Entity e0(200, 1), e1(201, 1), e2(202, 1);
+    manager->AddEntityWith(e0, Tracked{10});
+    manager->AddEntityWith(e1, Tracked{11});
+    manager->AddEntityWith(e2, Tracked{12});
+    ASSERT_EQ(Tracked::s_live, 3);
+
+    // Remove the first (non-tail) entity: swap-and-pop moves e2's Tracked into
+    // slot 0, leaving the last slot as a moved-from object that must be destructed.
+    manager->RemoveEntity(e0);
+
+    EXPECT_EQ(Tracked::s_live, 2);   // BUG leaves 3 (moved-from source slot never destructed)
+    EXPECT_EQ(manager->GetComponent<Tracked>(e2)->value, 12);
+}

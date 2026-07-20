@@ -293,6 +293,35 @@ namespace Astra::Test
         }
     };
     
+    // 17. Move-only, lifetime-counted component (Theme G leak accounting).
+    //     s_live == number of live instances; a skipped destructor leaves it high.
+    struct Tracked
+    {
+        static inline int s_live = 0;
+        int value = 0;
+
+        Tracked() { ++s_live; }
+        explicit Tracked(int v) : value(v) { ++s_live; }
+        Tracked(Tracked&& o) noexcept : value(o.value) { ++s_live; }
+        Tracked& operator=(Tracked&& o) noexcept { value = o.value; return *this; }
+        ~Tracked() { --s_live; }
+
+        Tracked(const Tracked&) = delete;
+        Tracked& operator=(const Tracked&) = delete;
+
+        // Serialization support. Required for ComponentRegistry::RegisterComponents<Tracked>
+        // to compile: Tracked is neither trivially copyable nor otherwise matched by any
+        // BinaryWriter/BinaryReader built-in overload, and RegisterComponentImpl takes the
+        // address of Serialize<T>/Deserialize<T> unconditionally (odr-use forces
+        // instantiation even though this test never calls Save/Load). Mirrors Resource's
+        // Serialize method above.
+        template<typename Archive>
+        void Serialize(Archive& ar)
+        {
+            ar(value);
+        }
+    };
+
     // Helper type traits for testing
     template<typename T>
     struct ComponentTraits
@@ -321,11 +350,13 @@ namespace Astra::Test
     static_assert(Component<Hierarchy>, "Hierarchy must satisfy Component concept");
     static_assert(Component<Metadata>, "Metadata must satisfy Component concept");
     static_assert(Component<Damage>, "Damage must satisfy Component concept");
-    
+    static_assert(Component<Tracked>, "Tracked must satisfy Component concept");
+
     // Additional validation for specific properties we care about in tests
     static_assert(std::is_trivially_copyable_v<Position>, "Position should be trivially copyable");
     static_assert(!std::is_trivially_copyable_v<Name>, "Name should not be trivially copyable");
     static_assert(!std::is_copy_constructible_v<Resource>, "Resource should be move-only");
+    static_assert(!std::is_copy_constructible_v<Tracked>, "Tracked should be move-only");
     static_assert(std::is_empty_v<Player> && std::is_empty_v<Enemy> && std::is_empty_v<Static>, "Tag components should be empty");
     static_assert(alignof(RenderData) == 32, "RenderData should be 32-byte aligned");
     

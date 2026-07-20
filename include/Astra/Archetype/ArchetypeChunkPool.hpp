@@ -150,10 +150,16 @@ namespace Astra
                 }
                 else
                 {
-                    // For rvalues, we need temporary storage
+                    // For rvalues, we need temporary storage. Move (not ConstructWith/copy)
+                    // out of temp: it is a genuine local about to be destroyed regardless, and
+                    // moveConstruct is set unconditionally for every Component (move-constructible
+                    // is part of the concept), unlike constructWith/copyConstruct which are null
+                    // for move-only types -- ConstructWith would silently fall back to
+                    // DefaultConstruct for those, discarding the value (Theme G, found while
+                    // wiring the move-only Tracked test component through this path).
                     using DecayedType = std::decay_t<T>;
                     DecayedType temp(std::forward<T>(value));
-                    info.descriptor.ConstructWith(ptr, &temp);
+                    info.descriptor.MoveConstruct(ptr, &temp);
                 }
             }
             
@@ -367,9 +373,11 @@ namespace Astra
                         void* dstPtr = static_cast<std::byte*>(info.base) + index * info.stride;
                         void* srcPtr = static_cast<std::byte*>(info.base) + lastIndex * info.stride;
 
-                        // Destruct destination, move from source
+                        // Destruct destination, move from source, then destruct the
+                        // moved-from source slot (mirrors Archetype::MoveEntitiesBetweenChunks).
                         info.descriptor.Destruct(dstPtr);
                         info.descriptor.MoveConstruct(dstPtr, srcPtr);
+                        info.descriptor.Destruct(srcPtr);
                     }
                 }
                 else
