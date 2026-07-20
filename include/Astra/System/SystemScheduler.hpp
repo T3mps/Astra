@@ -313,8 +313,9 @@ namespace Astra
             // buffers -- flush every recorded deferred command, across every
             // worker buffer, in deterministic SortKey order. Determinism
             // holds because SystemContext::Commands() stamps every command
-            // with {this system's unique insertionOrder, 0, a per-system
-            // monotonic recordSequence} -- see ParallelCommandBuffer::
+            // with {this system's unique scheduleOrder (== insertionOrder
+            // absent Before/After edges), 0, a per-system monotonic
+            // recordSequence} -- see ParallelCommandBuffer::
             // ExecuteSorted()'s documented precondition.
             auto flushResult = m_commandBuffer->ExecuteSorted();
             // Task 4: surface this flush's deferred-command errors (commands

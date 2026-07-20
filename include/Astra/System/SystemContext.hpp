@@ -33,6 +33,11 @@ namespace Astra
     class SystemContext
     {
     public:
+        /**
+         * NOTE: the `insertionOrder` parameter name is historical -- callers
+         * now conventionally pass the caller's schedule-order sort rank (see
+         * Commands() below); renaming the parameter is a tracked follow-up.
+         */
         SystemContext(Registry& reg, CommandBuffer& cmds, uint32_t insertionOrder) noexcept
             : SystemContext(reg, cmds, insertionOrder, 0u, nullptr) {}
 
@@ -55,9 +60,11 @@ namespace Astra
         /**
          * The per-worker deferred-command recorder for this system. Every
          * call re-stamps the buffer's sticky SortKey with this system's
-         * insertionOrder and the next recordSequence, so ANY command the
-         * caller records immediately after (DestroyEntity, AddComponent,
-         * ...) carries this call's key -- see class docs above.
+         * schedule-order sort rank (its scheduleOrder, which equals
+         * insertionOrder absent Before/After edges) and the next
+         * recordSequence, so ANY command the caller records immediately
+         * after (DestroyEntity, AddComponent, ...) carries this call's key
+         * -- see class docs above.
          *
          * Thread-safety note: CommandBuffer::AddComponent<T> registers T
          * with the Registry's ComponentRegistry at record time, which is
