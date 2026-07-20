@@ -8,7 +8,7 @@ workspace "Astra"
     
     IncludeDir = {}
     IncludeDir["Astra"] = "include"
-    IncludeDir["Mosaic"] = "ThirdParty/Mosaic/include"
+    IncludeDir["Mosaic"] = "vendor/Mosaic/include"
     IncludeDir["GoogleTest"] = "vendor/GoogleTest/googletest/include"
     IncludeDir["GoogleMock"] = "vendor/GoogleTest/googlemock/include"
     IncludeDir["GoogleBenchmark"] = "vendor/GoogleBenchmark/include"
