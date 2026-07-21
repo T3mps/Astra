@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <new>
 #include <type_traits>
 #include <utility>
 
@@ -121,7 +122,7 @@ namespace Astra
             clear();
             if (!IsSmall())
             {
-                ::operator delete(m_data);
+                Deallocate(m_data);
             }
         }
         
@@ -142,7 +143,7 @@ namespace Astra
                 clear();
                 if (!IsSmall())
                 {
-                    ::operator delete(m_data);
+                    Deallocate(m_data);
                 }
 
                 if (other.IsSmall())
@@ -299,18 +300,18 @@ namespace Astra
                 T* heapData = m_data;
                 std::uninitialized_move(heapData, heapData + m_size, GetBuffer());
                 std::destroy(heapData, heapData + m_size);
-                ::operator delete(heapData);
-                
+                Deallocate(heapData);
+
                 m_data = GetBuffer();
                 m_capacity = N;
             }
             else if (m_size < capacity())
             {
                 // Reallocate to exact size
-                T* newData = static_cast<T*>(::operator new(m_size * sizeof(T)));
+                T* newData = Allocate(m_size);
                 std::uninitialized_move(begin(), end(), newData);
                 std::destroy(begin(), end());
-                ::operator delete(m_data);
+                Deallocate(m_data);
                 
                 m_data = newData;
                 m_capacity = m_size;
@@ -575,24 +576,41 @@ namespace Astra
         {
             return m_data == reinterpret_cast<const T*>(m_buffer);
         }
-        
+
+        // Allocate/deallocate heap storage honoring alignof(T) for over-aligned T
+        static T* Allocate(size_type count)
+        {
+            if constexpr (alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+                return static_cast<T*>(::operator new(count * sizeof(T), std::align_val_t{alignof(T)}));
+            else
+                return static_cast<T*>(::operator new(count * sizeof(T)));
+        }
+
+        static void Deallocate(T* ptr) noexcept
+        {
+            if constexpr (alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+                ::operator delete(ptr, std::align_val_t{alignof(T)});
+            else
+                ::operator delete(ptr);
+        }
+
         // Grow capacity
         void Grow(size_type newCap)
         {
             newCap = std::max(newCap, std::max<size_type>(capacity() * 2, 4));
             
-            T* newData = static_cast<T*>(::operator new(newCap * sizeof(T)));
-            
+            T* newData = Allocate(newCap);
+
             // Move existing elements
             std::uninitialized_move(begin(), end(), newData);
-            
+
             // Destroy old elements
             std::destroy(begin(), end());
-            
+
             // Free old memory if on heap
             if (!IsSmall())
             {
-                ::operator delete(m_data);
+                Deallocate(m_data);
             }
             
             // Update to new allocation

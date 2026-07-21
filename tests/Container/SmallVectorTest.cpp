@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <gtest/gtest.h>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -808,4 +811,28 @@ TEST_F(SmallVectorTest, SelfAliasingNoLeakOrDoubleFree)
         EXPECT_GT(AliasProbe::liveCount, 0);
     }
     EXPECT_EQ(AliasProbe::liveCount, 0);      // every construction matched by a destruction
+}
+
+namespace
+{
+    struct alignas(64) Over64 { std::byte pad[64]; };
+}
+
+// Theme D2: SmallVector heap storage must honor alignof(T) for over-aligned T.
+// The bug (plain ::operator new) yields only __STDCPP_DEFAULT_NEW_ALIGNMENT__ (16),
+// so a spilled buffer is usually mis-aligned; 32 independent spilled vectors make a
+// coincidental all-64-aligned RED astronomically unlikely.
+TEST_F(SmallVectorTest, OverAlignedHeapStorageIsAligned)
+{
+    constexpr int kInstances = 32;
+    std::vector<std::unique_ptr<Astra::SmallVector<Over64, 2>>> keep;
+    for (int i = 0; i < kInstances; ++i)
+    {
+        auto v = std::make_unique<Astra::SmallVector<Over64, 2>>();
+        for (int j = 0; j < 8; ++j)   // > inline capacity (2) -> spills to heap
+            v->push_back(Over64{});
+        ASSERT_GT(v->capacity(), 2u); // confirm it is on the heap
+        EXPECT_EQ(reinterpret_cast<std::uintptr_t>(v->data()) % alignof(Over64), 0u);
+        keep.push_back(std::move(v)); // keep alive so allocations don't get reused
+    }
 }
