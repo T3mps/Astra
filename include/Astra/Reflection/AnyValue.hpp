@@ -21,7 +21,9 @@ namespace Astra
     // larger/over-aligned types spill to an aligned heap block. The manager is a per-type
     // function-pointer vtable (destroy/copy/move) -- no runtime type queries of any kind.
     // Astra is exception-free, so constructors are assumed non-throwing (a throwing ctor /
-    // bad_alloc terminates, as everywhere in Astra).
+    // bad_alloc terminates, as everywhere in Astra). The converting constructor is
+    // deliberately explicit (unlike std::any's implicit one) -- all call sites construct
+    // explicitly, so this only rules out silent conversions.
     class AnyValue
     {
     public:
@@ -132,7 +134,7 @@ namespace Astra
             }
             ::new (storage) T(std::forward<Arg>(arg));
             m_typeHash = TypeID<T>::Hash();
-            m_vtable = VTableFor<T>();      // set last: a hypothetical throw leaves us empty-safe
+            m_vtable = VTableFor<T>();      // set last: keeps a partial box destructible-safe (m_vtable null). A ctor throw is unreachable (Astra terminates on throw); on the heap branch it would leak, not corrupt.
         }
 
         void CopyFrom(const AnyValue& other)

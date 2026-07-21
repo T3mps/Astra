@@ -127,6 +127,7 @@ namespace Astra
         static_assert(TotalBits == 16 || TotalBits == 32 || TotalBits == 64, "Only 16, 32 or 64 bit variants supported");
         static_assert(VersionBits < TotalBits, "Version bits must be less than total bits");
         static_assert(VersionBits >= 1, "Version bits must be at least 1");
+        static_assert(VersionBits <= 32, "Version bits cannot exceed 32 (VersionType tops out at uint32_t)");
 
         using StorageType = std::conditional_t<TotalBits == 16, std::uint16_t,
                                 std::conditional_t<TotalBits == 32, std::uint32_t, std::uint64_t>>;
