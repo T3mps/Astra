@@ -495,7 +495,7 @@ namespace Astra
                         auto& chunks = record->archetype->GetChunks();
                         if (record->location.GetChunkIndex() < chunks.size())
                         {
-                            void* actualPtr;
+                            void* actualPtr = nullptr;
                             if (desc->size == 0)
                             {
                                 actualPtr = EmptyComponentSentinel();  // present tag: no data

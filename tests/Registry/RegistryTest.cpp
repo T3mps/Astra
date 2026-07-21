@@ -650,11 +650,14 @@ TEST_F(RegistryTest, ByIdTagEmitsAddAndRemoveSignals)
 
     // Add the tag through the type-erased path (data=nullptr, dataSize=0 for a tag).
     ASSERT_TRUE(registry->AddComponentByID(e, Astra::TypeID<Player>::Value(), nullptr, 0));
-    EXPECT_NE(addedPtr, nullptr);   // BUG: stays null (signal dropped for the tag)
+    // Pre-fix: the tag-Add signal is dropped, so addedPtr still holds the Position pointer
+    // captured during CreateEntityWith above (!= sentinel) -> RED. Post-fix: the tag-Add
+    // emits the shared sentinel. Asserting equality to the sentinel pins the contract.
+    EXPECT_EQ(addedPtr, Astra::EmptyComponentSentinel());
 
     ASSERT_TRUE(registry->RemoveComponentByID(e, Astra::TypeID<Player>::Value()));
     EXPECT_TRUE(removedFired);       // BUG: never fires
-    EXPECT_NE(removedPtr, nullptr);
+    EXPECT_EQ(removedPtr, Astra::EmptyComponentSentinel());
 
     signals->On<Astra::Events::ComponentAdded>().Unregister(ha);
     signals->On<Astra::Events::ComponentRemoved>().Unregister(hr);
