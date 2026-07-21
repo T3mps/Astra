@@ -45,10 +45,15 @@ namespace Astra
             m_lastRefreshCounter(0),
             m_lastGeneration(0)
         {
-            CollectArchetypes();
-            m_lastRefreshCounter = m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
-            m_lastGeneration = m_archetypeManager->m_generation;
-            m_lastRemovalCounter = m_archetypeManager->m_archetypeRemovalCounter.load(std::memory_order_acquire);
+            if (manager)
+            {
+                CollectArchetypes();
+                m_lastRefreshCounter = m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
+                m_lastGeneration = m_archetypeManager->m_generation;
+                m_lastRemovalCounter = m_archetypeManager->m_archetypeRemovalCounter.load(std::memory_order_acquire);
+            }
+            // else: null manager -> empty/invalid view; all m_last* counters keep their
+            // default-initialized 0 (View.hpp member initializers).
         }
         
         /**

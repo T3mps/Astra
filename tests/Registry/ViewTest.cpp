@@ -462,3 +462,17 @@ TEST_F(ViewTest, ForEachNoStructuralMutationDoesNotTripReentrancyGuard)
     });
     EXPECT_EQ(afterCount, 0u);
 }
+
+// Theme J Fix 4: constructing a View over a null manager must not crash.
+TEST_F(ViewTest, NullManagerViewIsEmptyNotCrash)
+{
+    using namespace Astra::Test;
+
+    Astra::View<Position> nullView(nullptr);
+
+    EXPECT_FALSE(nullView.IsValid());
+
+    int n = 0;
+    nullView.ForEach([&](Astra::Entity, Position&) { ++n; });
+    EXPECT_EQ(n, 0);
+}
