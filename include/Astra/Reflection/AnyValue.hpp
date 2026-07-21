@@ -12,15 +12,16 @@
 namespace Astra
 {
     // Type-erased, RTTI-free single-value box tagged by Astra TypeID::Hash().
-    // Replaces std::any on the reflection dynamic path so reflection builds and runs
-    // with RTTI disabled -- deterministically, and correctly across DSO/DLL boundaries
-    // (a stable name-hash tag, unlike std::any's manager-pointer / typeid identity that
-    // -fno-rtti compiles out). Value semantics; a wrong-T TryCast returns nullptr (never
-    // UB, never throws). SBO keeps common reflected field types (int/float/Vec3/Vec4/
-    // pointer) allocation-free; larger/over-aligned types spill to an aligned heap block.
-    // The manager is a per-type function-pointer vtable (destroy/copy/move) -- no
-    // typeid, no std::type_info. Astra is exception-free, so constructors are assumed
-    // non-throwing (a throwing ctor / bad_alloc terminates, as everywhere in Astra).
+    // Replaces the standard library's type-erased any container on the reflection
+    // dynamic path so reflection builds and runs with RTTI disabled -- deterministically,
+    // and correctly across DSO/DLL boundaries (a stable name-hash tag, unlike that
+    // container's manager-pointer / runtime-type identity that -fno-rtti compiles out).
+    // Value semantics; a wrong-T TryCast returns nullptr (never UB, never throws). SBO
+    // keeps common reflected field types (int/float/Vec3/Vec4/pointer) allocation-free;
+    // larger/over-aligned types spill to an aligned heap block. The manager is a per-type
+    // function-pointer vtable (destroy/copy/move) -- no runtime type queries of any kind.
+    // Astra is exception-free, so constructors are assumed non-throwing (a throwing ctor /
+    // bad_alloc terminates, as everywhere in Astra).
     class AnyValue
     {
     public:

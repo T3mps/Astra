@@ -236,12 +236,12 @@ TEST_F(ReflectionTest, FieldGetSetAny)
     ASSERT_NE(zField, nullptr);
 
     // Get as any
-    std::any zAny = zField->GetAny(&pos);
-    ASSERT_TRUE(zAny.has_value());
-    EXPECT_FLOAT_EQ(std::any_cast<float>(zAny), 3.0f);
+    Astra::AnyValue zAny = zField->GetAny(&pos);
+    ASSERT_NE(zAny.TryCast<float>(), nullptr);
+    EXPECT_FLOAT_EQ(*zAny.TryCast<float>(), 3.0f);
 
     // Set from any
-    bool success = zField->SetAny(&pos, std::any(300.0f));
+    bool success = zField->SetAny(&pos, Astra::AnyValue(300.0f));
     EXPECT_TRUE(success);
     EXPECT_FLOAT_EQ(pos.z, 300.0f);
 }
@@ -940,8 +940,8 @@ TEST_F(ReflectionTest, FullInspectionWorkflow)
             (void)readOnly;  // Just verifying it compiles and runs
 
             // Get field value through reflection
-            std::any value = field.GetAny(info.data);
-            EXPECT_TRUE(value.has_value());
+            Astra::AnyValue value = field.GetAny(info.data);
+            EXPECT_TRUE(value.HasValue());
         });
     }
 }

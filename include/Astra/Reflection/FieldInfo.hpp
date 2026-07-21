@@ -1,6 +1,5 @@
 #pragma once
 
-#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -11,6 +10,7 @@
 
 #include "../Core/Base.hpp"
 #include "../Core/TypeID.hpp"
+#include "AnyValue.hpp"
 #include "Attribute.hpp"
 
 namespace Astra
@@ -50,11 +50,11 @@ namespace Astra
         // Setter: copies value from input buffer to instance field
         std::function<void(void* instance, const void* inValue)> setter;
 
-        // Getter returning std::any for dynamic type handling
-        std::function<std::any(const void* instance)> getterAny;
+        // Getter returning AnyValue for dynamic (type-erased, RTTI-free) handling
+        std::function<AnyValue(const void* instance)> getterAny;
 
-        // Setter accepting std::any for dynamic type handling
-        std::function<bool(void* instance, const std::any& value)> setterAny;
+        // Setter accepting AnyValue for dynamic (type-erased, RTTI-free) handling
+        std::function<bool(void* instance, const AnyValue& value)> setterAny;
 
         // Attributes attached to this field
         std::vector<const Attribute*> attributes;
@@ -144,26 +144,26 @@ namespace Astra
         }
 
         /**
-         * Gets the field value as std::any for dynamic handling.
+         * Gets the field value as AnyValue for dynamic handling.
          * @param instance Pointer to the containing struct instance
-         * @return The field value wrapped in std::any
+         * @return The field value wrapped in AnyValue
          */
-        ASTRA_NODISCARD std::any GetAny(const void* instance) const
+        ASTRA_NODISCARD AnyValue GetAny(const void* instance) const
         {
             if (getterAny)
             {
                 return getterAny(instance);
             }
-            return std::any{};
+            return AnyValue{};
         }
 
         /**
-         * Sets the field value from std::any for dynamic handling.
+         * Sets the field value from AnyValue for dynamic handling.
          * @param instance Pointer to the containing struct instance
          * @param value The value to set
          * @return true if the value was set successfully, false on type mismatch
          */
-        bool SetAny(void* instance, const std::any& value) const
+        bool SetAny(void* instance, const AnyValue& value) const
         {
             if (isConst || !setterAny)
             {
@@ -382,17 +382,17 @@ namespace Astra
                 };
             }
 
-            // std::any getter
-            info.getterAny = [](const void* instance) -> std::any {
+            // AnyValue getter (RTTI-free)
+            info.getterAny = [](const void* instance) -> AnyValue {
                 const Class* obj = static_cast<const Class*>(instance);
-                return std::any(obj->*FieldPtr);
+                return AnyValue(obj->*FieldPtr);
             };
 
-            // std::any setter (uses pointer overload to avoid exceptions)
+            // AnyValue setter (TryCast returns null on type mismatch -- never throws)
             if constexpr (!std::is_const_v<FieldType>)
             {
-                info.setterAny = [](void* instance, const std::any& value) -> bool {
-                    const DecayedType* ptr = std::any_cast<DecayedType>(&value);
+                info.setterAny = [](void* instance, const AnyValue& value) -> bool {
+                    const DecayedType* ptr = value.TryCast<DecayedType>();
                     if (!ptr)
                     {
                         return false;

@@ -12,6 +12,7 @@
 #include "../Container/FlatMap.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/TypeID.hpp"
+#include "AnyValue.hpp"
 #include "Attribute.hpp"
 #include "EnumInfo.hpp"
 #include "FieldInfo.hpp"
@@ -199,29 +200,29 @@ namespace Astra
         }
 
         /**
-         * Gets a field value as std::any by name.
+         * Gets a field value as AnyValue by name.
          * @param instance Pointer to the instance
          * @param fieldName Name of the field
-         * @return The field value wrapped in std::any, or empty any if not found
+         * @return The field value wrapped in AnyValue, or empty AnyValue if not found
          */
-        ASTRA_NODISCARD std::any GetFieldValueAny(const void* instance, std::string_view fieldName) const
+        ASTRA_NODISCARD AnyValue GetFieldValueAny(const void* instance, std::string_view fieldName) const
         {
             const FieldInfo* field = GetField(fieldName);
             if (!field)
             {
-                return std::any{};
+                return AnyValue{};
             }
             return field->GetAny(instance);
         }
 
         /**
-         * Sets a field value from std::any by name.
+         * Sets a field value from AnyValue by name.
          * @param instance Pointer to the instance
          * @param fieldName Name of the field
          * @param value Value to set
          * @return true if the value was set successfully
          */
-        bool SetFieldValueAny(void* instance, std::string_view fieldName, const std::any& value) const
+        bool SetFieldValueAny(void* instance, std::string_view fieldName, const AnyValue& value) const
         {
             const FieldInfo* field = GetField(fieldName);
             if (!field)

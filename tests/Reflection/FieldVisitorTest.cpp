@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <Astra/Component/ComponentRegistry.hpp>
+#include <Astra/Reflection/AnyValue.hpp>
 #include <Astra/Reflection/Reflection.hpp>
 #include <Astra/Reflection/FieldVisitor.hpp>
 
-#include <any>
 #include <map>
 #include <string>
 #include <vector>
@@ -38,8 +38,8 @@ namespace
     class MapWriteVisitor : public Astra::IFieldVisitor
     {
     public:
-        std::map<std::string, std::any>& out;
-        explicit MapWriteVisitor(std::map<std::string, std::any>& o) : out(o) {}
+        std::map<std::string, Astra::AnyValue>& out;
+        explicit MapWriteVisitor(std::map<std::string, Astra::AnyValue>& o) : out(o) {}
         void Visit(const Astra::FieldInfo& field, void* instance) override
         {
             out[std::string(field.name)] = field.GetAny(instance);
@@ -50,8 +50,8 @@ namespace
     class MapReadVisitor : public Astra::IFieldVisitor
     {
     public:
-        const std::map<std::string, std::any>& in;
-        explicit MapReadVisitor(const std::map<std::string, std::any>& i) : in(i) {}
+        const std::map<std::string, Astra::AnyValue>& in;
+        explicit MapReadVisitor(const std::map<std::string, Astra::AnyValue>& i) : in(i) {}
         void Visit(const Astra::FieldInfo& field, void* instance) override
         {
             auto it = in.find(std::string(field.name));
@@ -98,7 +98,7 @@ TEST(FieldVisitor, RoundTripsThroughAFormatAgnosticMap)
     Stats a{};
     a.hp = 42; a.speed = 3.5f; a.dead = true; a.derived = 99;
 
-    std::map<std::string, std::any> blob;
+    std::map<std::string, Astra::AnyValue> blob;
     MapWriteVisitor w(blob);
     desc->visitFields(&a, w);
 
