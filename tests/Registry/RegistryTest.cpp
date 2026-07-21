@@ -522,26 +522,31 @@ TEST_F(RegistryTest, EntityRecycling)
     EXPECT_TRUE(registry->IsValid(second));
 }
 
-// Test copy constructor
-TEST_F(RegistryTest, CopyConstructor)
+// Theme J Fix 2: Registry is non-copyable; component registrations are shared explicitly.
+TEST_F(RegistryTest, SharesComponentRegistryNotState)
 {
     using namespace Astra::Test;
-    
-    // Add some components to original registry
-    registry->GetComponentRegistry()->RegisterComponents<Position, Velocity>();
-    
-    // Create copy
+
+    static_assert(!std::is_copy_constructible_v<Astra::Registry>, "Registry must be non-copyable");
+    static_assert(!std::is_copy_assignable_v<Astra::Registry>, "Registry must be non-copy-assignable");
+
+    // Original has an entity; a shared-registry world must NOT inherit its state.
+    Astra::Entity original = registry->CreateEntityWith(Position{9.0f, 0.0f, 0.0f});
+    ASSERT_TRUE(registry->IsValid(original));
+
     Astra::Registry::Config config;
-    Astra::Registry copy(*registry, config);
-    
-    // Should share component registry
-    EXPECT_EQ(copy.GetComponentRegistry(), registry->GetComponentRegistry());
-    
-    // Should be able to create entities with registered components
-    Astra::Entity entity = copy.CreateEntityWith(Position{1.0f, 2.0f, 3.0f});
-    EXPECT_TRUE(copy.IsValid(entity));
-    
-    Position* pos = copy.GetComponent<Position>(entity);
+    Astra::Registry world2(registry->ShareComponentRegistry(), config);
+
+    // Shares the component registry (same ComponentID space)...
+    EXPECT_EQ(world2.GetComponentRegistry(), registry->GetComponentRegistry());
+    // ...but has independent entity state.
+    EXPECT_FALSE(world2.IsValid(original));
+    EXPECT_EQ(world2.Size(), 0u);
+
+    // world2 can create entities with the shared registrations.
+    Astra::Entity e = world2.CreateEntityWith(Position{1.0f, 2.0f, 3.0f});
+    ASSERT_TRUE(world2.IsValid(e));
+    Position* pos = world2.GetComponent<Position>(e);
     ASSERT_NE(pos, nullptr);
     EXPECT_EQ(pos->x, 1.0f);
 }

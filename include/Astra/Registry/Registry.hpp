@@ -75,15 +75,12 @@ namespace Astra
             m_config(config)
         {}
 
-        explicit Registry(const Registry& other, const Config& config = {}) :
-            m_entityManager(config.entityManagerConfig),
-            m_componentRegistry(other.m_componentRegistry),
-            m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
-            m_relationshipGraph(std::make_shared<RelationshipGraph>()),
-            m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
-            m_workScheduler(config.workScheduler),
-            m_config(config)
-        {}
+        // A Registry is a heavy, stateful container: copying is not supported (the old
+        // (const Registry&, Config) ctor looked like a copy but silently produced an empty
+        // registry). To create a second world that shares this one's component-type
+        // registrations, use ShareComponentRegistry() with the shared_ptr ctor.
+        Registry(const Registry&) = delete;
+        Registry& operator=(const Registry&) = delete;
 
         ~Registry() = default;
         
@@ -1024,6 +1021,7 @@ namespace Astra
         ASTRA_NODISCARD const EntityManager& GetEntityManager() const noexcept { return m_entityManager; }
         ASTRA_NODISCARD ComponentRegistry* GetComponentRegistry() noexcept { return m_componentRegistry.get(); }
         ASTRA_NODISCARD const ComponentRegistry* GetComponentRegistry() const noexcept { return m_componentRegistry.get(); }
+        ASTRA_NODISCARD std::shared_ptr<ComponentRegistry> ShareComponentRegistry() const noexcept { return m_componentRegistry; }
         ASTRA_NODISCARD ArchetypeManager* GetArchetypeManager() noexcept { return m_archetypeManager.get(); }
         ASTRA_NODISCARD const ArchetypeManager* GetArchetypeManager() const noexcept { return m_archetypeManager.get(); }
         
