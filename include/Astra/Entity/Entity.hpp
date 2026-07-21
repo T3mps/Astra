@@ -107,6 +107,18 @@ namespace Astra
         private:
             StorageType m_entity;
         };
+
+        // Next entity version with wraparound at `versionMask`, skipping the reserved
+        // `nullVersion` (recycles to `initialVersion`). Masking to the version field
+        // width makes this correct for ANY VersionBits, not just {8,16,32} -- a field
+        // narrower than its VersionType (e.g. 12 bits in a uint16) wraps at the mask,
+        // never at the type's natural width.
+        template<typename V>
+        ASTRA_NODISCARD constexpr V NextEntityVersion(V current, V versionMask, V nullVersion, V initialVersion) noexcept
+        {
+            const V next = static_cast<V>((current + 1) & versionMask);
+            return (next == nullVersion) ? initialVersion : next;
+        }
     }
 
     template<std::size_t TotalBits, std::size_t VersionBits>
@@ -114,6 +126,7 @@ namespace Astra
     {
         static_assert(TotalBits == 16 || TotalBits == 32 || TotalBits == 64, "Only 16, 32 or 64 bit variants supported");
         static_assert(VersionBits < TotalBits, "Version bits must be less than total bits");
+        static_assert(VersionBits >= 1, "Version bits must be at least 1");
 
         using StorageType = std::conditional_t<TotalBits == 16, std::uint16_t,
                                 std::conditional_t<TotalBits == 32, std::uint32_t, std::uint64_t>>;

@@ -119,12 +119,9 @@ namespace Astra
                 return false;
             }
 
-            // Calculate next version with wraparound
-            VersionType nextVersion = currentVersion + 1;
-            if (nextVersion == NULL_VERSION) ASTRA_UNLIKELY  // Wrap from 255 to 1
-            {
-                nextVersion = INITIAL_VERSION;
-            }
+            // Calculate next version with wraparound (mask-correct for any VersionBits)
+            const VersionType nextVersion = Detail::NextEntityVersion<VersionType>(
+                currentVersion, static_cast<VersionType>(Entity::VERSION_MASK), NULL_VERSION, INITIAL_VERSION);
 
             // Mark as destroyed in table
             m_table.Destroy(id);
@@ -168,12 +165,9 @@ namespace Astra
                 // Verify version matches
                 if (m_table.GetVersion(id) != currentVersion) ASTRA_UNLIKELY continue;
                 
-                // Calculate next version
-                VersionType nextVersion = currentVersion + 1;
-                if (nextVersion == NULL_VERSION) ASTRA_UNLIKELY
-                {
-                    nextVersion = INITIAL_VERSION;
-                }
+                // Calculate next version (mask-correct for any VersionBits)
+                const VersionType nextVersion = Detail::NextEntityVersion<VersionType>(
+                    currentVersion, static_cast<VersionType>(Entity::VERSION_MASK), NULL_VERSION, INITIAL_VERSION);
                 
                 // Mark as destroyed
                 m_table.Destroy(id);

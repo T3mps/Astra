@@ -448,3 +448,21 @@ TEST_F(EntityTest, BatchOperations)
     }
     EXPECT_EQ(validCount, batchSize);
 }
+
+// Theme H3: version wraparound must key off the version MASK, not the VersionType's
+// natural width, so it is correct for a non-byte-width version field (e.g. 12 bits).
+TEST(EntityVersionWrap, WrapsAtMaskForNonByteWidth)
+{
+    using Astra::Detail::NextEntityVersion;
+
+    // 12-bit version field: VersionType would be uint16_t, but the field wraps at
+    // 4095 (VERSION_MASK), NOT at uint16 max. Old (v+1)==NULL logic gives 4096 here
+    // (not 0), which then packs to 0 = invalid -> the recycled entity looks dead.
+    EXPECT_EQ(NextEntityVersion<uint16_t>(5,    4095, 0, 1), 6);
+    EXPECT_EQ(NextEntityVersion<uint16_t>(4094, 4095, 0, 1), 4095);
+    EXPECT_EQ(NextEntityVersion<uint16_t>(4095, 4095, 0, 1), 1);   // wrap 4095 -> skip 0 -> 1
+
+    // 8-bit version field still wraps correctly (regression guard).
+    EXPECT_EQ(NextEntityVersion<uint8_t>(255, 255, 0, 1), 1);
+    EXPECT_EQ(NextEntityVersion<uint8_t>(7,   255, 0, 1), 8);
+}
