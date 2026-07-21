@@ -571,3 +571,27 @@ TEST_F(RegistryTest, BatchOperationsPerformance)
 
 // Serialization tests split out (2026-07-10 test-suite audit) into
 // tests/Registry/RegistrySerializationTest.cpp.
+
+// Theme J Fix 1: CreateEntities/CreateEntitiesWith report the number actually created.
+TEST_F(RegistryTest, CreateEntitiesReturnsCreatedCount)
+{
+    using namespace Astra::Test;
+
+    // Adequate span -> returns count, creates them.
+    std::vector<Astra::Entity> ents(5);
+    size_t n = registry->CreateEntities<Position>(5, ents);
+    EXPECT_EQ(n, 5u);
+    EXPECT_EQ(registry->Size(), 5u);
+
+    // Too-small span -> returns 0, creates nothing.
+    std::vector<Astra::Entity> tooSmall(2);
+    size_t before = registry->Size();
+    size_t n2 = registry->CreateEntities<Position>(5, tooSmall);
+    EXPECT_EQ(n2, 0u);
+    EXPECT_EQ(registry->Size(), before);
+
+    // CreateEntitiesWith too-small span -> returns 0.
+    size_t n3 = registry->CreateEntitiesWith<Position>(5, tooSmall,
+        [](size_t i) { return std::make_tuple(Position{float(i), 0.0f, 0.0f}); });
+    EXPECT_EQ(n3, 0u);
+}

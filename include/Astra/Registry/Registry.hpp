@@ -141,22 +141,22 @@ namespace Astra
         }
 
         template<Component... Components>
-        void CreateEntities(size_t count, std::span<Entity> outEntities)
+        size_t CreateEntities(size_t count, std::span<Entity> outEntities)
         {
             if (count == 0 || outEntities.size() < count)
-                return;
-            
+                return 0;
+
             size_t created = m_entityManager.CreateBatch(count, outEntities.begin());
             for (size_t i = created; i < count; ++i)
             {
                 outEntities[i] = Entity::Invalid();
             }
             if (created == 0) ASTRA_UNLIKELY
-                return;
-            
+                return 0;
+
             // Use unified batch AddEntities - handles archetype selection internally
             m_archetypeManager->AddEntities<Components...>(outEntities.subspan(0, created));
-            
+
             if (m_signalManager.IsSignalEnabled(Signal::EntityCreated))
             {
                 for (size_t i = 0; i < created; ++i)
@@ -164,7 +164,7 @@ namespace Astra
                     m_signalManager.Emit<Events::EntityCreated>(outEntities[i]);
                 }
             }
-            
+
             if constexpr (sizeof...(Components) > 0)
             {
                 if (m_signalManager.IsSignalEnabled(Signal::ComponentAdded))
@@ -175,24 +175,26 @@ namespace Astra
                     }
                 }
             }
+
+            return created;
         }
 
         template<Component... Components, std::invocable<size_t> Generator>
-        void CreateEntitiesWith(size_t count, std::span<Entity> outEntities, Generator&& generator)
+        size_t CreateEntitiesWith(size_t count, std::span<Entity> outEntities, Generator&& generator)
         {
             if (count == 0 || outEntities.size() < count)
-                return;
-            
+                return 0;
+
             size_t created = m_entityManager.CreateBatch(count, outEntities.begin());
             for (size_t i = created; i < count; ++i)
             {
                 outEntities[i] = Entity::Invalid();
             }
             if (created == 0) ASTRA_UNLIKELY
-                return;
+                return 0;
 
             m_archetypeManager->AddEntitiesWith<Components...>(outEntities.subspan(0, created), std::forward<Generator>(generator));
-            
+
             if (m_signalManager.IsSignalEnabled(Signal::EntityCreated))
             {
                 for (size_t i = 0; i < created; ++i)
@@ -200,7 +202,7 @@ namespace Astra
                     m_signalManager.Emit<Events::EntityCreated>(outEntities[i]);
                 }
             }
-            
+
             if (m_signalManager.IsSignalEnabled(Signal::ComponentAdded))
             {
                 for (size_t i = 0; i < created; ++i)
@@ -208,6 +210,8 @@ namespace Astra
                     ((m_signalManager.Emit<Events::ComponentAdded>(outEntities[i], TypeID<Components>::Value(), nullptr)), ...);
                 }
             }
+
+            return created;
         }
 
         void DestroyEntity(Entity entity)
