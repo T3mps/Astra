@@ -495,12 +495,18 @@ namespace Astra
                         auto& chunks = record->archetype->GetChunks();
                         if (record->location.GetChunkIndex() < chunks.size())
                         {
-                            void* compPtr = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
-                            if (compPtr)
+                            void* actualPtr;
+                            if (desc->size == 0)
                             {
-                                void* actualPtr = static_cast<std::byte*>(compPtr) + record->location.GetEntityIndex() * desc->size;
-                                m_signalManager.Emit<Events::ComponentAdded>(entity, componentId, actualPtr);
+                                actualPtr = EmptyComponentSentinel();  // present tag: no data
                             }
+                            else
+                            {
+                                void* compPtr = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
+                                actualPtr = compPtr ? static_cast<std::byte*>(compPtr) + record->location.GetEntityIndex() * desc->size : nullptr;
+                            }
+                            if (actualPtr)
+                                m_signalManager.Emit<Events::ComponentAdded>(entity, componentId, actualPtr);
                         }
                     }
                 }
@@ -550,10 +556,15 @@ namespace Astra
                         auto& chunks = record->archetype->GetChunks();
                         if (record->location.GetChunkIndex() < chunks.size())
                         {
-                            void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
-                            if (compArray)
+                            if (desc->size == 0)
                             {
-                                componentPtr = static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc->size;
+                                componentPtr = EmptyComponentSentinel();  // present tag: no data
+                            }
+                            else
+                            {
+                                void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
+                                if (compArray)
+                                    componentPtr = static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc->size;
                             }
                         }
                     }

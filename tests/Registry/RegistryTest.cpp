@@ -628,3 +628,34 @@ TEST_F(RegistryTest, BatchCreateEmitsRealComponentPointer)
 
     signals->On<Astra::Events::ComponentAdded>().Unregister(handler);
 }
+
+// Theme F2: AddComponentByID/RemoveComponentByID must emit signals for a tag (size==0)
+// component, with a non-null (sentinel) pointer.
+TEST_F(RegistryTest, ByIdTagEmitsAddAndRemoveSignals)
+{
+    using namespace Astra::Test;
+
+    registry->EnableSignals(Astra::Signal::ComponentAdded | Astra::Signal::ComponentRemoved);
+    auto* signals = registry->GetSignalManager();
+
+    void* addedPtr = nullptr;
+    bool removedFired = false;
+    void* removedPtr = nullptr;
+    auto ha = signals->On<Astra::Events::ComponentAdded>().Register(
+        [&](const Astra::Events::ComponentAdded& e) { addedPtr = e.component; });
+    auto hr = signals->On<Astra::Events::ComponentRemoved>().Register(
+        [&](const Astra::Events::ComponentRemoved& e) { removedFired = true; removedPtr = e.component; });
+
+    Astra::Entity e = registry->CreateEntityWith(Position{1.0f, 2.0f, 3.0f});
+
+    // Add the tag through the type-erased path (data=nullptr, dataSize=0 for a tag).
+    ASSERT_TRUE(registry->AddComponentByID(e, Astra::TypeID<Player>::Value(), nullptr, 0));
+    EXPECT_NE(addedPtr, nullptr);   // BUG: stays null (signal dropped for the tag)
+
+    ASSERT_TRUE(registry->RemoveComponentByID(e, Astra::TypeID<Player>::Value()));
+    EXPECT_TRUE(removedFired);       // BUG: never fires
+    EXPECT_NE(removedPtr, nullptr);
+
+    signals->On<Astra::Events::ComponentAdded>().Unregister(ha);
+    signals->On<Astra::Events::ComponentRemoved>().Unregister(hr);
+}
