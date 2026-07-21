@@ -164,6 +164,13 @@ namespace Astra
     // nullptr agrees with Has(...). It points at a real static byte; callers must NOT read
     // through it (a tag has no data -- desc.size == 0). All tags share this one address; the
     // ComponentID carried alongside identifies the type.
+    //
+    // Note: a present tag deliberately has more than one distinct non-null "do-not-deref"
+    // pointer convention across surfaces -- this sentinel on the by-hash/name Get and by-ID
+    // signal paths, versus a per-type &emptyInstance on the typed AddComponent<T>/RemoveComponent<T>
+    // signal paths. Both mean "present, no data"; do NOT compare a tag's component pointer for
+    // identity across paths. (Registry::InspectEntity still reports nullptr for a tag -- a
+    // tracked follow-up to unify on this sentinel.)
     inline void* EmptyComponentSentinel() noexcept
     {
         static std::byte sentinel{};
