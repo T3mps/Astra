@@ -600,3 +600,31 @@ TEST_F(RegistryTest, CreateEntitiesReturnsCreatedCount)
         [](size_t i) { return std::make_tuple(Position{float(i), 0.0f, 0.0f}); });
     EXPECT_EQ(n3, 0u);
 }
+
+// Theme J Fix 3: batch create emits ComponentAdded with the real component pointer, not null.
+TEST_F(RegistryTest, BatchCreateEmitsRealComponentPointer)
+{
+    using namespace Astra::Test;
+
+    registry->EnableSignals(Astra::Signal::ComponentAdded);
+    auto* signals = registry->GetSignalManager();
+
+    void* captured = nullptr;
+    float capturedX = -1.0f;
+    auto handler = signals->On<Astra::Events::ComponentAdded>().Register(
+        [&](const Astra::Events::ComponentAdded& e)
+        {
+            captured = e.component;
+            if (e.component)
+                capturedX = static_cast<Position*>(e.component)->x;
+        });
+
+    std::vector<Astra::Entity> ents(3);
+    registry->CreateEntitiesWith<Position>(3, ents,
+        [](size_t i) { return std::make_tuple(Position{float(i) + 10.0f, 0.0f, 0.0f}); });
+
+    EXPECT_NE(captured, nullptr);   // BUG passes nullptr
+    EXPECT_GE(capturedX, 10.0f);    // a real, generated value was readable through the pointer
+
+    signals->On<Astra::Events::ComponentAdded>().Unregister(handler);
+}

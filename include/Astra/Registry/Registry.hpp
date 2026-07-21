@@ -168,7 +168,11 @@ namespace Astra
                 {
                     for (size_t i = 0; i < created; ++i)
                     {
-                        ((m_signalManager.Emit<Events::ComponentAdded>(outEntities[i], TypeID<Components>::Value(), nullptr)), ...);
+                        auto* record = m_archetypeManager->GetEntityRecord(outEntities[i]);
+                        if (record)
+                        {
+                            ((m_signalManager.Emit<Events::ComponentAdded>(outEntities[i], TypeID<Components>::Value(), record->archetype->GetComponent<Components>(record->location))), ...);
+                        }
                     }
                 }
             }
@@ -204,7 +208,11 @@ namespace Astra
             {
                 for (size_t i = 0; i < created; ++i)
                 {
-                    ((m_signalManager.Emit<Events::ComponentAdded>(outEntities[i], TypeID<Components>::Value(), nullptr)), ...);
+                    auto* record = m_archetypeManager->GetEntityRecord(outEntities[i]);
+                    if (record)
+                    {
+                        ((m_signalManager.Emit<Events::ComponentAdded>(outEntities[i], TypeID<Components>::Value(), record->archetype->GetComponent<Components>(record->location))), ...);
+                    }
                 }
             }
 
