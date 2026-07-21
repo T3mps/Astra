@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <cstdint>
+#include <cstddef>
 #include "../Entity/Entity.hpp"
 
 namespace Astra
@@ -37,6 +38,10 @@ namespace Astra
         static constexpr float MAX_LOAD_FACTOR = 0.875f;
         
         // Hash splitting functions
+        // Astra targets 64-bit platforms only. The Swiss-table H2 control byte is the
+        // top 7 bits of a 64-bit hash word (`hash >> 57`); on a 32-bit size_t that
+        // shift is UB. Fail loudly at compile time rather than degrade silently.
+        static_assert(sizeof(std::size_t) == 8, "Astra targets 64-bit platforms only (Swiss H2 assumes a 64-bit hash word).");
         inline uint8_t H2(size_t hash) noexcept
         {
             // Use top 7 bits for metadata. Group::Match assumes the probe byte
