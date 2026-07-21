@@ -7,10 +7,12 @@
 
 ## 1. Problem
 
-Five public-API footguns on the `Registry`/`View` surface. Lower severity than the UB
+Four public-API footguns on the `Registry`/`View` surface. Lower severity than the UB
 themes but high user-impact: each silently does the wrong thing (no-op, empty result, null
-signal payload, unfiltered dead handles, or a crash) where the caller reasonably expects
-otherwise. None is a memory-safety bug; all are correctness/ergonomics traps.
+signal payload, or a crash) where the caller reasonably expects otherwise. None is a
+memory-safety bug; all are correctness/ergonomics traps. (A fifth review item — the by-ID
+batch APIs' "missing dead-handle filter" — was investigated during planning and found
+benign; see §5.)
 
 `Registry::Clear()`'s orphan-views footgun (must-fix item 8) is **already fixed** — it now
 clears the `ArchetypeManager` in place (`Registry.hpp:1001-1006`), pinned by
@@ -19,7 +21,7 @@ clears the `ArchetypeManager` in place (`Registry.hpp:1001-1006`), pinned by
 All fixes must build clean in all three configs (Debug/Release/Dist) and respect the
 uniform-graceful misuse policy (no assert-and-abort on a recoverable condition).
 
-## 2. The five fixes
+## 2. The four fixes
 
 ### Fix 1 — `CreateEntities` / `CreateEntitiesWith` silently no-op
 **Sites:** `Registry.hpp:143-178` (`CreateEntities`), `181-211` (`CreateEntitiesWith`).
@@ -107,24 +109,7 @@ if (record)
 ```
 Cost is incurred only when the signal is enabled (already gated).
 
-### Fix 4 — by-ID batch APIs skip dead-handle filtering
-**Sites:** `Registry.hpp:514` (`AddComponentsByID`), `572` (`RemoveComponentsByID`).
-
-```cpp
-size_t AddComponentsByID(std::span<Entity> entities, ComponentID componentId, const void* data, size_t dataSize)
-{
-    return m_archetypeManager->AddComponentsByID(entities, componentId, data, dataSize);
-}
-```
-The span is passed straight through with no validity check, unlike the template siblings
-`AddComponents<T>`/`EmplaceComponents<T>` (`:330-388`), which filter dead/recycled handles
-via `m_entityManager.IsValid` before delegating. The single-entity `RemoveComponentByID`
-(`:526`) also filters. So the by-ID *batch* paths can operate on stale handles.
-
-**Fix:** filter into a `SmallVector<Entity, 256>` of valid entities (mirroring the template
-siblings), delegate that, and return the manager's count. Empty-after-filter → return 0.
-
-### Fix 5 — `View(nullptr)` crashes in the constructor
+### Fix 4 — `View(nullptr)` crashes in the constructor
 **Site:** `View.hpp:41-52`.
 
 ```cpp
@@ -144,8 +129,10 @@ empty/invalid view.
 
 ## 3. Design decisions (user-approved)
 
-1. **Scope:** all five footguns ship as one Theme J work item (one brainstorm → spec → plan →
-   SDD cycle). Cohesive (Registry/View public-API footguns), small, shared test infra.
+1. **Scope:** all four footguns ship as one Theme J work item (one brainstorm → spec → plan →
+   SDD cycle). Cohesive (Registry/View public-API footguns), small, shared test infra. (The
+   fifth candidate — a by-ID batch dead-handle filter — was dropped during planning as
+   verified-benign; see §5.)
 2. **Fix 1:** return `size_t` created count (chosen over clamp-and-create, which would hide a
    caller sizing bug).
 3. **Fix 2:** make `Registry` non-copyable + add an explicit `ShareComponentRegistry()`
@@ -166,10 +153,9 @@ All tests append to existing files (`tests/Registry/RegistryTest.cpp`,
 - **Fix 3:** register a `ComponentAdded` handler that captures the received component pointer;
   batch-create entities with a component and assert the handler saw a **non-null** pointer to
   the correct value (RED: null).
-- **Fix 4:** batch `AddComponentsByID`/`RemoveComponentsByID` over a span mixing valid and
-  destroyed handles → assert only the valid ones are affected and the returned count matches.
-- **Fix 5:** `View<Position>(nullptr)` (or a registry-produced view over a null manager) →
-  assert construction does not crash and the view reports empty/invalid (RED: crash).
+- **Fix 4:** `View<Position>(nullptr)` (a view over a null manager) → assert construction
+  does not crash and the view reports empty/invalid, and `ForEach` over it is a no-op (RED:
+  crash on construction).
 
 New `.cpp` test files would need an `ide/` regen — but there are none here (all appends).
 Match each file's `TEST`/`TEST_F` macro.
@@ -180,6 +166,15 @@ Match each file's `TEST`/`TEST_F` macro.
 - **Out of scope:** `Clear()` orphan-views (already fixed); the other review themes (D/F/H);
   any deep-copy/clone feature for `Registry`; broad signal-emission redesign. Do not add move
   semantics to `Registry` unless a build break proves something moves it (none does today).
+- **Verified-benign, dropped:** the review's by-ID batch "missing dead-handle filter"
+  (`AddComponentsByID`/`RemoveComponentsByID`, `Registry.hpp:514,572`). `Entity` equality is
+  `= default` over its packed id+version (`Entity.hpp:67`) and `ArchetypeManager::m_entityMap`
+  is keyed by full `Entity`, so those functions' per-entity `m_entityMap.find` already skips
+  every dead / recycled / garbage handle (a stale `(id, v1)` misses the live `(id, v2)` entry)
+  and the returned count is already correct. The template siblings' up-front `IsValid` filter
+  is a different route to the same outcome, not a correctness gain. Adding the filter would
+  only add a `validEntities` allocation + `IsValid` pass to a path explicitly documented "does
+  NOT emit signals for performance" — a regression for zero benefit. Intentionally not done.
 
 ## 6. Acceptance criteria
 
@@ -200,7 +195,7 @@ API); opus final whole-branch review; controller independent 3-config build+test
 
 ## 8. Files touched (anticipated)
 
-- `include/Astra/Registry/Registry.hpp` — Fixes 1, 2, 3, 4
-- `include/Astra/Registry/View.hpp` — Fix 5
-- `tests/Registry/RegistryTest.cpp` — Fixes 1, 2, 3, 4 tests
-- `tests/Registry/ViewTest.cpp` — Fix 5 test
+- `include/Astra/Registry/Registry.hpp` — Fixes 1, 2, 3
+- `include/Astra/Registry/View.hpp` — Fix 4
+- `tests/Registry/RegistryTest.cpp` — Fixes 1, 2, 3 tests
+- `tests/Registry/ViewTest.cpp` — Fix 4 test
