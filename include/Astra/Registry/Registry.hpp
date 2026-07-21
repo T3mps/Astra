@@ -623,13 +623,21 @@ namespace Astra
             if (!desc)
                 return nullptr;
 
+            // Presence is the archetype mask, not the chunk array (which is null for a
+            // size==0 tag). This makes Get(...) != nullptr agree with Has(...).
+            if (!record->archetype->GetMask().Test(componentId))
+                return nullptr;                     // entity does not have the component
+
+            if (desc->size == 0)
+                return EmptyComponentSentinel();     // present tag: no data
+
             auto& chunks = record->archetype->GetChunks();
             if (record->location.GetChunkIndex() >= chunks.size())
                 return nullptr;
 
             void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
             if (!compArray)
-                return nullptr;
+                return nullptr;                      // defensive (should not happen for size > 0)
 
             return static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc->size;
         }

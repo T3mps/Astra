@@ -662,3 +662,21 @@ TEST_F(RegistryTest, ByIdTagEmitsAddAndRemoveSignals)
     signals->On<Astra::Events::ComponentAdded>().Unregister(ha);
     signals->On<Astra::Events::ComponentRemoved>().Unregister(hr);
 }
+
+// Theme F3: GetComponentByHash for a present tag must agree with HasComponentByHash
+// (non-null), not return nullptr.
+TEST_F(RegistryTest, GetComponentByHashTagAgreesWithHas)
+{
+    using namespace Astra::Test;
+
+    Astra::Entity e = registry->CreateEntityWith(Position{1.0f, 2.0f, 3.0f});
+    ASSERT_TRUE(registry->AddComponentByID(e, Astra::TypeID<Player>::Value(), nullptr, 0));
+
+    uint64_t playerHash = Astra::TypeID<Player>::Hash();
+    EXPECT_TRUE(registry->HasComponentByHash(e, playerHash));
+    EXPECT_NE(registry->GetComponentByHash(e, playerHash), nullptr);   // BUG: nullptr contradicts Has
+    EXPECT_EQ(registry->GetComponentByHash(e, playerHash), Astra::EmptyComponentSentinel());  // present tag -> sentinel
+
+    // A component the entity does NOT have still returns nullptr.
+    EXPECT_EQ(registry->GetComponentByHash(e, Astra::TypeID<Enemy>::Hash()), nullptr);
+}
