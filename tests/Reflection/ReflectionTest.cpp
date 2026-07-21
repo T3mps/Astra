@@ -968,6 +968,21 @@ namespace
 
     // Over-aligned -> forces the aligned-heap path.
     struct alignas(64) AnyOver64 { std::byte pad[64]; };
+
+    // > 16 bytes -> forces AnyValue's HEAP path, and counts lifetime so a heap
+    // leak (dtor never runs) or double-free (dtor runs twice) shows up as s_live != 0.
+    struct AnyBigLifetime
+    {
+        static inline int s_live = 0;
+        double a{}, b{}, c{}, d{};   // 32 bytes
+        int tag = 0;
+        AnyBigLifetime() { ++s_live; }
+        explicit AnyBigLifetime(int t) : tag(t) { ++s_live; }
+        AnyBigLifetime(const AnyBigLifetime& o) : a(o.a), b(o.b), c(o.c), d(o.d), tag(o.tag) { ++s_live; }
+        AnyBigLifetime(AnyBigLifetime&& o) noexcept : a(o.a), b(o.b), c(o.c), d(o.d), tag(o.tag) { ++s_live; }
+        ~AnyBigLifetime() { --s_live; }
+    };
+    static_assert(sizeof(AnyBigLifetime) > 16, "AnyBigLifetime must exceed AnyValue's inline buffer (heap path)");
 }
 
 TEST(AnyValueTest, ConstructAndTryCastMatch)
@@ -1033,4 +1048,32 @@ TEST(AnyValueTest, MoveTransfersAndLeavesSourceEmpty)
         EXPECT_EQ(b.TryCast<AnyLifetime>()->tag, 9);
     }
     EXPECT_EQ(AnyLifetime::s_live, 0);
+}
+
+TEST(AnyValueTest, HeapCopyIsIndependentAndBalancesLifetime)
+{
+    AnyBigLifetime::s_live = 0;
+    {
+        Astra::AnyValue a(AnyBigLifetime{7});
+        Astra::AnyValue b = a;                  // heap copy: allocates a second block + copyConstruct
+        ASSERT_NE(a.TryCast<AnyBigLifetime>(), nullptr);
+        ASSERT_NE(b.TryCast<AnyBigLifetime>(), nullptr);
+        EXPECT_EQ(b.TryCast<AnyBigLifetime>()->tag, 7);
+        EXPECT_NE(a.TryCast<AnyBigLifetime>(), b.TryCast<AnyBigLifetime>());  // distinct heap blocks
+    }
+    EXPECT_EQ(AnyBigLifetime::s_live, 0);       // no leak, no double-free on the heap path
+}
+
+TEST(AnyValueTest, HeapMoveStealsAndBalancesLifetime)
+{
+    AnyBigLifetime::s_live = 0;
+    {
+        Astra::AnyValue a(AnyBigLifetime{9});   // s_live == 1
+        Astra::AnyValue b = std::move(a);       // pointer steal: no ctor/dtor, source emptied
+        EXPECT_FALSE(a.HasValue());
+        ASSERT_NE(b.TryCast<AnyBigLifetime>(), nullptr);
+        EXPECT_EQ(b.TryCast<AnyBigLifetime>()->tag, 9);
+        EXPECT_EQ(AnyBigLifetime::s_live, 1);   // steal-move calls no ctor/dtor; still exactly one live
+    }
+    EXPECT_EQ(AnyBigLifetime::s_live, 0);       // b's dtor freed the stolen block exactly once
 }
