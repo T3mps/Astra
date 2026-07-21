@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
+#include <Astra/Reflection/AnyValue.hpp>
 #include <Astra/Reflection/Reflection.hpp>
 #include <Astra/Registry/Registry.hpp>
 #include <cmath>
+#include <cstdint>
 #include <string>
+#include <utility>
 
 namespace
 {
@@ -941,4 +944,93 @@ TEST_F(ReflectionTest, FullInspectionWorkflow)
             EXPECT_TRUE(value.has_value());
         });
     }
+}
+
+namespace
+{
+    // File-local lifetime counter (NOT a component: AnyValue uses TypeID<T>::Hash(),
+    // which does not assign a dense ComponentID, so this consumes zero ceiling).
+    struct AnyLifetime
+    {
+        static inline int s_live = 0;
+        int tag = 0;
+        AnyLifetime() { ++s_live; }
+        explicit AnyLifetime(int t) : tag(t) { ++s_live; }
+        AnyLifetime(const AnyLifetime& o) : tag(o.tag) { ++s_live; }
+        AnyLifetime(AnyLifetime&& o) noexcept : tag(o.tag) { ++s_live; }
+        AnyLifetime& operator=(const AnyLifetime&) = default;
+        AnyLifetime& operator=(AnyLifetime&&) = default;
+        ~AnyLifetime() { --s_live; }
+    };
+
+    // Larger than AnyValue's 16-byte inline buffer -> forces the heap path.
+    struct AnyBig { double a, b, c, d; };   // 32 bytes
+
+    // Over-aligned -> forces the aligned-heap path.
+    struct alignas(64) AnyOver64 { std::byte pad[64]; };
+}
+
+TEST(AnyValueTest, ConstructAndTryCastMatch)
+{
+    Astra::AnyValue v(42);
+    ASSERT_TRUE(v.HasValue());
+    ASSERT_NE(v.TryCast<int>(), nullptr);
+    EXPECT_EQ(*v.TryCast<int>(), 42);
+    EXPECT_EQ(v.TypeHash(), Astra::TypeID<int>::Hash());
+}
+
+TEST(AnyValueTest, TryCastWrongTypeReturnsNull)
+{
+    Astra::AnyValue v(3.5f);
+    EXPECT_NE(v.TryCast<float>(), nullptr);
+    EXPECT_EQ(v.TryCast<int>(), nullptr);       // wrong T -> null, never UB
+    EXPECT_EQ(v.TryCast<double>(), nullptr);
+}
+
+TEST(AnyValueTest, EmptyHasNoValue)
+{
+    Astra::AnyValue v;
+    EXPECT_FALSE(v.HasValue());
+    EXPECT_EQ(v.TryCast<int>(), nullptr);
+}
+
+TEST(AnyValueTest, HeapPathForLargeType)
+{
+    Astra::AnyValue v(AnyBig{1, 2, 3, 4});
+    ASSERT_NE(v.TryCast<AnyBig>(), nullptr);
+    EXPECT_EQ(v.TryCast<AnyBig>()->c, 3.0);
+}
+
+TEST(AnyValueTest, OverAlignedHeapPathIsAligned)
+{
+    Astra::AnyValue v{AnyOver64{}};
+    ASSERT_NE(v.TryCast<AnyOver64>(), nullptr);
+    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(v.TryCast<AnyOver64>()) % alignof(AnyOver64), 0u);
+}
+
+TEST(AnyValueTest, CopyIsIndependentAndBalancesLifetime)
+{
+    AnyLifetime::s_live = 0;
+    {
+        Astra::AnyValue a(AnyLifetime{7});
+        Astra::AnyValue b = a;                  // copy
+        ASSERT_NE(a.TryCast<AnyLifetime>(), nullptr);
+        ASSERT_NE(b.TryCast<AnyLifetime>(), nullptr);
+        EXPECT_EQ(b.TryCast<AnyLifetime>()->tag, 7);
+        EXPECT_NE(a.TryCast<AnyLifetime>(), b.TryCast<AnyLifetime>());  // distinct storage
+    }
+    EXPECT_EQ(AnyLifetime::s_live, 0);          // no leak, no double-free
+}
+
+TEST(AnyValueTest, MoveTransfersAndLeavesSourceEmpty)
+{
+    AnyLifetime::s_live = 0;
+    {
+        Astra::AnyValue a(AnyLifetime{9});
+        Astra::AnyValue b = std::move(a);
+        EXPECT_FALSE(a.HasValue());
+        ASSERT_NE(b.TryCast<AnyLifetime>(), nullptr);
+        EXPECT_EQ(b.TryCast<AnyLifetime>()->tag, 9);
+    }
+    EXPECT_EQ(AnyLifetime::s_live, 0);
 }
