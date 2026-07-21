@@ -711,3 +711,37 @@ TEST(ComponentRegistryStability, DescriptorPointerStableAsMoreTypesRegister)
               before)
         << "descriptor pointer for an early type moved after further registrations";
 }
+
+namespace
+{
+    // Empty (is_empty) tag with a lifetime-counting destructor. Unique name (Theme-E:
+    // generic-named file-local component types hard-fail on collision). Empty Serialize
+    // is required because RegisterComponentImpl odr-uses Serialize<T> for a
+    // non-trivially-copyable type (a user dtor makes it non-trivially-copyable).
+    struct ThemeFCountedTag
+    {
+        static inline int s_live = 0;
+        ThemeFCountedTag() { ++s_live; }
+        ~ThemeFCountedTag() { --s_live; }
+        template<typename Archive> void Serialize(Archive&) {}
+    };
+    static_assert(std::is_empty_v<ThemeFCountedTag>, "ThemeFCountedTag must be empty (size 0 descriptor)");
+}
+
+// Theme F1: ComponentDescriptor::Destruct must be a no-op for a size==0 (tag) component,
+// symmetric with DefaultConstruct.
+TEST(ComponentDescriptorTagTest, DestructSkipsEmptyComponent)
+{
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponent<ThemeFCountedTag>();
+    const Astra::ComponentDescriptor* desc =
+        registry.GetComponentDescriptor(Astra::TypeID<ThemeFCountedTag>::Value());
+    ASSERT_NE(desc, nullptr);
+    ASSERT_EQ(desc->size, 0u);
+
+    ThemeFCountedTag::s_live = 0;
+    std::byte dummy{};
+    desc->Destruct(&dummy);   // must NOT invoke ~ThemeFCountedTag() for a tag
+
+    EXPECT_EQ(ThemeFCountedTag::s_live, 0);   // BUG: -1 (the dtor ran on non-object storage)
+}

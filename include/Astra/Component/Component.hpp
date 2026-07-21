@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -153,7 +154,19 @@ namespace Astra
         
         inline void Destruct(void* ptr) const
         {
+            if (size == 0) return;  // empty (tag) component: nothing to destruct (mirrors DefaultConstruct)
             destruct(ptr);
         }
     };
+
+    // Stable, non-null pointer used as the "component pointer" for a present zero-size (tag)
+    // component: by-hash/name Get returns it and by-ID signals fire with it, so Get(...) !=
+    // nullptr agrees with Has(...). It points at a real static byte; callers must NOT read
+    // through it (a tag has no data -- desc.size == 0). All tags share this one address; the
+    // ComponentID carried alongside identifies the type.
+    inline void* EmptyComponentSentinel() noexcept
+    {
+        static std::byte sentinel{};
+        return &sentinel;
+    }
 }
