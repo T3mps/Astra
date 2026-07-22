@@ -1058,6 +1058,34 @@ namespace Astra
 
         void SetComponentPool(ArchetypeChunkPool* pool) { m_chunkPool = pool; }
 
+        ASTRA_NODISCARD Archetype* GetAddEdge(ComponentID id) const noexcept
+        {
+            ASTRA_ASSERT(id < MAX_COMPONENTS, "component id out of range");
+            return m_addEdges ? m_addEdges[id] : nullptr;
+        }
+        ASTRA_NODISCARD Archetype* GetRemoveEdge(ComponentID id) const noexcept
+        {
+            ASTRA_ASSERT(id < MAX_COMPONENTS, "component id out of range");
+            return m_removeEdges ? m_removeEdges[id] : nullptr;
+        }
+        void SetAddEdge(ComponentID id, Archetype* to)
+        {
+            ASTRA_ASSERT(id < MAX_COMPONENTS, "component id out of range");
+            if (!m_addEdges) m_addEdges = std::make_unique<Archetype*[]>(MAX_COMPONENTS);  // value-inits to nullptr
+            m_addEdges[id] = to;
+        }
+        void SetRemoveEdge(ComponentID id, Archetype* to)
+        {
+            ASTRA_ASSERT(id < MAX_COMPONENTS, "component id out of range");
+            if (!m_removeEdges) m_removeEdges = std::make_unique<Archetype*[]>(MAX_COMPONENTS);
+            m_removeEdges[id] = to;
+        }
+        void ClearEdgesTo(Archetype* target) noexcept
+        {
+            if (m_addEdges)    for (ComponentID i = 0; i < MAX_COMPONENTS; ++i) if (m_addEdges[i]    == target) m_addEdges[i]    = nullptr;
+            if (m_removeEdges) for (ComponentID i = 0; i < MAX_COMPONENTS; ++i) if (m_removeEdges[i] == target) m_removeEdges[i] = nullptr;
+        }
+
     private:
         static constexpr size_t INVALID_CHUNK_INDEX = std::numeric_limits<size_t>::max();
 
@@ -1414,6 +1442,11 @@ namespace Astra
         size_t m_firstNonFullChunkIndex = 0;  // Track first chunk with available space for O(1) lookup
         bool m_initialized;
         ArchetypeChunkPool* m_chunkPool = nullptr;
+
+        // Add/remove transition edges, indexed by ComponentID (< MAX_COMPONENTS).
+        // Lazily allocated on first edge; nullptr slot = no cached edge; freed with the archetype.
+        std::unique_ptr<Archetype*[]> m_addEdges;
+        std::unique_ptr<Archetype*[]> m_removeEdges;
 
         friend class ArchetypeManager;
         friend class Registry;

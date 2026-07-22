@@ -1081,11 +1081,36 @@ TEST_F(ArchetypeTest, SerializeNonTrivialComponents)
                 Name* name = deserializedArchetype->GetComponent<Name>(loc);
                 ASSERT_NE(name, nullptr);
                 EXPECT_EQ(name->value, "Entity_" + std::to_string(i));
-                
+
                 verifiedCount++;
             }
         }
-        
+
         EXPECT_EQ(verifiedCount, entityCount);
     }
+}
+
+// W2: per-archetype edge arrays — lazy alloc, get/set, and targeted invalidation.
+TEST(Archetype, EdgeStorageLazyGetSetAndClear)
+{
+    using namespace Astra;
+    Archetype a(ComponentMask{});
+    Archetype b(ComponentMask{});
+    Archetype c(ComponentMask{});
+
+    EXPECT_EQ(a.GetAddEdge(5), nullptr);      // lazy: nothing allocated yet
+    EXPECT_EQ(a.GetRemoveEdge(5), nullptr);
+
+    a.SetAddEdge(5, &b);
+    a.SetRemoveEdge(7, &c);
+    a.SetAddEdge(9, &c);
+    EXPECT_EQ(a.GetAddEdge(5), &b);
+    EXPECT_EQ(a.GetRemoveEdge(7), &c);
+    EXPECT_EQ(a.GetAddEdge(9), &c);
+    EXPECT_EQ(a.GetAddEdge(6), nullptr);      // untouched slot
+
+    a.ClearEdgesTo(&c);                       // null only edges pointing at c
+    EXPECT_EQ(a.GetAddEdge(5), &b);           // -> b, unaffected
+    EXPECT_EQ(a.GetRemoveEdge(7), nullptr);   // was -> c, cleared
+    EXPECT_EQ(a.GetAddEdge(9), nullptr);      // was -> c, cleared
 }
