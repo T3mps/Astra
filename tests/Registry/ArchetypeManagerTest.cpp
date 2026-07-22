@@ -4,29 +4,42 @@
 #include "../TestComponents.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
 #include "Astra/Archetype/ArchetypeManager.hpp"
+#include "Astra/Entity/EntityTable.hpp"
 
 class ArchetypeManagerTest : public ::testing::Test
 {
 protected:
+    // The manager now validates/locates through a shared EntityRecord table that
+    // EntityManager owns in production. These standalone tests own it in the
+    // fixture; declared first so it outlives `manager` (which holds a raw pointer).
+    Astra::EntityTable m_table;
     std::shared_ptr<Astra::ComponentRegistry> componentRegistry;
     std::unique_ptr<Astra::ArchetypeManager> manager;
     std::vector<Astra::Entity> testEntities;
-    
-    void SetUp() override 
+
+    void SetUp() override
     {
         // Create component registry first
         componentRegistry = std::make_shared<Astra::ComponentRegistry>();
-        
+
         // Register test components (only the ones actually used by this
         // file's tests - Transform/Name/Physics/Player/Enemy were registered
         // but never exercised by any TEST_F here; trimmed in the 2026-07-10
         // test-suite audit).
         using namespace Astra::Test;
         componentRegistry->RegisterComponents<Position, Velocity, Health>();
-        
-        // Create manager with the component registry
-        manager = std::make_unique<Astra::ArchetypeManager>(componentRegistry);
-        
+
+        // Seed a version for every id these tests use (they build handles as
+        // Entity(id, 1)). Without this the manager's version-checked find-guard
+        // would reject every lookup, since a fresh table has version 0 in all
+        // slots. In production EntityManager::Create does this via SetVersion.
+        for (Astra::Entity::StorageType id = 0; id < 10000; ++id)
+            m_table.SetVersion(id, 1);
+
+        // Create manager with the component registry and the shared record table
+        manager = std::make_unique<Astra::ArchetypeManager>(
+            componentRegistry, Astra::ArchetypeChunkPool::Config{}, &m_table);
+
         // Create some test entities
         for (int i = 0; i < 100; ++i)
         {
@@ -293,9 +306,12 @@ TEST_F(ArchetypeManagerTest, ComponentRegistrySharing)
 {
     using namespace Astra::Test;
     
-    // Create second manager with shared component registry
-    Astra::ArchetypeManager manager2(componentRegistry);
-    
+    // Create second manager with shared component registry and its own record table
+    Astra::EntityTable table2;
+    for (Astra::Entity::StorageType id = 0; id < 200; ++id)
+        table2.SetVersion(id, 1);
+    Astra::ArchetypeManager manager2(componentRegistry, Astra::ArchetypeChunkPool::Config{}, &table2);
+
     // Components registered in first manager should work in second
     Astra::Entity entity(100, 1);
     manager2.AddEntity(entity);
@@ -580,7 +596,10 @@ TEST_F(ArchetypeManagerTest, RemoveComponentsReportsActualCountOnChunkExhaustion
     poolConfig.maxChunks      = 2;
     poolConfig.useHugePages   = false;
 
-    Astra::ArchetypeManager localManager(componentRegistry, poolConfig);
+    Astra::EntityTable localTable;
+    for (Astra::Entity::StorageType id = 300; id < 305; ++id)
+        localTable.SetVersion(id, 1);
+    Astra::ArchetypeManager localManager(componentRegistry, poolConfig, &localTable);
 
     std::vector<Astra::Entity> ents;
     for (int i = 0; i < 5; ++i)

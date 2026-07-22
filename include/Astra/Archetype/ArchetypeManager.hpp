@@ -21,6 +21,8 @@
 #include "../Container/SmallVector.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Entity/Entity.hpp"
+#include "../Entity/EntityRecord.hpp"
+#include "../Entity/EntityTable.hpp"
 #include "../Serialization/BinaryReader.hpp"
 #include "../Serialization/BinaryWriter.hpp"
 #include "Archetype.hpp"
@@ -35,17 +37,15 @@ namespace Astra
     class ArchetypeManager
     {
     public:
-        struct EntityRecord
-        {
-            Archetype* archetype = nullptr;
-            EntityLocation location;
-        };
-        
-        explicit ArchetypeManager(std::shared_ptr<ComponentRegistry> registry, const ArchetypeChunkPool::Config& poolConfig = {}) :
+        explicit ArchetypeManager(std::shared_ptr<ComponentRegistry> registry,
+                                  const ArchetypeChunkPool::Config& poolConfig = {},
+                                  EntityTable* records = nullptr) :
             m_chunkPool(poolConfig),
-            m_componentRegistry(registry)
+            m_componentRegistry(registry),
+            m_records(records)
         {
             ASTRA_ASSERT(registry, "ComponentRegistry must not be null");
+            ASTRA_ASSERT(records, "EntityRecordTable must not be null");
 
             auto rootArchetype = std::make_unique<Archetype>(ComponentMask{});
             m_rootArchetype = rootArchetype.get();
@@ -80,10 +80,12 @@ namespace Astra
             {
                 return;
             }
-            
-            m_entityMap[entity] = EntityRecord{archetype, location};
+
+            EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
+            rec->archetype = archetype;
+            rec->location  = location;   // NEVER assign rec->version
         }
-        
+
         template<Component... Components>
         void AddEntityWith(Entity entity, Components&&... components)
         {
@@ -94,15 +96,17 @@ namespace Astra
             
             Archetype* archetype = GetOrCreateArchetype<std::decay_t<Components>...>();
             EntityLocation location = archetype->AddEntityWith(entity, std::forward<Components>(components)...);
-            
+
             if (!location.IsValid()) ASTRA_UNLIKELY
             {
                 return;
             }
-            
-            m_entityMap[entity] = EntityRecord{archetype, location};
+
+            EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
+            rec->archetype = archetype;
+            rec->location  = location;   // NEVER assign rec->version
         }
-        
+
         template<Component... Components>
         void AddEntities(std::span<const Entity> entities)
         {
@@ -157,13 +161,17 @@ namespace Astra
                 locations = archetype->AddEntitiesWith(entities, generator);
             }
 
-            m_entityMap.reserve(m_entityMap.size() + locations.size());
+            // No table sizing here: the shared record table is owned and pre-sized
+            // by EntityManager (these entities were already Created), and segments
+            // are created on demand by GetOrCreateRecord.
             for (size_t i = 0; i < locations.size(); ++i)
             {
-                m_entityMap[entities[i]] = EntityRecord{archetype, locations[i]};
+                EntityRecord* rec = m_records->GetOrCreateRecord(entities[i].GetID());
+                rec->archetype = archetype;
+                rec->location  = locations[i];   // NEVER assign rec->version
             }
         }
-        
+
         template<Component... Components, std::invocable<size_t> Generator>
         void AddEntitiesWith(std::span<const Entity> entities, Generator&& generator)
         {
@@ -174,28 +182,33 @@ namespace Astra
             Archetype* archetype = GetOrCreateArchetype<Components...>();
             std::vector<EntityLocation> locations = archetype->AddEntitiesWith(entities, std::forward<Generator>(generator));
 
-            m_entityMap.reserve(m_entityMap.size() + locations.size());
+            // See AddEntities: the shared record table is owned/sized by EntityManager.
             for (size_t i = 0; i < locations.size(); ++i)
             {
-                m_entityMap[entities[i]] = EntityRecord{archetype, locations[i]};
+                EntityRecord* rec = m_records->GetOrCreateRecord(entities[i].GetID());
+                rec->archetype = archetype;
+                rec->location  = locations[i];   // NEVER assign rec->version
             }
         }
 
         void RemoveEntity(Entity entity)
         {
-            auto it = m_entityMap.find(entity);
-            if (it == m_entityMap.end()) ASTRA_UNLIKELY return;
+            EntityRecord* rec = m_records->GetRecord(entity.GetID());
+            if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
+                return;
 
-            EntityRecord& loc = it->second;
+            Archetype* archetype = rec->archetype;
+            EntityLocation oldLocation = rec->location;
 
-            if (auto movedEntity = loc.archetype->RemoveEntity(loc.location)) ASTRA_LIKELY
+            if (auto movedEntity = archetype->RemoveEntity(oldLocation)) ASTRA_LIKELY
             {
-                auto movedIt = m_entityMap.find(*movedEntity);
-                ASTRA_ASSERT(movedIt != m_entityMap.end(), "Moved entity not found in map");
-                movedIt->second.location = loc.location;
+                // The swapped-in entity is guaranteed live and located.
+                m_records->GetRecord(movedEntity->GetID())->location = oldLocation;
             }
-            
-            m_entityMap.erase(it);
+
+            // Erase clears LOCATION ONLY -- EntityManager::Destroy owns the version.
+            rec->archetype = nullptr;
+            rec->location  = EntityLocation{};
         }
 
         void RemoveEntities(std::span<Entity> entities)
@@ -207,11 +220,10 @@ namespace Astra
 
             for (Entity entity : entities)
             {
-                auto it = m_entityMap.find(entity);
-                if (it == m_entityMap.end()) ASTRA_UNLIKELY continue;
+                EntityRecord* rec = m_records->GetRecord(entity.GetID());
+                if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY continue;
 
-                EntityRecord& loc = it->second;
-                batches[loc.archetype].emplace_back(entity, loc.location);
+                batches[rec->archetype].emplace_back(entity, rec->location);
             }
 
             for (auto& [archetype, entityBatch] : batches)
@@ -227,29 +239,33 @@ namespace Astra
 
                 for (const auto& [movedEntity, newEntityLocation] : movedEntities)
                 {
-                    auto movedIt = m_entityMap.find(movedEntity);
-                    if (movedIt != m_entityMap.end()) ASTRA_LIKELY
+                    if (EntityRecord* rec = m_records->GetRecord(movedEntity.GetID())) ASTRA_LIKELY
                     {
-                        movedIt->second.location = newEntityLocation;
+                        rec->location = newEntityLocation;
                     }
                 }
 
                 for (const auto& [entity, _] : entityBatch)
                 {
-                    m_entityMap.erase(entity);
+                    // Erase clears LOCATION ONLY -- versions belong to EntityManager.
+                    if (EntityRecord* rec = m_records->GetRecord(entity.GetID())) ASTRA_LIKELY
+                    {
+                        rec->archetype = nullptr;
+                        rec->location  = EntityLocation{};
+                    }
                 }
             }
         }
 
         ASTRA_NODISCARD const EntityRecord* GetEntityRecord(Entity entity) const
         {
-            auto it = m_entityMap.find(entity);
-            return it != m_entityMap.end() ? &it->second : nullptr;
+            const EntityRecord* rec = m_records->GetRecord(entity.GetID());
+            return (rec && rec->version == entity.GetVersion() && rec->archetype) ? rec : nullptr;
         }
-        
+
         void SetEntityLocation(Entity entity, Archetype* archetype, EntityLocation location)
         {
-            m_entityMap[entity] = EntityRecord{archetype, location};
+            m_records->SetRecord(entity.GetID(), archetype, location);   // archetype/location only
         }
 
         template<Component T, typename... Args>
@@ -259,11 +275,12 @@ namespace Astra
             if (!registry) ASTRA_UNLIKELY
                 return nullptr;
             registry->RegisterComponent<T>();
-            
-            auto it = m_entityMap.find(entity);
-            if (it == m_entityMap.end()) ASTRA_UNLIKELY return nullptr;
-            
-            EntityRecord& oldLoc = it->second;
+
+            EntityRecord* rec = m_records->GetRecord(entity.GetID());
+            if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
+                return nullptr;
+
+            EntityRecord& oldLoc = *rec;
             ComponentID componentId = TypeID<T>::Value();
             if (componentId >= MAX_COMPONENTS) ASTRA_UNLIKELY
                 return nullptr;   // registration refused (ID-space exhausted): typed-path parity with the ByID guard
@@ -320,16 +337,16 @@ namespace Astra
         bool RemoveComponent(Entity entity)
         {
             ComponentID componentId = TypeID<T>::Value();
-            
-            auto it = m_entityMap.find(entity);
-            if (it == m_entityMap.end()) ASTRA_UNLIKELY
+
+            EntityRecord* rec = m_records->GetRecord(entity.GetID());
+            if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
                 return false;
-            
-            EntityRecord& oldLoc = it->second;
-            
+
+            EntityRecord& oldLoc = *rec;
+
             if (!oldLoc.archetype->GetMask().Test(componentId)) ASTRA_UNLIKELY
                 return false;
-                
+
             Archetype* newArchetype = GetArchetypeWithRemoved(oldLoc.archetype, componentId);
             EntityLocation newEntityLocation = MoveEntity(entity, oldLoc, newArchetype);
             if (!newEntityLocation.IsValid()) ASTRA_UNLIKELY
@@ -392,11 +409,11 @@ namespace Astra
             if (dataSize != desc->size && desc->size > 0) ASTRA_UNLIKELY
                 return false;
 
-            auto it = m_entityMap.find(entity);
-            if (it == m_entityMap.end()) ASTRA_UNLIKELY
+            EntityRecord* rec = m_records->GetRecord(entity.GetID());
+            if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
                 return false;
 
-            EntityRecord& oldLoc = it->second;
+            EntityRecord& oldLoc = *rec;
 
             // Check if entity already has this component
             if (oldLoc.archetype->GetMask().Test(componentId)) ASTRA_UNLIKELY
@@ -451,11 +468,11 @@ namespace Astra
          */
         bool RemoveComponentByID(Entity entity, ComponentID componentId)
         {
-            auto it = m_entityMap.find(entity);
-            if (it == m_entityMap.end()) ASTRA_UNLIKELY
+            EntityRecord* rec = m_records->GetRecord(entity.GetID());
+            if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
                 return false;
 
-            EntityRecord& oldLoc = it->second;
+            EntityRecord& oldLoc = *rec;
 
             // Check if entity has this component
             if (!oldLoc.archetype->GetMask().Test(componentId)) ASTRA_UNLIKELY
@@ -495,21 +512,20 @@ namespace Astra
         template<Component T>
         ASTRA_NODISCARD T* GetComponent(Entity entity)
         {
-            auto it = m_entityMap.find(entity);
-            if (it == m_entityMap.end()) ASTRA_UNLIKELY return nullptr;
-            
-            EntityRecord& loc = it->second;
-            return loc.archetype->GetComponent<T>(loc.location);
+            EntityRecord* rec = m_records->GetRecord(entity.GetID());
+            if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
+                return nullptr;
+
+            return rec->archetype->GetComponent<T>(rec->location);
         }
 
         template<Component T>
         ASTRA_NODISCARD bool HasComponent(Entity entity) const
         {
-            auto it = m_entityMap.find(entity);
-            if (it == m_entityMap.end()) ASTRA_UNLIKELY
+            const EntityRecord* rec = m_records->GetRecord(entity.GetID());
+            if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
                 return false;
-            const EntityRecord& loc = it->second;
-            return loc.archetype->HasComponent<T>();
+            return rec->archetype->HasComponent<T>();
         }
 
         template<Component... Components>
@@ -588,7 +604,9 @@ namespace Astra
          */
         void Clear()
         {
-            m_entityMap.clear();
+            // The shared EntityRecord table is owned by EntityManager::Clear();
+            // clearing it here would wipe the versions EntityManager owns. This
+            // manager only resets its own archetypes/chunks/graph.
             m_archetypeMap.Clear();
             m_edgeGraph.Clear();
             m_archetypes.clear();  // destroys every archetype, incl. the old root
@@ -739,10 +757,21 @@ namespace Astra
     public:
         void Serialize(BinaryWriter& writer) const
         {
+            // Collect located entities (archetype != nullptr) up front so the count
+            // written at the fixed metadata slot below matches exactly what the
+            // entity-record loop emits. A record's stored version reconstructs the
+            // full Entity handle that used to be the entity-map key.
+            SmallVector<std::pair<Entity, EntityRecord>, 256> located;
+            m_records->ForEachRecord([&](EntityTable::IDType id, const EntityRecord& rec)
+            {
+                if (rec.archetype)
+                    located.push_back({ Entity(id, rec.version), rec });
+            });
+
             // Write storage metadata
             writer(static_cast<uint32_t>(m_archetypes.size()));
-            writer(static_cast<uint32_t>(m_entityMap.size()));
-            
+            writer(static_cast<uint32_t>(located.size()));
+
             // Write each archetype, including the root (zero-component) archetype
             // at index 0 - its entities must round-trip through Save/Load just
             // like any other archetype's, or they become dangling entity-map
@@ -763,24 +792,24 @@ namespace Astra
             }
             
             // Write entity-to-archetype mappings
-            for (const auto& [entity, location] : m_entityMap)
+            for (const auto& [entity, rec] : located)
             {
                 writer(entity);
-                
+
                 // Find archetype index
                 uint32_t archetypeIndex = 0;
                 for (size_t i = 0; i < m_archetypes.size(); ++i)
                 {
-                    if (m_archetypes[i].archetype.get() == location.archetype)
+                    if (m_archetypes[i].archetype.get() == rec.archetype)
                     {
                         archetypeIndex = static_cast<uint32_t>(i);
                         break;
                     }
                 }
-                
+
                 writer(archetypeIndex);
-                writer(location.location.chunkIndex);
-                writer(location.location.entityIndex);
+                writer(rec.location.chunkIndex);
+                writer(rec.location.entityIndex);
             }
         }
 
@@ -792,8 +821,10 @@ namespace Astra
                 m_archetypes.pop_back();
             }
             m_archetypeMap.Clear();
-            m_entityMap.clear();
-            
+            // Do NOT clear the shared record table: EntityManager::Deserialize has
+            // already restored versions (and created the segments) into it; this
+            // pass only writes archetype/location back into those same slots.
+
             // Read storage metadata
             uint32_t archetypeCount, entityCount;
             reader(archetypeCount)(entityCount);
@@ -826,10 +857,10 @@ namespace Astra
             if (reader.CountExceedsRemaining(entityCount, kMinBytesPerEntityRecord))
                 return false;
 
-            // Reserve space
+            // Reserve space (archetypes only; the shared record table's sizing is
+            // owned by EntityManager, which already restored/sized it above).
             m_archetypes.reserve(archetypeCount);
-            m_entityMap.reserve(entityCount);
-            
+
             // Get all registered component descriptors
             std::vector<ComponentDescriptor> registryDescriptors;
             auto registry = m_componentRegistry.lock();
@@ -921,10 +952,11 @@ namespace Astra
                     entityIndex >= arch->GetChunkEntityCount(chunkIndex))
                     return false;
 
-                EntityRecord location;
-                location.archetype = arch;
-                location.location = EntityLocation(chunkIndex, entityIndex);
-                m_entityMap[entity] = location;
+                // Segments already exist (EntityManager restored versions first).
+                // Write archetype/location only; never touch rec->version.
+                EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
+                rec->archetype = arch;
+                rec->location  = EntityLocation(chunkIndex, entityIndex);
             }
             
             return !reader.HasError();
@@ -1092,12 +1124,14 @@ namespace Astra
             
             if (auto movedEntity = oldLoc.archetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
             {
-                m_entityMap[*movedEntity].location = oldLoc.location;
+                m_records->GetRecord(movedEntity->GetID())->location = oldLoc.location;
             }
-            
+
+            // oldLoc aliases the shared record for `entity`; writing it here IS the
+            // record update (archetype/location only -- never version).
             oldLoc.archetype = newArchetype;
             oldLoc.location = newEntityLocation;
-            
+
             return newEntityLocation;
         }
 
@@ -1185,7 +1219,9 @@ namespace Astra
                 }
                 
                 MoveAndAdd<T>(dstLocation, dstArchetype, srcLocation, srcArchetype, args...);
-                m_entityMap[entity] = {dstArchetype, dstLocation};
+                EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
+                rec->archetype = dstArchetype;
+                rec->location  = dstLocation;   // NEVER assign rec->version
                 ++processedCount;
             }
             
@@ -1210,10 +1246,10 @@ namespace Astra
                 auto& [entity, location] = entities[i];
                 if (auto movedEntity = srcArchetype->RemoveEntity(location)) ASTRA_LIKELY
                 {
-                    m_entityMap[*movedEntity].location = location;
+                    m_records->GetRecord(movedEntity->GetID())->location = location;
                 }
             }
-            
+
         }
         
         template<typename Predicate>
@@ -1223,19 +1259,18 @@ namespace Astra
             
             for (Entity entity : entities)
             {
-                auto it = m_entityMap.find(entity);
-                if (it == m_entityMap.end()) ASTRA_UNLIKELY
+                EntityRecord* rec = m_records->GetRecord(entity.GetID());
+                if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
                 {
                     continue;
                 }
-                
-                EntityRecord& loc = it->second;
-                if (filter(loc.archetype))
+
+                if (filter(rec->archetype))
                 {
-                    batches[loc.archetype].emplace_back(entity, loc.location);
+                    batches[rec->archetype].emplace_back(entity, rec->location);
                 }
             }
-            
+
             return batches;
         }
         
@@ -1283,20 +1318,22 @@ namespace Astra
                 // "if (!chunk) return ..." bails elsewhere in Archetype.hpp). At this
                 // point BatchMoveEntitiesFrom has failed before mutating dstArchetype
                 // (no entities placed, m_entityCount/m_chunks untouched) and
-                // srcArchetype/m_entityMap haven't been touched yet either (the
-                // post-move op, entity-map update, and RemoveEntities all happen
-                // below) - so bailing here leaves entityBatch exactly as it was
-                // before the call, and the batch simply remains in srcArchetype.
+                // srcArchetype/the shared record table haven't been touched yet
+                // either (the post-move op, record update, and RemoveEntities all
+                // happen below) - so bailing here leaves entityBatch exactly as it
+                // was before the call, and the batch simply remains in srcArchetype.
                 return 0;
             }
             
             // Execute post-move operation (e.g., setting component)
             postMoveOp(dstArchetype, newLocations);
             
-            // Batch update entity map
+            // Batch update entity records (archetype/location only, never version)
             for (size_t i = 0; i < newLocations.size(); ++i)
             {
-                m_entityMap[entityBatch[i].first] = {dstArchetype, newLocations[i]};
+                EntityRecord* rec = m_records->GetOrCreateRecord(entityBatch[i].first.GetID());
+                rec->archetype = dstArchetype;
+                rec->location  = newLocations[i];
             }
             
             // Normally every entity is placed (dst chunks are pre-allocated to fit
@@ -1318,10 +1355,9 @@ namespace Astra
             // Update locations of entities moved during removal
             for (const auto& [movedEntity, newLocation] : movedEntities)
             {
-                auto it = m_entityMap.find(movedEntity);
-                if (it != m_entityMap.end()) ASTRA_LIKELY
+                if (EntityRecord* rec = m_records->GetRecord(movedEntity.GetID())) ASTRA_LIKELY
                 {
-                    it->second.location = newLocation;
+                    rec->location = newLocation;
                 }
             }
 
@@ -1359,9 +1395,10 @@ namespace Astra
 
             // Remove from old archetype
             if (auto movedEntity = oldLoc.archetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
-                m_entityMap[*movedEntity].location = oldLoc.location;
+                m_records->GetRecord(movedEntity->GetID())->location = oldLoc.location;
 
-            // Update entity record
+            // Update entity record (oldLoc aliases the shared record for `entity`;
+            // archetype/location only -- never version).
             oldLoc.archetype = newArchetype;
             oldLoc.location = newEntityLocation;
 
@@ -1470,8 +1507,11 @@ namespace Astra
         ArchetypeGraph m_edgeGraph;
         std::vector<ArchetypeEntry> m_archetypes;
         FlatMap<ComponentMask, Archetype*, BitmapHash<MAX_COMPONENTS>> m_archetypeMap;
-        std::unordered_map<Entity, EntityRecord> m_entityMap;
-        
+        // Shared paged EntityRecord table, owned by EntityManager and injected at
+        // construction. This manager only ever writes archetype/location into a
+        // record (via GetOrCreateRecord/GetRecord); versions belong to EntityManager.
+        EntityTable* m_records = nullptr;
+
         Archetype* m_rootArchetype = nullptr;
         
         std::atomic<uint32_t> m_structuralChangeCounter{0};  // Fast path check

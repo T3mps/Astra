@@ -198,6 +198,13 @@ namespace Astra
             return m_table.GetVersion(id);
         }
 
+        // The shared paged EntityRecord table. ArchetypeManager is injected a
+        // pointer to this same table so validate (version) and locate
+        // (archetype/location) hit one paged slot. EntityManager owns its
+        // lifecycle; ArchetypeManager only writes archetype/location, never version.
+        ASTRA_NODISCARD EntityTable&       GetRecordTable()       noexcept { return m_table; }
+        ASTRA_NODISCARD const EntityTable& GetRecordTable() const noexcept { return m_table; }
+
         void Clear() noexcept
         {
             m_idStack.Clear();

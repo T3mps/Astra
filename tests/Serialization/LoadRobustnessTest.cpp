@@ -10,6 +10,7 @@
 #include "Astra/Archetype/ArchetypeManager.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
 #include "Astra/Entity/EntityManager.hpp"
+#include "Astra/Entity/EntityTable.hpp"
 #include "Astra/Registry/Registry.hpp"
 #include "Astra/Registry/Relations.hpp"
 #include "Astra/Registry/RelationshipGraph.hpp"
@@ -271,7 +272,11 @@ TEST(LoadRobustness, EntityMapChunkIndexOutOfRangeIsRejected)
         ASSERT_FALSE(writer.HasError());
     }
 
-    Astra::ArchetypeManager manager(cr);
+    // The manager needs a (non-null) shared record table; this crafted buffer is
+    // rejected at chunkIndex validation before any record is written, so no
+    // version seeding is required here.
+    Astra::EntityTable table;
+    Astra::ArchetypeManager manager(cr, Astra::ArchetypeChunkPool::Config{}, &table);
     Astra::BinaryReader reader{std::span<const std::byte>(buf)};
     const bool ok = manager.Deserialize(reader);
     EXPECT_FALSE(ok);   // must fail cleanly -- no OOB store, no crash

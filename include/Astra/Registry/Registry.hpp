@@ -48,7 +48,7 @@ namespace Astra
         explicit Registry(const Config& config = {}) :
             m_entityManager(config.entityManagerConfig),
             m_componentRegistry(std::make_shared<ComponentRegistry>()),
-            m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
+            m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig, &m_entityManager.GetRecordTable())),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
             m_workScheduler(config.workScheduler),
@@ -58,7 +58,7 @@ namespace Astra
         Registry(const EntityManager::Config& entityConfig, const ArchetypeChunkPool::Config& chunkConfig) :
             m_entityManager(entityConfig),
             m_componentRegistry(std::make_shared<ComponentRegistry>()),
-            m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, chunkConfig)),
+            m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, chunkConfig, &m_entityManager.GetRecordTable())),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry),
             m_workScheduler(nullptr),
@@ -68,7 +68,7 @@ namespace Astra
         Registry(std::shared_ptr<ComponentRegistry> componentRegistry, const Config& config = {}) :
             m_entityManager(config.entityManagerConfig),
             m_componentRegistry(std::move(componentRegistry)),
-            m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig)),
+            m_archetypeManager(std::make_shared<ArchetypeManager>(m_componentRegistry, config.chunkPoolConfig, &m_entityManager.GetRecordTable())),
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
             m_workScheduler(config.workScheduler),
@@ -1572,11 +1572,15 @@ namespace Astra
             // saved shape wins); only workScheduler-class fields survive Load.
             auto registry = std::make_unique<Registry>(componentRegistry, config);
 
-            // Move the entity manager from unique_ptr
+            // Move the entity manager from unique_ptr. This restores versions into
+            // registry->m_entityManager's record table BEFORE the ArchetypeManager
+            // below is created against that same table -- the deserialize ordering
+            // the shared-table design requires (versions first, then locations).
             registry->m_entityManager = std::move(*(*managerResult.GetValue()));
-            
-            // Create new ArchetypeManager with the component registry and deserialize into it
-            registry->m_archetypeManager = std::make_shared<ArchetypeManager>(componentRegistry, config.chunkPoolConfig);
+
+            // Create new ArchetypeManager pointing at the (now version-restored)
+            // shared record table, then deserialize archetype/location into it.
+            registry->m_archetypeManager = std::make_shared<ArchetypeManager>(componentRegistry, config.chunkPoolConfig, &registry->m_entityManager.GetRecordTable());
             if (!registry->m_archetypeManager->Deserialize(reader))
             {
                 return Result<std::unique_ptr<Registry>, SerializationError>::Err(SerializationError::CorruptedData);
