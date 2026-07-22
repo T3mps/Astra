@@ -5,8 +5,8 @@ Synthesized from a 4-way source dissection of **flecs** (same archetype model, p
 **Unity DOTS** (canonical 16 KB-chunk design). Full per-library dissections and mapping tables live in
 `scratchpad/dissect-{flecs,entt,mass,dots}.md`.
 
-Goal: close the same-machine benchmark gap to flecs (`bench-compare/RESULTS.md`). Astra is #2 on iteration
-and dead-last on all structural churn — **behind flecs on the SAME storage model**, so these are
+Goal: close the same-machine benchmark gap to flecs (`bench-compare/RESULTS.md`). Pre-W1, Astra was #2 on
+iteration and dead-last on all structural churn — **behind flecs on the SAME storage model**, so these are
 optimization gaps, not architectural limits.
 
 **Status (2026-07-22): W1 landed** (`perf/w1-unified-entity-record`, Task 6 benchmark confirmed). Table below
