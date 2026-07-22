@@ -27,7 +27,6 @@
 #include "../Serialization/BinaryWriter.hpp"
 #include "Archetype.hpp"
 #include "ArchetypeChunkPool.hpp"
-#include "ArchetypeGraph.hpp"
 
 namespace Astra
 {
@@ -608,9 +607,9 @@ namespace Astra
         {
             // The shared EntityRecord table is owned by EntityManager::Clear();
             // clearing it here would wipe the versions EntityManager owns. This
-            // manager only resets its own archetypes/chunks/graph.
+            // manager only resets its own archetypes/chunks. Cached transition
+            // edges live inside each Archetype, so they are freed with them below.
             m_archetypeMap.Clear();
-            m_edgeGraph.Clear();
             m_archetypes.clear();  // destroys every archetype, incl. the old root
 
             auto rootArchetype = std::make_unique<Archetype>(ComponentMask{});
@@ -726,9 +725,18 @@ namespace Astra
                 // Remove from archetype map
                 m_archetypeMap.Erase(archetype->GetMask());
 
-                // Remove graph edges
-                m_edgeGraph.RemoveEdgesTo(archetype);
-                m_edgeGraph.RemoveEdgesFrom(archetype);
+                // Null any cached edge (in any surviving archetype) that points to
+                // `archetype` before it is freed in the second pass below -- a
+                // lingering edge would dangle (use-after-free). The doomed
+                // archetype's OWN outgoing edges are freed with it when its
+                // unique_ptr is reset, so only incoming edges need explicit nulling.
+                for (auto& entry : m_archetypes)
+                {
+                    if (entry.archetype && entry.archetype.get() != archetype) ASTRA_LIKELY
+                    {
+                        entry.archetype->ClearEdgesTo(archetype);
+                    }
+                }
             }
             
             // Second pass: mark for removal by moving unique_ptr to release ownership
@@ -1019,19 +1027,19 @@ namespace Astra
         template<typename GetEdgeFunc, typename SetEdgeFunc, typename MaskOp>
         Archetype* GetArchetypeWithModified(Archetype* from, ComponentID componentId, GetEdgeFunc&& getEdge, SetEdgeFunc&& setEdge, MaskOp&& maskOp)
         {
-            if (Archetype* target = getEdge(m_edgeGraph, from, componentId)) ASTRA_LIKELY
+            if (Archetype* target = getEdge(from, componentId)) ASTRA_LIKELY
             {
                 return target;
             }
-            
+
             ComponentMask newMask = from->GetMask();
             maskOp(newMask, componentId);
-            
+
             auto it = m_archetypeMap.Find(newMask);
             if (it != m_archetypeMap.end()) ASTRA_LIKELY
             {
                 Archetype* to = it->second;
-                setEdge(m_edgeGraph, from, componentId, to);
+                setEdge(from, componentId, to);
                 return to;
             }
             
@@ -1074,27 +1082,27 @@ namespace Astra
             m_structuralChangeCounter.fetch_add(1, std::memory_order_release);
             
             Archetype* to = ptr;
-            
-            // Cache edge in the edge graph
-            setEdge(m_edgeGraph, from, componentId, to);
-            
+
+            // Cache edge on the source archetype (per-archetype array-indexed edge).
+            setEdge(from, componentId, to);
+
             return to;
         }
-        
+
         Archetype* GetArchetypeWithAdded(Archetype* from, ComponentID componentId)
         {
             return GetArchetypeWithModified(from, componentId,
-                [](auto& graph, auto* arch, auto id) { return graph.GetAddEdge(arch, id); },
-                [](auto& graph, auto* from, auto id, auto* to) { graph.SetAddEdge(from, id, to); },
-                [](auto& mask, auto id) { mask.Set(id); });
+                [](Archetype* f, ComponentID id) { return f->GetAddEdge(id); },
+                [](Archetype* f, ComponentID id, Archetype* to) { f->SetAddEdge(id, to); },
+                [](ComponentMask& mask, ComponentID id) { mask.Set(id); });
         }
-        
+
         Archetype* GetArchetypeWithRemoved(Archetype* from, ComponentID componentId)
         {
             return GetArchetypeWithModified(from, componentId,
-                [](auto& graph, auto* arch, auto id) { return graph.GetRemoveEdge(arch, id); },
-                [](auto& graph, auto* from, auto id, auto* to) { graph.SetRemoveEdge(from, id, to); },
-                [](auto& mask, auto id) { mask.Reset(id); });
+                [](Archetype* f, ComponentID id) { return f->GetRemoveEdge(id); },
+                [](Archetype* f, ComponentID id, Archetype* to) { f->SetRemoveEdge(id, to); },
+                [](ComponentMask& mask, ComponentID id) { mask.Reset(id); });
         }
 
         ASTRA_NODISCARD std::vector<Archetype*> GetArchetypesSince(uint32_t sinceGeneration) const
@@ -1514,7 +1522,6 @@ namespace Astra
 
         ArchetypeChunkPool m_chunkPool;
         std::weak_ptr<ComponentRegistry> m_componentRegistry;
-        ArchetypeGraph m_edgeGraph;
         std::vector<ArchetypeEntry> m_archetypes;
         FlatMap<ComponentMask, Archetype*, BitmapHash<MAX_COMPONENTS>> m_archetypeMap;
         // Shared paged EntityRecord table, owned by EntityManager and injected at

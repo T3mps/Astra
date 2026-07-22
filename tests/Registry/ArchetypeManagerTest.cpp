@@ -655,3 +655,40 @@ TEST_F(ArchetypeManagerTest, RemoveComponentsReportsActualCountOnChunkExhaustion
         EXPECT_TRUE(localManager.HasComponent<Velocity>(e));   // entities untouched in src
     }
 }
+
+// W2: after an empty archetype is defragmented away, cached edges to it must be
+// invalidated (no dangling pointer) -- subsequent transitions must recompute
+// correctly. This test passes both before and after the per-archetype-edge
+// rewire (the old ArchetypeGraph also invalidated on removal); its guarding
+// value is the POST-rewire path, where invalidation lives in the manager's
+// scan-all ClearEdgesTo that must run BEFORE the archetype's unique_ptr is reset.
+TEST_F(ArchetypeManagerTest, EdgesInvalidatedWhenArchetypeDefragmented)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    Entity e0(1, 1);
+    Entity e1(2, 1);
+    manager->AddEntityWith<Position>(e0, Position{1, 0, 0});   // archetype {Position}
+    manager->AddEntityWith<Position>(e1, Position{2, 0, 0});
+
+    // Transition e0 {Position} -> {Position,Velocity}: caches {Position}'s add-edge for Velocity.
+    manager->AddComponent<Velocity>(e0, Velocity{7, 7, 7});
+    // Empty the {Position,Velocity} archetype again.
+    manager->RemoveComponent<Velocity>(e0);
+
+    // Force removal of the now-empty {Position,Velocity} archetype (default keeps >= 8).
+    ArchetypeManager::DefragmentOptions opts;
+    opts.minArchetypesToKeep = 1;
+    auto result = manager->Defragment(opts);
+    EXPECT_GE(result.emptyArchetypesRemoved, 1u);
+
+    // The cached {Position}->Velocity add-edge now points at a freed archetype IF
+    // invalidation failed. A correct recompute yields e1 with the right Velocity.
+    Velocity* v = manager->AddComponent<Velocity>(e1, Velocity{9, 9, 9});
+    ASSERT_NE(v, nullptr);
+    EXPECT_FLOAT_EQ(v->dx, 9.0f);              // Velocity fields are dx/dy/dz
+    Position* p = manager->GetComponent<Position>(e1);
+    ASSERT_NE(p, nullptr);
+    EXPECT_FLOAT_EQ(p->x, 2.0f);               // still correct after the transition
+}

@@ -41,7 +41,6 @@
 // Archetype system
 #include "Archetype/Archetype.hpp"
 #include "Archetype/ArchetypeChunkPool.hpp"
-#include "Archetype/ArchetypeGraph.hpp"
 #include "Archetype/ArchetypeManager.hpp"
 
 // Registry and queries
