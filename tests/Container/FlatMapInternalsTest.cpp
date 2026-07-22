@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <random>
 #include <set>
@@ -6,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 #include "Astra/Container/FlatMap.hpp"
+#include "Astra/Container/Swiss.hpp"
 #include "Astra/Entity/Entity.hpp"
 
 // Split from FlatMapTest.cpp (2026-07-10 test-suite audit): the public-API
@@ -256,4 +258,37 @@ TEST_F(FlatMapTest, RandomOperations)
         ASSERT_NE(it, map.end());
         EXPECT_EQ(it->second, value);
     }
+}
+
+// W6: the avalanche mix must spread H2 for identity/pointer-like (power-of-two-strided)
+// keys. Pre-W6, H2(aligned) collapsed to a single value (SIMD group filter no-op).
+TEST_F(FlatMapTest, SplitHashMixSpreadsH2ForAlignedKeys)
+{
+    std::set<uint8_t> h2values;
+    for (std::size_t i = 1; i <= 1000; ++i)
+    {
+        std::size_t aligned = i * 16;  // 16-byte-aligned, like heap pointers
+        h2values.insert(Astra::SwissTable::H2(Astra::SwissTable::Mix(aligned)));
+    }
+    EXPECT_GT(h2values.size(), 100u) << "H2 not well-distributed after Mix";
+}
+
+// W6: functional guard — many aligned-pointer keys insert/find correctly.
+TEST_F(FlatMapTest, AlignedPointerKeysResolveCorrectly)
+{
+    Astra::FlatMap<void*, int> map;
+    std::vector<void*> keys;
+    for (int i = 1; i <= 2000; ++i)
+    {
+        void* k = reinterpret_cast<void*>(static_cast<std::uintptr_t>(i) * 16);
+        keys.push_back(k);
+        map[k] = i;
+    }
+    for (std::size_t i = 0; i < keys.size(); ++i)
+    {
+        auto it = map.Find(keys[i]);
+        ASSERT_NE(it, map.end());
+        EXPECT_EQ(it->second, static_cast<int>(i) + 1);
+    }
+    EXPECT_EQ(map.Size(), keys.size());
 }

@@ -917,6 +917,7 @@ namespace Astra
         // Extract H1 (57-bit position) and H2 (7-bit metadata) from hash
         static std::pair<std::size_t, std::uint8_t> SplitHash(std::size_t hash) noexcept
         {
+            hash = SwissTable::Mix(hash);            // W6: avalanche for identity/pointer hashers
             // Use SwissTable utilities for hash splitting
             std::uint8_t h2 = SwissTable::H2(hash);
             // Return full hash as h1, will be masked during probing
