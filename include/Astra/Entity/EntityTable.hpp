@@ -500,7 +500,7 @@ namespace Astra
         size_t SegmentsPerHugePage() const noexcept
         {
             const size_t sb = SegmentBytes();
-            return sb ? (HUGE_PAGE_SIZE / sb) : 0;   // 0 ⇒ segment bigger than a huge page ⇒ heap fallback
+            return sb ? (HUGE_PAGE_SIZE / sb) : 0;   // sb==0 (degenerate) => 0; a segment larger than a huge page also yields 0 via integer division => heap fallback in both cases
         }
 
         // Get segment for an ID, creating it if necessary

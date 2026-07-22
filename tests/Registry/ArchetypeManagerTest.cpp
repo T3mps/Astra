@@ -511,6 +511,40 @@ TEST_F(ArchetypeManagerTest, InvalidEntityOperations)
     
     // Try to remove non-existent entity
     manager->RemoveEntity(invalidEntity); // Should not crash
+
+    // Beyond the seeded id range: record-absent (rec == nullptr) find-guard arm.
+    // The fixture only seeds versions for ids [0, 10000), all of which live in
+    // the default 65536-entity segment 0; id 70000 falls in segment 1, which was
+    // never created, so GetRecord returns nullptr.
+    Astra::Entity beyondRangeEntity(70000, 1);
+
+    // Try to get component from a never-seeded entity
+    EXPECT_EQ(manager->GetComponent<Position>(beyondRangeEntity), nullptr);
+
+    // Try to add component to a never-seeded entity
+    EXPECT_EQ(manager->AddComponent<Position>(beyondRangeEntity), nullptr);
+
+    // Try to remove component from a never-seeded entity
+    EXPECT_FALSE(manager->RemoveComponent<Position>(beyondRangeEntity));
+
+    // Try to remove a never-seeded entity
+    manager->RemoveEntity(beyondRangeEntity); // Should not crash
+
+    // Seeded id but wrong version: version-mismatch find-guard arm. The fixture
+    // seeds id 1 with version 1; version 7 doesn't match the stored version.
+    Astra::Entity versionMismatchEntity(1, 7);
+
+    // Try to get component from a version-mismatched entity
+    EXPECT_EQ(manager->GetComponent<Position>(versionMismatchEntity), nullptr);
+
+    // Try to add component to a version-mismatched entity
+    EXPECT_EQ(manager->AddComponent<Position>(versionMismatchEntity), nullptr);
+
+    // Try to remove component from a version-mismatched entity
+    EXPECT_FALSE(manager->RemoveComponent<Position>(versionMismatchEntity));
+
+    // Try to remove a version-mismatched entity
+    manager->RemoveEntity(versionMismatchEntity); // Should not crash
 }
 
 // Test duplicate component addition

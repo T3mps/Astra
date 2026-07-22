@@ -203,7 +203,9 @@ namespace Astra
             if (auto movedEntity = archetype->RemoveEntity(oldLocation)) ASTRA_LIKELY
             {
                 // The swapped-in entity is guaranteed live and located.
-                m_records->GetRecord(movedEntity->GetID())->location = oldLocation;
+                EntityRecord* movedRec = m_records->GetRecord(movedEntity->GetID());
+                ASTRA_ASSERT(movedRec, "swap-moved entity must be live and located");
+                movedRec->location = oldLocation;
             }
 
             // Erase clears LOCATION ONLY -- EntityManager::Destroy owns the version.
@@ -1124,7 +1126,9 @@ namespace Astra
             
             if (auto movedEntity = oldLoc.archetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
             {
-                m_records->GetRecord(movedEntity->GetID())->location = oldLoc.location;
+                EntityRecord* movedRec = m_records->GetRecord(movedEntity->GetID());
+                ASTRA_ASSERT(movedRec, "swap-moved entity must be live and located");
+                movedRec->location = oldLoc.location;
             }
 
             // oldLoc aliases the shared record for `entity`; writing it here IS the
@@ -1246,7 +1250,9 @@ namespace Astra
                 auto& [entity, location] = entities[i];
                 if (auto movedEntity = srcArchetype->RemoveEntity(location)) ASTRA_LIKELY
                 {
-                    m_records->GetRecord(movedEntity->GetID())->location = location;
+                    EntityRecord* movedRec = m_records->GetRecord(movedEntity->GetID());
+                    ASTRA_ASSERT(movedRec, "swap-moved entity must be live and located");
+                    movedRec->location = location;
                 }
             }
 
@@ -1395,7 +1401,11 @@ namespace Astra
 
             // Remove from old archetype
             if (auto movedEntity = oldLoc.archetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
-                m_records->GetRecord(movedEntity->GetID())->location = oldLoc.location;
+            {
+                EntityRecord* movedRec = m_records->GetRecord(movedEntity->GetID());
+                ASTRA_ASSERT(movedRec, "swap-moved entity must be live and located");
+                movedRec->location = oldLoc.location;
+            }
 
             // Update entity record (oldLoc aliases the shared record for `entity`;
             // archetype/location only -- never version).
@@ -1510,6 +1520,8 @@ namespace Astra
         // Shared paged EntityRecord table, owned by EntityManager and injected at
         // construction. This manager only ever writes archetype/location into a
         // record (via GetOrCreateRecord/GetRecord); versions belong to EntityManager.
+        // Non-owning: the shared record table is owned by the Registry's EntityManager and
+        // outlives this manager. Never retain an ArchetypeManager (or a View) past its Registry.
         EntityTable* m_records = nullptr;
 
         Archetype* m_rootArchetype = nullptr;
