@@ -9,8 +9,9 @@ Goal: close the same-machine benchmark gap to flecs (`bench-compare/RESULTS.md`)
 iteration and dead-last on all structural churn — **behind flecs on the SAME storage model**, so these are
 optimization gaps, not architectural limits.
 
-**Status (2026-07-22): W1 landed** (`perf/w1-unified-entity-record`, Task 6 benchmark confirmed). Table below
-is the pre-W1 baseline that motivated this plan; see Phase A for the measured after-numbers.
+**Status (2026-07-22): W1, W6, W2 landed** (W1 on `perf/w1-unified-entity-record`; W6+W2 on
+`perf/w6-w2-archetype-edges`, benchmark-confirmed). Table below is the pre-W1 baseline that motivated this
+plan; see Phase A for W1's measured after-numbers and Phase B for W6+W2's. **Next: Phase C (W5⇒W4⇒W3⇒W7).**
 
 | op (pre-W1 baseline) | Astra | flecs | ratio | EnTT |
 |---|---|---|---|---|
@@ -105,10 +106,11 @@ priorities (add + create).
   - Verified `GetComponent`/`HasComponent` route through `m_records->GetRecord(id)`
     (`ArchetypeManager.hpp:512-529`) — version check and location read share the one fetched `EntityRecord`.
   - Full numbers: `bench-compare/RESULTS.md` (updated 2026-07-22).
-- **W6 — `SplitHash` pointer mixing.** One-spot change (multiply-by-odd / xorshift before H1/H2 split).
-  Cheap; de-risks all pointer-keyed maps. Off the critical path but essentially free. **▶ NEXT.**
+- **W6 — `SplitHash` pointer mixing. ✅ DONE (2026-07-22, `perf/w6-w2-archetype-edges`).**
+  Replaced `SplitHash`'s raw `std::hash` forwarding with an `fmix64`-style avalanche mix before the H1/H2
+  split, so pointer-keyed (and other low-entropy) `FlatMap` keys no longer degenerate the SIMD H2 filter.
 
-### Phase B — Archetype edge arrays  *(the add/remove killer)*
+### Phase B — Archetype edge arrays  *(the add/remove killer)* — ✅ DONE (2026-07-22, `perf/w6-w2-archetype-edges`)
 - **W2 — Embed array-indexed edges in `Archetype`.** Add `Archetype* addEdge[MAX_COMPONENTS]` +
   `removeEdge[MAX_COMPONENTS]` (dense, id-indexed) with an optional small map for any high ids; warm add
   becomes `from->addEdge[id]` — no hashing, no outer pointer-keyed map. Retire the
@@ -117,6 +119,23 @@ priorities (add + create).
   (`RemoveEdgesTo`/`RemoveEdgesFrom`) and map cleanly onto array clears.
   - Optional follow-on (flecs #7): cache the precomputed add/removed-id diff on the edge.
   - Expected: add 279→~90; remove 220→~60. Largest single structural win.
+  - **Implemented as:** lazily-allocated `Archetype* m_addEdges[MAX_COMPONENTS]` / `m_removeEdges[...]`
+    directly on `Archetype` (`Archetype.hpp:1061-1087`, `GetAddEdge`/`SetAddEdge`/`GetRemoveEdge`/
+    `SetRemoveEdge`/`ClearEdgesTo`); `ArchetypeGraph.hpp` deleted; `GetArchetypeWithAdded`/
+    `GetArchetypeWithRemoved` (`ArchetypeManager.hpp:1092-1106`) rewired to read the edge directly off
+    `from`. Verified in source (not a leftover path).
+  - **Measured (median of 6 interleaved before/after runs, same session, `bench-compare/`; see
+    `bench-compare/RESULTS.md` "W6+W2" section for full methodology):**
+    - add component: **152.5 → 131.5 ns (13.7% faster)** — smaller than the ~90 ns estimate above; the
+      archetype-edge lookup was a real but not dominant cost. Residual gap to flecs: 2.41× (was 2.81×).
+    - remove component: **106.0 → 86.4 ns (18.4% faster)** — residual gap to flecs: 2.64× (was 3.28×).
+    - create / random_get / iterate: flat within noise, as expected (edge cache isn't on those paths).
+    - The win is consistent, not noise: across all 6 paired runs the "after" add/remove samples were
+      strictly below every "before" sample (non-overlapping distributions).
+    - **Honest gap vs the plan's Phase-B estimate:** predicted ~35-40% reduction; measured 13.7%/18.4%.
+      The remaining cost is the transition **move** itself (per-element `MoveConstruct`/`Destruct` via
+      function pointer, `Archetype.hpp:1433` / `ArchetypeChunkPool.hpp:365-396`) — unchanged by W2, and
+      now the clearest lever, which is exactly **W3**'s (Phase C) target.
 
 ### Phase C — Chunk storage modernization  *(invasive core refactor; create + iterate + memory; SDD with opus, 3-config verify)*
 Bundle these — they share the same layout change and the 0..128→0..N cleanup:
@@ -167,10 +186,13 @@ add ~80-90 · remove ~50-60 · create ~120-150 · random_get ~70-80 · iterate2 
 i.e. roughly **flecs parity on the same model**, which is the stated goal.
 
 ## 7. Suggested execution order
-~~W1~~ ✅ done (2026-07-22) → **W6 (next)** → W2 → (W5 ⇒ W4 ⇒ W3 ⇒ W7). Reuse the SDD model
+~~W1~~ ✅ done (2026-07-22) → ~~W6~~ ✅ done (2026-07-22) → ~~W2~~ ✅ done (2026-07-22) →
+**Phase C (next): W5 ⇒ W4 ⇒ W3 ⇒ W7**. Reuse the SDD model
 (brainstorm→spec→plan→SDD; opus on the core storage diffs in Phase C; independent 3-config verify;
-finish = merge-to-dev-local-FF, delete branch, don't push). W1 and W2 are small enough to each be their
-own SDD unit landing quick wins before the invasive Phase C.
+finish = merge-to-dev-local-FF, delete branch, don't push). W1/W6/W2 were small enough to each land as
+their own SDD unit with quick, independently-benchmarkable wins; Phase C is the larger, invasive chunk-
+storage refactor (shared layout change across W5/W4/W3/W7) and should be scoped/sequenced accordingly —
+W3 (trivial memcpy move) is the clearest next lever per the W6+W2 measured results above.
 
 ---
 
