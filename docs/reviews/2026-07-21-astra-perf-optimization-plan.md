@@ -118,7 +118,9 @@ priorities (add + create).
   `GetArchetypeWithModified` (`ArchetypeManager.hpp:985`). Edge-invalidation hooks already exist
   (`RemoveEdgesTo`/`RemoveEdgesFrom`) and map cleanly onto array clears.
   - Optional follow-on (flecs #7): cache the precomputed add/removed-id diff on the edge.
-  - Expected: add 279→~90; remove 220→~60. Largest single structural win.
+  - Expected (original estimate, against the then-current **pre-W1** baseline): add 279→~90; remove
+    220→~60. Largest single structural win. (Once W1 landed, the actual starting point moved to
+    150.5/105.6 — see the rebased prediction in the Measured bullet below.)
   - **Implemented as:** lazily-allocated `Archetype* m_addEdges[MAX_COMPONENTS]` / `m_removeEdges[...]`
     directly on `Archetype` (`Archetype.hpp:1061-1087`, `GetAddEdge`/`SetAddEdge`/`GetRemoveEdge`/
     `SetRemoveEdge`/`ClearEdgesTo`); `ArchetypeGraph.hpp` deleted; `GetArchetypeWithAdded`/
@@ -126,16 +128,24 @@ priorities (add + create).
     `from`. Verified in source (not a leftover path).
   - **Measured (median of 6 interleaved before/after runs, same session, `bench-compare/`; see
     `bench-compare/RESULTS.md` "W6+W2" section for full methodology):**
-    - add component: **152.5 → 131.5 ns (13.7% faster)** — smaller than the ~90 ns estimate above; the
-      archetype-edge lookup was a real but not dominant cost. Residual gap to flecs: 2.41× (was 2.81×).
-    - remove component: **106.0 → 86.4 ns (18.4% faster)** — residual gap to flecs: 2.64× (was 3.28×).
+    - add component: **152.5 → 131.5 ns (13.7% faster)** — rebased onto the actual pre-W2 (post-W1)
+      starting point (152.5, not the stale 279 above), the predicted target was ~100-110 ns (≈27-33%
+      reduction); the measured 13.7% came in below that. The archetype-edge lookup was a real but not
+      dominant cost. Residual gap to flecs: 2.41× (down from 2.79× pre-W2: 152.5/54.6, this session's own
+      fresh medians).
+    - remove component: **106.0 → 86.4 ns (18.4% faster)** — rebased prediction was ~70 ns (≈34%
+      reduction); measured 18.4% came in below that too. Residual gap to flecs: 2.64× (down from 3.24×
+      pre-W2: 106.0/32.7).
     - create / random_get / iterate: flat within noise, as expected (edge cache isn't on those paths).
     - The win is consistent, not noise: across all 6 paired runs the "after" add/remove samples were
       strictly below every "before" sample (non-overlapping distributions).
-    - **Honest gap vs the plan's Phase-B estimate:** predicted ~35-40% reduction; measured 13.7%/18.4%.
-      The remaining cost is the transition **move** itself (per-element `MoveConstruct`/`Destruct` via
-      function pointer, `Archetype.hpp:1433` / `ArchetypeChunkPool.hpp:365-396`) — unchanged by W2, and
-      now the clearest lever, which is exactly **W3**'s (Phase C) target.
+    - **Honest gap vs the plan's Phase-B estimate:** the original line above (279→~90, 220→~60) targeted
+      the stale pre-W1 baseline (~35-40% reduction from those numbers); rebased onto the actual pre-W2
+      (post-W1) starting point the predicted reduction was ≈27-34% (add ~27-33%, remove ~34%); measured
+      13.7%/18.4% came in below even that rebased range. The remaining cost is the transition **move**
+      itself (per-element `MoveConstruct`/`Destruct` via function pointer, `Archetype.hpp:1433` /
+      `ArchetypeChunkPool.hpp:365-396`) — unchanged by W2, and now the clearest lever, which is exactly
+      **W3**'s (Phase C) target.
 
 ### Phase C — Chunk storage modernization  *(invasive core refactor; create + iterate + memory; SDD with opus, 3-config verify)*
 Bundle these — they share the same layout change and the 0..128→0..N cleanup:
@@ -187,12 +197,13 @@ i.e. roughly **flecs parity on the same model**, which is the stated goal.
 
 ## 7. Suggested execution order
 ~~W1~~ ✅ done (2026-07-22) → ~~W6~~ ✅ done (2026-07-22) → ~~W2~~ ✅ done (2026-07-22) →
-**Phase C (next): W5 ⇒ W4 ⇒ W3 ⇒ W7**. Reuse the SDD model
+**Phase C (next): W5 ⇒ W4 ⇒ W3 ⇒ W7**, beginning with W5. Reuse the SDD model
 (brainstorm→spec→plan→SDD; opus on the core storage diffs in Phase C; independent 3-config verify;
 finish = merge-to-dev-local-FF, delete branch, don't push). W1/W6/W2 were small enough to each land as
 their own SDD unit with quick, independently-benchmarkable wins; Phase C is the larger, invasive chunk-
 storage refactor (shared layout change across W5/W4/W3/W7) and should be scoped/sequenced accordingly —
-W3 (trivial memcpy move) is the clearest next lever per the W6+W2 measured results above.
+W5 lands first since W4/W3/W7 build on its layout change; W3 (trivial memcpy move) is the clearest lever
+on add/remove per the W6+W2 measured results above once that groundwork is in place.
 
 ---
 

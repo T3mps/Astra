@@ -79,18 +79,22 @@ vs 105-107 ns before) — the two distributions don't overlap.
 
 ### Honest sanity-check against the plan's prediction
 
-The perf plan (`docs/reviews/2026-07-21-astra-perf-optimization-plan.md`, Phase B) predicted **add
-150→~90 ns and remove 220→~60 ns** (i.e. ~35-40% reductions) on the theory that the edge lookup was the
-dominant cost. The measured reduction is smaller — **13.7%/18.4%**, not ~35%. The wiring was independently
-verified correct in source (above), so this is not a leftover-path bug; it means the archetype-edge
-`FlatMap` double-probe was a real but smaller share of add/remove's cost than the plan estimated. The
-remaining cost is dominated by the transition **move** itself (per-element `MoveConstruct`/`Destruct` via
-function pointer over the chunk's present components, `Archetype.hpp:1433` / `ArchetypeChunkPool.hpp:365-396`)
-— unchanged by W2, and exactly what **W3** (trivial memcpy move) targets next.
+The perf plan (`docs/reviews/2026-07-21-astra-perf-optimization-plan.md`, Phase B) originally estimated add
+279→~90 ns and remove 220→~60 ns against the **pre-W1** baseline that was current when that line was written.
+Rebased onto the actual pre-W2 (i.e. post-W1) starting point — the baseline this session's A/B actually
+measured from — the predicted target was **add ~150→~100-110 ns and remove ~106→~70 ns** (i.e. ≈27-34%
+reductions: add ~27-33%, remove ~34%), still on the theory that the edge lookup was the dominant remaining
+cost. The measured reduction is smaller than that rebased prediction — **13.7%/18.4%**, below the ≈27-34%
+range. The wiring was independently verified correct in source (above), so this is not a leftover-path bug;
+it means the archetype-edge `FlatMap` double-probe was a real but smaller share of add/remove's cost than
+the plan estimated. The remaining cost is dominated by the transition **move** itself (per-element
+`MoveConstruct`/`Destruct` via function pointer over the chunk's present components, `Archetype.hpp:1433` /
+`ArchetypeChunkPool.hpp:365-396`) — unchanged by W2, and exactly what **W3** (trivial memcpy move) targets next.
 
-Residual gap to flecs, post-W6+W2: add 131.5 vs flecs 54.6 (2.41×, down from 2.81× pre-W2), remove 86.4 vs
-flecs 32.7 (2.64×, down from 3.28× pre-W2). Both gaps shrank but flecs is still meaningfully ahead — consistent
-with the move-cost diagnosis above (W3/W4/W5, Phase C, is where that residual gap should close further).
+Residual gap to flecs, post-W6+W2: add 131.5 vs flecs 54.6 (2.41×, down from 2.79× pre-W2: 152.5/54.6, this
+session's own fresh pre-W2/flecs medians), remove 86.4 vs flecs 32.7 (2.64×, down from 3.24× pre-W2:
+106.0/32.7). Both gaps shrank but flecs is still meaningfully ahead — consistent with the move-cost diagnosis
+above (W3/W4/W5, Phase C, is where that residual gap should close further).
 
 ## Honest verdict (updated post-W1)
 
@@ -104,10 +108,10 @@ with the move-cost diagnosis above (W3/W4/W5, Phase C, is where that residual ga
 
 flecs uses the **same storage model** as Astra. Pre-W1 it was 1.7× faster on iteration and 3.5×–6.4× faster on structural ops — meaning Astra's deficits were **optimization gaps, not architectural limits**. W1 (the first of those fixes) already halved-to-thirded most of the structural gap, confirming the diagnosis. Remaining causes, per the perf plan (`docs/reviews/2026-07-21-astra-perf-optimization-plan.md`):
 - **Iteration gap vs flecs:** W6 (hash mixing) landed but iteration was never W6's target and shows no change, as predicted; the remaining cause is per-chunk 23 KB `ComponentDescriptor`-by-value metadata bloat (cache pressure — W5) and possibly chunk-size/prefetch tuning — both Phase C.
-- **Remaining structural gap (add especially):** W2 replaced the two pointer-keyed `FlatMap` probes with array-indexed edges and measurably helped (add 2.81×→2.41× behind flecs, remove 3.28×→2.64×), but the transition **move** cost (per-element ctor/dtor via fn-ptr, not memcpy) now dominates what's left — that's **W3**'s target.
+- **Remaining structural gap (add especially):** W2 replaced the two pointer-keyed `FlatMap` probes with array-indexed edges and measurably helped (add 2.79×→2.41× behind flecs, remove 3.24×→2.64×), but the transition **move** cost (per-element ctor/dtor via fn-ptr, not memcpy) now dominates what's left — that's **W3**'s target.
 - **random_get** is close to flecs (63.8 vs 57.4 ns, 1.11×) — W1 alone nearly closed this gap, exactly as the plan predicted (W1 "dominates random_get"); W2 doesn't touch this path, as expected (flat).
 
-**Takeaway for the roadmap:** W1 validated the "optimization gaps, not architectural limits" diagnosis — a single surgical change (paged record, no API change) closed most of random_get and a meaningful slice of create/add/remove. **W6+W2 landed 2026-07-22** (avalanche hash mix + array-indexed archetype edges): a real but smaller-than-predicted add/remove win (13.7%/18.4%, see the W6+W2 section above), confirming the edge lookup was a genuine but not dominant cost. Next up per the plan's execution order: **Phase C** (chunk storage modernization: W5 → W4 → W3 → W7), starting with W3 (trivial memcpy move) since it's now the clearest remaining lever on add/remove.
+**Takeaway for the roadmap:** W1 validated the "optimization gaps, not architectural limits" diagnosis — a single surgical change (paged record, no API change) closed most of random_get and a meaningful slice of create/add/remove. **W6+W2 landed 2026-07-22** (avalanche hash mix + array-indexed archetype edges): a real but smaller-than-predicted add/remove win (13.7%/18.4%, below the rebased ≈27-34% prediction — see the W6+W2 section above), confirming the edge lookup was a genuine but not dominant cost. Next up per the plan's execution order: **Phase C** (chunk storage modernization: W5 ⇒ W4 ⇒ W3 ⇒ W7), beginning with W5 — the shared metadata-layout change W4/W3/W7 build on; W3 (trivial memcpy move) is the clearest lever on add/remove once that groundwork lands.
 
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`.
