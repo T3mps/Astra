@@ -9,7 +9,10 @@ Goal: close the same-machine benchmark gap to flecs (`bench-compare/RESULTS.md`)
 and dead-last on all structural churn — **behind flecs on the SAME storage model**, so these are
 optimization gaps, not architectural limits.
 
-| op | Astra | flecs | ratio | EnTT |
+**Status (2026-07-22): W1 landed** (`perf/w1-unified-entity-record`, Task 6 benchmark confirmed). Table below
+is the pre-W1 baseline that motivated this plan; see Phase A for the measured after-numbers.
+
+| op (pre-W1 baseline) | Astra | flecs | ratio | EnTT |
 |---|---|---|---|---|
 | add-component | 279 | 60 | **4.6×** | 12.5 |
 | create (2 comp) | 367 | 105 | **3.5×** | 44 |
@@ -85,15 +88,25 @@ priorities (add + create).
 ## 3. Prioritized phases
 
 ### Phase A — Entity index + hash hygiene  *(surgical, broadest ROI, lands first)*
-- **W1 — Paged direct-index entity→location.** Replace `ArchetypeManager::m_entityMap`
-  (`unordered_map`, :1473) with a paged/segmented direct-index array of `EntityRecord`, indexed by
-  `entity.GetID()`, version-validated. **Astra already has the exact machinery** — `Entity/EntityTable.hpp`
-  `Segment`/`segIdx = id>>shift` (used today only for versions). Sweep the ~20 call sites
-  (`ArchetypeManager.hpp` create/add/remove/get/has), preserving the swap-remove back-patch at ~:191-196.
-  - Removes: per-op hash + bucket-chase; **per-create heap node allocation**.
-  - Expected: random_get 147→~80; meaningful slices off create/add/remove.
+- **W1 — Paged direct-index entity→location. ✅ DONE (2026-07-22, `perf/w1-unified-entity-record`).**
+  Replaced `ArchetypeManager::m_entityMap` (`unordered_map`, was :1473) with a paged/segmented direct-index
+  array of `EntityRecord{archetype, location, version}`, indexed by `entity.GetID()`, version-validated —
+  unified with the existing `Entity/EntityTable.hpp` `Segment`/`segIdx = id>>shift` machinery (previously
+  used only for versions, now also carries archetype+location). ~40 call sites migrated
+  (`ArchetypeManager.hpp` create/add/remove/get/has + serialization); public `Registry` API unchanged.
+  - Removed: per-op hash + bucket-chase; **per-create heap node allocation**.
+  - **Measured (median of 3 runs, `bench-compare/`, vs pre-W1 baseline above):**
+    - random_get: **147.0 → 62.2 ns (2.36× faster)** — beat the ~80 ns estimate; now only 1.2× behind flecs (was 2.3×).
+    - create (2 comp): **366.8 → 129.0 ns (2.84× faster)** — now 1.4× behind flecs (was 3.5×).
+    - add component: **278.6 → 150.5 ns (1.85× faster)** — now 2.8× behind flecs (was 4.6×) — largest remaining gap, W2's target.
+    - remove component: **220.4 → 105.6 ns (2.09× faster)** — now 3.3× behind flecs (was 6.4×).
+    - iterate 1/2/3 comp: unchanged within run-to-run noise (0.456/1.538/1.457 → 0.436/1.173/1.142 ns) —
+      confirms the record table is off the iteration hot path, as expected; no regression.
+  - Verified `GetComponent`/`HasComponent` route through `m_records->GetRecord(id)`
+    (`ArchetypeManager.hpp:512-529`) — version check and location read share the one fetched `EntityRecord`.
+  - Full numbers: `bench-compare/RESULTS.md` (updated 2026-07-22).
 - **W6 — `SplitHash` pointer mixing.** One-spot change (multiply-by-odd / xorshift before H1/H2 split).
-  Cheap; de-risks all pointer-keyed maps. Off the critical path but essentially free.
+  Cheap; de-risks all pointer-keyed maps. Off the critical path but essentially free. **▶ NEXT.**
 
 ### Phase B — Archetype edge arrays  *(the add/remove killer)*
 - **W2 — Embed array-indexed edges in `Archetype`.** Add `Archetype* addEdge[MAX_COMPONENTS]` +
@@ -154,10 +167,10 @@ add ~80-90 · remove ~50-60 · create ~120-150 · random_get ~70-80 · iterate2 
 i.e. roughly **flecs parity on the same model**, which is the stated goal.
 
 ## 7. Suggested execution order
-W1 → W6 → W2 → (W5 ⇒ W4 ⇒ W3 ⇒ W7). Reuse the SDD model (brainstorm→spec→plan→SDD; opus on the core
-storage diffs in Phase C; independent 3-config verify; finish = merge-to-dev-local-FF, delete branch,
-don't push). W1 and W2 are small enough to each be their own SDD unit landing quick wins before the
-invasive Phase C.
+~~W1~~ ✅ done (2026-07-22) → **W6 (next)** → W2 → (W5 ⇒ W4 ⇒ W3 ⇒ W7). Reuse the SDD model
+(brainstorm→spec→plan→SDD; opus on the core storage diffs in Phase C; independent 3-config verify;
+finish = merge-to-dev-local-FF, delete branch, don't push). W1 and W2 are small enough to each be their
+own SDD unit landing quick wins before the invasive Phase C.
 
 ---
 
