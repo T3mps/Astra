@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "Astra/Entity/Entity.hpp"
+#include <Astra/Entity/EntityRecord.hpp>
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
@@ -465,4 +466,11 @@ TEST(EntityVersionWrap, WrapsAtMaskForNonByteWidth)
     // 8-bit version field still wraps correctly (regression guard).
     EXPECT_EQ(NextEntityVersion<uint8_t>(255, 255, 0, 1), 1);
     EXPECT_EQ(NextEntityVersion<uint8_t>(7,   255, 0, 1), 8);
+}
+
+TEST(EntityRecord, DefaultIsDeadAndUnlocated)
+{
+    Astra::EntityRecord r;
+    EXPECT_EQ(r.version, 0u);            // dead by default
+    EXPECT_EQ(r.archetype, nullptr);    // unlocated by default
 }
