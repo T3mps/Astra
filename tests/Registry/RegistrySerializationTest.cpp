@@ -278,3 +278,63 @@ TEST_F(RegistryTest, SerializationErrorHandling)
         EXPECT_TRUE(loadResult.IsErr());
     }
 }
+
+// W1 unified paged entity record (Task 5): version and location now share one
+// slot in EntityManager's record table, so on load EntityManager MUST restore
+// versions before ArchetypeManager writes locations into those same slots
+// (see the INVARIANT comment in Registry::LoadInternal). This round-trip test
+// locks that ordering: it destroys a subset of entities before saving (so the
+// restored table has both recycled versions and holes), then asserts BOTH
+// liveness (IsValid) and location (a component value read through the
+// restored archetype) are correct after load. Uses the existing
+// Astra::Test::Position/Velocity types (near the TypeID ceiling -- no new
+// component types).
+TEST(RegistrySerialization, UnifiedRecordRoundTripPreservesLivenessAndLocation)
+{
+    using namespace Astra::Test;
+
+    Astra::Registry registry;
+    registry.GetComponentRegistry()->RegisterComponents<Position, Velocity>();
+
+    std::vector<Astra::Entity> ents;
+    for (int i = 0; i < 100; ++i)
+    {
+        ents.push_back(registry.CreateEntityWith(
+            Position{float(i), 0.0f, 0.0f},
+            Velocity{1.0f, 1.0f, 1.0f}
+        ));
+    }
+
+    // Destroy every 10th entity so recycled versions and holes in the shared
+    // record table are exercised across the round trip.
+    for (int i = 0; i < 100; i += 10)
+    {
+        registry.DestroyEntity(ents[i]);
+    }
+
+    // Save to memory
+    auto saveResult = registry.Save();
+    ASSERT_TRUE(saveResult.IsOk());
+    auto buffer = std::move(*saveResult.GetValue());
+
+    // Create component registry for loading
+    auto componentRegistry = std::make_shared<Astra::ComponentRegistry>();
+    componentRegistry->RegisterComponents<Position, Velocity>();
+
+    // Load from memory
+    auto loadResult = Astra::Registry::Load(buffer, componentRegistry);
+    ASSERT_TRUE(loadResult.IsOk()) << "Failed to load registry, error: " << static_cast<int>(*loadResult.GetError());
+    auto loadedRegistry = std::move(*loadResult.GetValue());
+
+    for (int i = 0; i < 100; ++i)
+    {
+        const bool destroyed = (i % 10 == 0);
+        EXPECT_EQ(loadedRegistry->IsValid(ents[i]), !destroyed) << "i=" << i;
+        if (!destroyed)
+        {
+            const Position* p = loadedRegistry->GetComponent<Position>(ents[i]);
+            ASSERT_NE(p, nullptr) << "i=" << i;
+            EXPECT_FLOAT_EQ(p->x, float(i));   // location resolved correctly after load
+        }
+    }
+}

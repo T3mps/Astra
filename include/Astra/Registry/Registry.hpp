@@ -1578,6 +1578,8 @@ namespace Astra
             // the shared-table design requires (versions first, then locations).
             registry->m_entityManager = std::move(*(*managerResult.GetValue()));
 
+            // INVARIANT: EntityManager restores versions into the shared record table BEFORE
+            // ArchetypeManager writes locations into the same slots (Task 5 / W1 unified record).
             // Create new ArchetypeManager pointing at the (now version-restored)
             // shared record table, then deserialize archetype/location into it.
             registry->m_archetypeManager = std::make_shared<ArchetypeManager>(componentRegistry, config.chunkPoolConfig, &registry->m_entityManager.GetRecordTable());
