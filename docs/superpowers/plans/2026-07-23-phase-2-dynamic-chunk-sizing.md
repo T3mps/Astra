@@ -675,8 +675,9 @@ namespace Astra
 
 Implementation notes for the executor:
 - `Free`'s `MarkAsFree` before `MergePrev` matches the reference order (`block_mark_as_free` → merges → insert).
-- If `SmallVector` lacks `pop_back`/`back`, check its API in `include/Astra/Container/SmallVector.hpp` and use the closest equivalent (it is used with `push_back` throughout the codebase).
+- `SmallVector` API verified present: `push_back`, `emplace_back`, `back()`, `pop_back()`, `clear()`, `reserve()`, `size()`, `operator[]`.
 - `MergeNext` on the last real block sees the used sentinel ⇒ never merges past the arena end; sentinel `size==0` means `NextBlock(sentinel)` is never taken (sentinel is never freed).
+- **THE EMBEDDED CODE IS AN UNVERIFIED DRAFT.** It has never been compiled or run. TLSF pointer arithmetic and flag handling are notoriously subtle (`Split`'s remainder header placement, `TrimFree`'s prev-free bit, `Absorb`'s flag preservation, `AddArena`'s front-pad math are the likely defect sites). Treat it as a well-informed starting point, NOT as correct: your obligation is that the tests pass and `Validate()` holds, and you should expect to fix real bugs in it. Verify each routine against the C reference quoted above. Report every deviation you had to make and why.
 
 - [ ] **Step 5: Build Debug, run the Tlsf suite**
 
@@ -822,6 +823,9 @@ namespace
             d.size = 16;
             d.alignment = 8;
             d.is_trivially_copyable = true;
+            // Required: DefaultConstruct() memsets when this is true, instead of
+            // calling the (null, in this hand-built descriptor) defaultConstruct fn.
+            d.is_trivially_default_constructible = true;
             return d;
         }();
         Astra::ArchetypeColumnMeta meta;
