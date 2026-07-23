@@ -138,14 +138,26 @@ TEST_F(ResourceExhaustionTest, ArchetypeChunkPoolExhaustion)
     {
         descriptors.push_back(*posDesc);
     }
-    
+
+    // Chunks now consume shared per-archetype column metadata instead of a
+    // descriptors vector. Build it from `descriptors` (must outlive the chunks;
+    // its column descriptor pointers reference `descriptors`).
+    ArchetypeColumnMeta meta;
+    for (const auto& d : descriptors)
+    {
+        if (d.size == 0) continue;
+        const uint16_t col = meta.columnCount++;
+        meta.columns[col] = { d.id, static_cast<uint32_t>(d.size), &d };
+        meta.idToColumn[d.id] = static_cast<int16_t>(col);
+    }
+
     std::vector<std::unique_ptr<ArchetypeChunk, ArchetypeChunkPool::ChunkDeleter>> allocations;
     
     // Allocate chunks until exhaustion
     size_t entitiesPerChunk = 100;
     for (size_t i = 0; i < config.maxChunks + 5; ++i)
     {
-        auto chunk = pool.CreateChunk(entitiesPerChunk, descriptors);
+        auto chunk = pool.CreateChunk(entitiesPerChunk, &meta);
         if (chunk != nullptr)
         {
             allocations.push_back(std::move(chunk));
@@ -165,7 +177,7 @@ TEST_F(ResourceExhaustionTest, ArchetypeChunkPoolExhaustion)
     allocations.pop_back();
     
     // Should be able to allocate one more
-    auto newChunk = pool.CreateChunk(entitiesPerChunk, descriptors);
+    auto newChunk = pool.CreateChunk(entitiesPerChunk, &meta);
     EXPECT_NE(newChunk, nullptr);
     
     // Clean up happens automatically through unique_ptr destructors

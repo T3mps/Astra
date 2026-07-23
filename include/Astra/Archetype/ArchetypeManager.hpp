@@ -1177,47 +1177,32 @@ namespace Astra
         template<Component T, typename... Args>
         void MoveAndAdd(EntityLocation dstEntityLocation, Archetype* dstArchetype, EntityLocation srcEntityLocation, Archetype* srcArchetype, Args&&... args)
         {
-            auto& dstComponents = dstArchetype->GetComponentDescriptors();
-            auto& srcComponents = srcArchetype->GetComponentDescriptors();
-            
             // Get chunks
             auto [dstChunk, dstEntityIdx] = dstArchetype->ResolveLocation(dstEntityLocation);
             auto [srcChunk, srcEntityIdx] = srcArchetype->ResolveLocation(srcEntityLocation);
-            
-            // Create index map for source components - use array for O(1) access
-            std::array<size_t, MAX_COMPONENTS> srcIndexMap;
-            srcIndexMap.fill(std::numeric_limits<size_t>::max());
-            for (size_t i = 0; i < srcComponents.size(); ++i)
+
+            const ArchetypeColumnMeta& dm = dstArchetype->GetColumnMeta();
+            const ArchetypeColumnMeta& sm = srcArchetype->GetColumnMeta();
+            const ComponentID newComponentId = TypeID<T>::Value();
+
+            // Iterate the destination's storage columns; construct the new component in
+            // place, move the shared ones from the source. (Tags carry no column.)
+            for (uint16_t c = 0; c < dm.columnCount; ++c)
             {
-                srcIndexMap[srcComponents[i].id] = i;
-            }
-            
-            ComponentID newComponentId = TypeID<T>::Value();
-            
-            for (size_t dstIdx = 0; dstIdx < dstComponents.size(); ++dstIdx)
-            {
-                auto& dstComp = dstComponents[dstIdx];
-                const auto& dstArrayInfo = dstChunk->m_componentArrays[dstComp.id];
+                const ComponentID id = dm.columns[c].id;
+                void* dstPtr = dstChunk->GetComponentPointer(id, dstEntityIdx);
 
-                if (dstArrayInfo.base == nullptr) ASTRA_UNLIKELY
-                {
-                    continue;  // empty component: nothing to construct or move
-                }
-
-                void* dstPtr = static_cast<std::byte*>(dstArrayInfo.base) + dstEntityIdx * dstArrayInfo.stride;
-
-                if (dstComp.id == newComponentId) ASTRA_UNLIKELY
+                if (id == newComponentId) ASTRA_UNLIKELY
                 {
                     new (dstPtr) T(std::forward<Args>(args)...);
                 }
                 else
                 {
-                    size_t srcIdx = srcIndexMap[dstComp.id];
-                    if (srcIdx != std::numeric_limits<size_t>::max()) ASTRA_LIKELY
+                    const int sc = sm.idToColumn[id];
+                    if (sc >= 0) ASTRA_LIKELY
                     {
-                        const auto& srcArrayInfo = srcChunk->m_componentArrays[dstComp.id];
-                        void* srcPtr = static_cast<std::byte*>(srcArrayInfo.base) + srcEntityIdx * srcArrayInfo.stride;
-                        dstComp.MoveConstruct(dstPtr, srcPtr);
+                        void* srcPtr = srcChunk->GetComponentPointer(id, srcEntityIdx);
+                        dm.columns[c].descriptor->MoveConstruct(dstPtr, srcPtr);
                     }
                 }
             }
@@ -1440,34 +1425,23 @@ namespace Astra
                            EntityLocation srcEntityLocation, Archetype* srcArchetype,
                            ComponentID newComponentId, const void* componentData, const ComponentDescriptor& newDesc)
         {
-            auto& dstComponents = dstArchetype->GetComponentDescriptors();
-            auto& srcComponents = srcArchetype->GetComponentDescriptors();
-
             // Get chunks
             auto [dstChunk, dstEntityIdx] = dstArchetype->ResolveLocation(dstEntityLocation);
             auto [srcChunk, srcEntityIdx] = srcArchetype->ResolveLocation(srcEntityLocation);
 
-            // Create index map for source components - use array for O(1) access
-            std::array<size_t, MAX_COMPONENTS> srcIndexMap;
-            srcIndexMap.fill(std::numeric_limits<size_t>::max());
-            for (size_t i = 0; i < srcComponents.size(); ++i)
+            const ArchetypeColumnMeta& dm = dstArchetype->GetColumnMeta();
+            const ArchetypeColumnMeta& sm = srcArchetype->GetColumnMeta();
+
+            // Iterate the destination's storage columns; write the new component from
+            // the type-erased data, move the shared ones from the source. (Tags carry
+            // no column, so a tag being added has no storage to write -- matching the
+            // old base==nullptr skip.)
+            for (uint16_t c = 0; c < dm.columnCount; ++c)
             {
-                srcIndexMap[srcComponents[i].id] = i;
-            }
+                const ComponentID id = dm.columns[c].id;
+                void* dstPtr = dstChunk->GetComponentPointer(id, dstEntityIdx);
 
-            for (size_t dstIdx = 0; dstIdx < dstComponents.size(); ++dstIdx)
-            {
-                auto& dstComp = dstComponents[dstIdx];
-                const auto& dstArrayInfo = dstChunk->m_componentArrays[dstComp.id];
-
-                if (dstArrayInfo.base == nullptr) ASTRA_UNLIKELY
-                {
-                    continue;  // empty component: nothing to construct or move
-                }
-
-                void* dstPtr = static_cast<std::byte*>(dstArrayInfo.base) + dstEntityIdx * dstArrayInfo.stride;
-
-                if (dstComp.id == newComponentId) ASTRA_UNLIKELY
+                if (id == newComponentId) ASTRA_UNLIKELY
                 {
                     // Copy new component data - use memcpy for trivially copyable types
                     if (newDesc.is_trivially_copyable)
@@ -1498,12 +1472,11 @@ namespace Astra
                 }
                 else
                 {
-                    size_t srcIdx = srcIndexMap[dstComp.id];
-                    if (srcIdx != std::numeric_limits<size_t>::max()) ASTRA_LIKELY
+                    const int sc = sm.idToColumn[id];
+                    if (sc >= 0) ASTRA_LIKELY
                     {
-                        const auto& srcArrayInfo = srcChunk->m_componentArrays[dstComp.id];
-                        void* srcPtr = static_cast<std::byte*>(srcArrayInfo.base) + srcEntityIdx * srcArrayInfo.stride;
-                        dstComp.MoveConstruct(dstPtr, srcPtr);
+                        void* srcPtr = srcChunk->GetComponentPointer(id, srcEntityIdx);
+                        dm.columns[c].descriptor->MoveConstruct(dstPtr, srcPtr);
                     }
                 }
             }
@@ -1523,8 +1496,7 @@ namespace Astra
                     for (const auto& location : locs)
                     {
                         auto [chunk, entityIdx] = dst->ResolveLocation(location);
-                        const auto& arrayInfo = chunk->m_componentArrays[componentId];
-                        void* dstPtr = static_cast<std::byte*>(arrayInfo.base) + entityIdx * arrayInfo.stride;
+                        void* dstPtr = chunk->GetComponentPointer(componentId, entityIdx);
                         desc.ConstructWith(dstPtr, data);
                     }
                 });

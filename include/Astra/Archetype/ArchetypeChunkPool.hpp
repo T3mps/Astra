@@ -101,29 +101,35 @@ namespace Astra
                 m_capacity(other.m_capacity),
                 m_count(other.m_count),
                 m_entities(std::move(other.m_entities)),
-                m_componentDescriptors(std::move(other.m_componentDescriptors)),
-                m_componentArrays(std::move(other.m_componentArrays)),
+                m_meta(other.m_meta),
                 m_chunkSize(other.m_chunkSize)
-            {}
+            {
+                // Column is trivially copyable; a memberwise byte copy of the packed
+                // array is correct (the bases point into m_memory, which we took over).
+                std::memcpy(m_columns, other.m_columns, sizeof(m_columns));
+                // Make the moved-from chunk inert so its destructor touches nothing.
+                other.m_meta = nullptr;
+                other.m_count = 0;
+            }
             
             Chunk(const Chunk&) = delete;
             Chunk& operator=(const Chunk&) = delete;
 
             ~Chunk()
             {
-                // Only destruct components that exist in this archetype
-                for (const auto& desc : m_componentDescriptors)
+                if (!m_meta) ASTRA_UNLIKELY
+                    return;  // moved-from (inert) chunk: nothing to destruct
+
+                // Destruct every live element of every storage column.
+                for (uint16_t c = 0; c < m_meta->columnCount; ++c)
                 {
-                    const auto& info = m_componentArrays[desc.id];
-                    if (!info.isValid || info.base == nullptr)
-                    {
-                        continue;
-                    }
+                    std::byte* base = static_cast<std::byte*>(m_columns[c].base);
+                    const uint32_t stride = m_columns[c].stride;
+                    const ComponentDescriptor& desc = *m_meta->columns[c].descriptor;
 
                     for (size_t i = 0; i < m_count; ++i)
                     {
-                        void* ptr = static_cast<std::byte*>(info.base) + i * info.stride;
-                        info.descriptor.Destruct(ptr);
+                        desc.Destruct(base + i * stride);
                     }
                 }
             }
@@ -134,19 +140,13 @@ namespace Astra
                 size_t index = m_count++;
                 
                 m_entities.push_back(entity);
-                
-                for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
+
+                for (uint16_t c = 0; c < m_meta->columnCount; ++c)
                 {
-                    const auto& info = m_componentArrays[id];
-                    if (!info.isValid || info.base == nullptr)
-                    {
-                        continue;
-                    }
-                    
-                    void* ptr = static_cast<std::byte*>(info.base) + index * info.stride;
-                    info.descriptor.DefaultConstruct(ptr);
+                    void* ptr = static_cast<std::byte*>(m_columns[c].base) + index * m_columns[c].stride;
+                    m_meta->columns[c].descriptor->DefaultConstruct(ptr);
                 }
-                
+
                 return index;
             }
             
@@ -155,19 +155,20 @@ namespace Astra
             void ConstructComponentAt(size_t index, T&& value)
             {
                 ComponentID id = TypeID<std::decay_t<T>>::Value();
-                const auto& info = m_componentArrays[id];
-                
-                if (!info.isValid || info.base == nullptr)
+                const int col = m_meta->idToColumn[id];
+
+                if (col < 0) ASTRA_UNLIKELY
                 {
-                    return;
+                    return;  // absent or tag: no storage
                 }
-                
-                void* ptr = static_cast<std::byte*>(info.base) + index * info.stride;
-                
+
+                const ComponentDescriptor& desc = *m_meta->columns[col].descriptor;
+                void* ptr = static_cast<std::byte*>(m_columns[col].base) + index * m_columns[col].stride;
+
                 // Use ConstructWith for optimal construction with value
                 if constexpr (std::is_lvalue_reference_v<T>)
                 {
-                    info.descriptor.ConstructWith(ptr, &value);
+                    desc.ConstructWith(ptr, &value);
                 }
                 else
                 {
@@ -180,7 +181,7 @@ namespace Astra
                     // wiring the move-only Tracked test component through this path).
                     using DecayedType = std::decay_t<T>;
                     DecayedType temp(std::forward<T>(value));
-                    info.descriptor.MoveConstruct(ptr, &temp);
+                    desc.MoveConstruct(ptr, &temp);
                 }
             }
             
@@ -195,21 +196,17 @@ namespace Astra
                 
                 // First, default construct all components that are in the archetype
                 // but not provided in the parameter pack
-                for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
+                for (uint16_t c = 0; c < m_meta->columnCount; ++c)
                 {
-                    const auto& info = m_componentArrays[id];
-                    if (!info.isValid || info.base == nullptr)
-                    {
-                        continue;
-                    }
-                    
+                    const ComponentID id = m_meta->columns[c].id;
+
                     // Check if this component is in our parameter pack
                     bool willBeConstructed = ((TypeID<std::decay_t<Components>>::Value() == id) || ...);
-                    
+
                     if (!willBeConstructed)
                     {
-                        void* ptr = static_cast<std::byte*>(info.base) + index * info.stride;
-                        info.descriptor.DefaultConstruct(ptr);
+                        void* ptr = static_cast<std::byte*>(m_columns[c].base) + index * m_columns[c].stride;
+                        m_meta->columns[c].descriptor->DefaultConstruct(ptr);
                     }
                 }
                 
@@ -226,13 +223,10 @@ namespace Astra
 
                 m_entities.insert(m_entities.end(), entities.begin(), entities.end());
 
-                for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
+                for (uint16_t c = 0; c < m_meta->columnCount; ++c)
                 {
-                    const auto& info = m_componentArrays[id];
-                    if (!info.isValid || info.base == nullptr) continue;
-
-                    std::byte* startPtr = static_cast<std::byte*>(info.base) + m_count * info.stride;
-                    info.descriptor.BatchDefaultConstruct(startPtr, count);
+                    std::byte* startPtr = static_cast<std::byte*>(m_columns[c].base) + m_count * m_columns[c].stride;
+                    m_meta->columns[c].descriptor->BatchDefaultConstruct(startPtr, count);
                 }
 
                 m_count += count;
@@ -244,42 +238,42 @@ namespace Astra
                 size_t count = dstIndices.size();
                 
                 if (componentsToMove.None()) return;
-                
-                ComponentID firstSet = 0;
-                for ( ; firstSet < MAX_COMPONENTS && !componentsToMove.Test(firstSet); ++firstSet);
-                
-                ComponentID lastSet = MAX_COMPONENTS - 1;
-                for ( ; lastSet > firstSet && !componentsToMove.Test(lastSet); --lastSet);
-                
-                for (ComponentID id = firstSet; id <= lastSet; ++id)
-                {
-                    if (!componentsToMove.Test(id)) continue;
-                    
-                    const auto& dstInfo = m_componentArrays[id];
-                    const auto& srcInfo = srcChunk.m_componentArrays[id];
 
-                    if (!dstInfo.isValid || !srcInfo.isValid || dstInfo.base == nullptr || srcInfo.base == nullptr) continue;
-                    
-                    if (dstInfo.descriptor.is_trivially_copyable && AreIndicesContiguous(dstIndices) && AreIndicesContiguous(srcIndices))
+                // Iterate the destination's storage columns; only move those that are
+                // in the move set AND present as storage in the source chunk.
+                for (uint16_t c = 0; c < m_meta->columnCount; ++c)
+                {
+                    const ComponentID id = m_meta->columns[c].id;
+                    if (!componentsToMove.Test(id)) continue;
+
+                    const int sc = srcChunk.m_meta->idToColumn[id];
+                    if (sc < 0) continue;  // source lacks this component's storage
+
+                    void* dstBase = m_columns[c].base;
+                    void* srcBase = srcChunk.m_columns[sc].base;
+                    const uint32_t stride = m_columns[c].stride;
+                    const ComponentDescriptor& desc = *m_meta->columns[c].descriptor;
+
+                    if (desc.is_trivially_copyable && AreIndicesContiguous(dstIndices) && AreIndicesContiguous(srcIndices))
                     {
-                        void* dstPtr = static_cast<std::byte*>(dstInfo.base) + dstIndices[0] * dstInfo.stride;
-                        void* srcPtr = static_cast<std::byte*>(srcInfo.base) + srcIndices[0] * srcInfo.stride;
-                        std::memcpy(dstPtr, srcPtr, count * dstInfo.stride);
+                        void* dstPtr = static_cast<std::byte*>(dstBase) + dstIndices[0] * stride;
+                        void* srcPtr = static_cast<std::byte*>(srcBase) + srcIndices[0] * stride;
+                        std::memcpy(dstPtr, srcPtr, count * stride);
                     }
                     else
                     {
                         for (size_t i = 0; i < count; ++i)
                         {
-                            void* dstPtr = static_cast<std::byte*>(dstInfo.base) + dstIndices[i] * dstInfo.stride;
-                            void* srcPtr = static_cast<std::byte*>(srcInfo.base) + srcIndices[i] * srcInfo.stride;
-                            
-                            if (dstInfo.descriptor.is_trivially_copyable)
+                            void* dstPtr = static_cast<std::byte*>(dstBase) + dstIndices[i] * stride;
+                            void* srcPtr = static_cast<std::byte*>(srcBase) + srcIndices[i] * stride;
+
+                            if (desc.is_trivially_copyable)
                             {
-                                std::memcpy(dstPtr, srcPtr, dstInfo.stride);
+                                std::memcpy(dstPtr, srcPtr, stride);
                             }
                             else
                             {
-                                dstInfo.descriptor.MoveConstruct(dstPtr, srcPtr);
+                                desc.MoveConstruct(dstPtr, srcPtr);
                             }
                         }
                     }
@@ -304,17 +298,17 @@ namespace Astra
             void BatchConstructComponent(std::span<const size_t> indices, const T& value)
             {
                 ComponentID id = TypeID<T>::Value();
-                const auto& info = m_componentArrays[id];
+                const int col = m_meta->idToColumn[id];
 
-                if (!info.isValid)
+                // A column index < 0 means this component is absent from the archetype
+                // OR is an empty (tag) component with no storage; either way there is
+                // nothing to construct — never form a pointer from it.
+                if (col < 0) ASTRA_UNLIKELY
                     return;
 
-                // Empty (tag) components have no storage (base==nullptr, stride==0);
-                // their presence is carried by the archetype mask. Any null base
-                // means there is nothing to construct — never form a pointer from it.
-                if (info.base == nullptr) ASTRA_UNLIKELY
-                    return;
-                
+                void* base = m_columns[col].base;
+                const uint32_t stride = m_columns[col].stride;
+
                 // Debug validation
                 for (size_t idx : indices)
                 {
@@ -338,12 +332,12 @@ namespace Astra
                     
                     if (contiguous && indices.size() > 1)
                     {
-                        T* firstPtr = static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(info.base) + indices[0] * info.stride));
+                        T* firstPtr = static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(base) + indices[0] * stride));
                         new (firstPtr) T(value);
-                        
+
                         for (size_t i = 1; i < indices.size(); ++i)
                         {
-                            T* ptr = static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(info.base) + indices[i] * info.stride));
+                            T* ptr = static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(base) + indices[i] * stride));
                             std::memcpy(ptr, firstPtr, sizeof(T));
                         }
                     }
@@ -352,7 +346,7 @@ namespace Astra
                         for (size_t idx : indices)
                         {
                             ASTRA_ASSERT(idx < m_capacity, "Index out of capacity");
-                            T* ptr = static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(info.base) + idx * info.stride));
+                            T* ptr = static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(base) + idx * stride));
                             std::memcpy(ptr, &value, sizeof(T));
                         }
                     }
@@ -363,7 +357,7 @@ namespace Astra
                     for (size_t idx : indices)
                     {
                         ASTRA_ASSERT(idx < m_capacity, "Component index out of bounds");
-                        T* ptr = static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(info.base) + idx * info.stride));
+                        T* ptr = static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(base) + idx * stride));
                         new (ptr) T(value);
                     }
                 }
@@ -382,38 +376,30 @@ namespace Astra
                     m_entities[index] = m_entities[lastIndex];
                     movedEntity = m_entities[index];
                     
-                    // Move components using O(1) lookups
-                    for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
+                    // Move components column by column (every column has real storage)
+                    for (uint16_t c = 0; c < m_meta->columnCount; ++c)
                     {
-                        const auto& info = m_componentArrays[id];
-                        if (!info.isValid || info.base == nullptr)
-                        {
-                            continue;  // empty (tag) component: no storage to touch
-                        }
+                        std::byte* base = static_cast<std::byte*>(m_columns[c].base);
+                        const uint32_t stride = m_columns[c].stride;
+                        const ComponentDescriptor& desc = *m_meta->columns[c].descriptor;
 
-                        void* dstPtr = static_cast<std::byte*>(info.base) + index * info.stride;
-                        void* srcPtr = static_cast<std::byte*>(info.base) + lastIndex * info.stride;
+                        void* dstPtr = base + index * stride;
+                        void* srcPtr = base + lastIndex * stride;
 
                         // Destruct destination, move from source, then destruct the
                         // moved-from source slot (mirrors Archetype::MoveEntitiesBetweenChunks).
-                        info.descriptor.Destruct(dstPtr);
-                        info.descriptor.MoveConstruct(dstPtr, srcPtr);
-                        info.descriptor.Destruct(srcPtr);
+                        desc.Destruct(dstPtr);
+                        desc.MoveConstruct(dstPtr, srcPtr);
+                        desc.Destruct(srcPtr);
                     }
                 }
                 else
                 {
-                    // Just destruct the last entity's components using O(1) lookups
-                    for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
+                    // Just destruct the last entity's components column by column
+                    for (uint16_t c = 0; c < m_meta->columnCount; ++c)
                     {
-                        const auto& info = m_componentArrays[id];
-                        if (!info.isValid || info.base == nullptr)
-                        {
-                            continue;  // empty (tag) component: no storage to touch
-                        }
-
-                        void* ptr = static_cast<std::byte*>(info.base) + lastIndex * info.stride;
-                        info.descriptor.Destruct(ptr);
+                        void* ptr = static_cast<std::byte*>(m_columns[c].base) + lastIndex * m_columns[c].stride;
+                        m_meta->columns[c].descriptor->Destruct(ptr);
                     }
                 }
                 
@@ -448,22 +434,24 @@ namespace Astra
             ASTRA_FORCEINLINE auto GetComponentArray()
             {
                 using BaseType = std::remove_const_t<T>;
-                ComponentID id = TypeID<BaseType>::Value();
-                
+
                 // For empty components (tags), return nullptr since they have no data
                 // The iteration code will handle this specially
                 if constexpr (std::is_empty_v<BaseType>)
                 {
                     return static_cast<BaseType*>(nullptr);
                 }
-                
-                if constexpr (std::is_const_v<T>)
-                {
-                    return reinterpret_cast<const BaseType*>(m_componentArrays[id].base);
-                }
                 else
                 {
-                    return reinterpret_cast<BaseType*>(m_componentArrays[id].base);
+                    void* base = GetComponentArrayByID(TypeID<BaseType>::Value());
+                    if constexpr (std::is_const_v<T>)
+                    {
+                        return reinterpret_cast<const BaseType*>(base);
+                    }
+                    else
+                    {
+                        return reinterpret_cast<BaseType*>(base);
+                    }
                 }
             }
 
@@ -471,20 +459,22 @@ namespace Astra
             ASTRA_FORCEINLINE const std::remove_const_t<T>* GetComponentArray() const
             {
                 using BaseType = std::remove_const_t<T>;
-                ComponentID id = TypeID<BaseType>::Value();
-                
+
                 // For empty components, return nullptr since they have no data
                 if constexpr (std::is_empty_v<BaseType>)
                 {
                     return nullptr;
                 }
-                
-                return reinterpret_cast<const BaseType*>(m_componentArrays[id].base);
+                else
+                {
+                    return reinterpret_cast<const BaseType*>(GetComponentArrayByID(TypeID<BaseType>::Value()));
+                }
             }
 
             void* GetComponentArrayByID(ComponentID id) const
             {
-                return m_componentArrays[id].base;
+                const int col = m_meta->idToColumn[id];
+                return col < 0 ? nullptr : m_columns[col].base;
             }
             
             ASTRA_NODISCARD bool IsFull() const noexcept { return m_count >= m_capacity; }
@@ -494,92 +484,70 @@ namespace Astra
             ASTRA_NODISCARD Entity GetEntity(size_t index) const { ASTRA_ASSERT(index < m_count, "Index out of count"); return m_entities[index]; }
             ASTRA_NODISCARD const std::vector<Entity>& GetEntities() const { return m_entities; }
             ASTRA_NODISCARD ASTRA_FORCEINLINE std::vector<Entity>& GetEntities() { return m_entities; }
-            
-            // Optimized component array info for O(1) lookups
-            struct ComponentArrayInfo
-            {
-                void* base{nullptr};
-                size_t stride{0};
-                ComponentDescriptor descriptor{};
-                bool isValid{false};
-            };
-            
-            ASTRA_NODISCARD const std::array<ComponentArrayInfo, MAX_COMPONENTS>& GetComponentArrays() const { return m_componentArrays; }
-            
+
             void SetCount(size_t count) noexcept { m_count = count; }
-            
+
             void* GetComponentPointer(ComponentID id, size_t index) const
             {
                 ASTRA_ASSERT(id < MAX_COMPONENTS, "ComponentID out of bounds");
                 ASTRA_ASSERT(index < m_count, "Index out of bounds");
-                
-                const auto& info = m_componentArrays[id];
-                if (!info.base) ASTRA_UNLIKELY
-                    return nullptr;
-                
-                return static_cast<std::byte*>(info.base) + index * info.stride;
+
+                const int col = m_meta->idToColumn[id];
+                if (col < 0) ASTRA_UNLIKELY
+                    return nullptr;  // absent or tag: no storage
+
+                return static_cast<std::byte*>(m_columns[col].base) + index * m_columns[col].stride;
             }
             
         private:
             friend class ArchetypeManager;
             
-            Chunk(size_t entitiesPerChunk, const std::vector<ComponentDescriptor>& componentDescriptors, void* memory, size_t chunkSize) :
+            Chunk(size_t entitiesPerChunk, const ArchetypeColumnMeta* meta, void* memory, size_t chunkSize) :
                 m_memory(memory),
                 m_capacity(entitiesPerChunk),
                 m_count(0),
-                m_componentDescriptors(componentDescriptors),
+                m_meta(meta),
                 m_chunkSize(chunkSize)
             {
                 m_entities.reserve(m_capacity);
                 std::memset(m_memory, 0, m_chunkSize);
-                InitializeComponentArrays();
+                InitializeColumns();
             }
 
-            void InitializeComponentArrays()
+            // Assign each storage column a cache-line-aligned base within the chunk arena.
+            // Column physical order follows m_meta->columns (ascending by id); tags carry
+            // no column, so every column here has real storage.
+            void InitializeColumns()
             {
                 size_t offset = 0;
-                
-                for (const auto& desc : m_componentDescriptors)
+                for (uint16_t c = 0; c < m_meta->columnCount; ++c)
                 {
-                    if (desc.size == 0)
-                    {
-                        m_componentArrays[desc.id] =
-                        {
-                            .base = nullptr,
-                            .stride = 0,
-                            .descriptor = desc,
-                            .isValid = true
-                        };
-                        continue;
-                    }
-                    
-                    // Align offset to cache line boundary for better cache performance
-                    // This prevents false sharing between component arrays
+                    // Align offset to a cache line to avoid false sharing between columns.
                     offset = (offset + CACHE_LINE_SIZE - 1) & ~(CACHE_LINE_SIZE - 1);
-                    
-                    void* arrayBase = static_cast<std::byte*>(m_memory) + offset;
-                    m_componentArrays[desc.id] =
-                    {
-                        .base = arrayBase,
-                        .stride = desc.size,
-                        .descriptor = desc,
-                        .isValid = true
-                    };
-                    
-                    offset += desc.size * m_capacity;
+                    m_columns[c].base   = static_cast<std::byte*>(m_memory) + offset;
+                    m_columns[c].stride = m_meta->columns[c].stride;
+                    offset += static_cast<size_t>(m_meta->columns[c].stride) * m_capacity;
                 }
-                
                 ASTRA_ASSERT(offset <= m_chunkSize, "Component layout exceeds chunk size");
             }
+
+            // Packed per-column storage descriptor. Fixed-capacity array (one slot per
+            // possible component id) avoids a per-chunk heap allocation; only
+            // [0, m_meta->columnCount) are live.
+            struct Column
+            {
+                void* base{nullptr};
+                uint32_t stride{0};
+            };
 
             void* m_memory;
             size_t m_capacity;
             size_t m_count;
             std::vector<Entity> m_entities;
-            std::vector<ComponentDescriptor> m_componentDescriptors;
-            std::array<ComponentArrayInfo, MAX_COMPONENTS> m_componentArrays{};
+            const ArchetypeColumnMeta* m_meta{nullptr};  // shared per-archetype metadata (not owned)
+            Column m_columns[MAX_COMPONENTS]{};          // [0, m_meta->columnCount) live
             size_t m_chunkSize;
-            
+
             friend class ArchetypeChunkPool;
         };
         
@@ -665,15 +633,15 @@ namespace Astra
             return *this;
         }
 
-        std::unique_ptr<Chunk, ChunkDeleter> CreateChunk(size_t entitiesPerChunk, const std::vector<ComponentDescriptor>& componentDescriptors)
+        std::unique_ptr<Chunk, ChunkDeleter> CreateChunk(size_t entitiesPerChunk, const ArchetypeColumnMeta* meta)
         {
             void* memory = AcquireMemory();
             if (!memory) ASTRA_UNLIKELY
             {
                 return nullptr;
             }
-            
-            auto* chunk = new Chunk(entitiesPerChunk, componentDescriptors, memory, m_config.chunkSize);
+
+            auto* chunk = new Chunk(entitiesPerChunk, meta, memory, m_config.chunkSize);
             ChunkDeleter deleter{this, memory};
             return std::unique_ptr<Chunk, ChunkDeleter>(chunk, deleter);
         }

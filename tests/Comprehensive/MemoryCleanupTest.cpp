@@ -131,13 +131,25 @@ TEST_F(MemoryCleanupTest, ArchetypeChunkPoolMemoryRelease)
     posDesc.size = sizeof(Position);
     posDesc.alignment = alignof(Position);
     descriptors.push_back(posDesc);
-    
+
+    // Chunks now consume shared per-archetype column metadata instead of a
+    // descriptors vector. Build it from `descriptors` (must outlive the chunks;
+    // its column descriptor pointers reference `descriptors`).
+    ArchetypeColumnMeta meta;
+    for (const auto& d : descriptors)
+    {
+        if (d.size == 0) continue;
+        const uint16_t col = meta.columnCount++;
+        meta.columns[col] = { d.id, static_cast<uint32_t>(d.size), &d };
+        meta.idToColumn[d.id] = static_cast<int16_t>(col);
+    }
+
     std::vector<std::unique_ptr<ArchetypeChunk, ArchetypeChunkPool::ChunkDeleter>> chunks;
     size_t entitiesPerChunk = 100;
-    
+
     for (int i = 0; i < 20; ++i)
     {
-        auto chunk = pool.CreateChunk(entitiesPerChunk, descriptors);
+        auto chunk = pool.CreateChunk(entitiesPerChunk, &meta);
         ASSERT_NE(chunk, nullptr);
         chunks.push_back(std::move(chunk));
     }

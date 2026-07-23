@@ -155,7 +155,7 @@ namespace Astra
 
             m_initialized = true;
 
-            auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, m_componentDescriptors);
+            auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
             if (!chunk) ASTRA_UNLIKELY
             {
                 m_initialized = false;
@@ -206,7 +206,7 @@ namespace Astra
 
                 for (size_t i = 0; i < newChunksNeeded; ++i)
                 {
-                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, m_componentDescriptors);
+                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         return locations;
@@ -275,7 +275,7 @@ namespace Astra
 
                 for (size_t i = 0; i < newChunksNeeded; ++i)
                 {
-                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, m_componentDescriptors);
+                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         return locations;
@@ -304,23 +304,20 @@ namespace Astra
                 
                 [&]<std::size_t... Is>(std::index_sequence<Is...>)
                 {
-                    for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
+                    const ArchetypeColumnMeta& cm = m_columnMeta;
+                    for (uint16_t c = 0; c < cm.columnCount; ++c)
                     {
-                        const auto& info = chunk->GetComponentArrays()[id];
-                        if (!info.isValid || info.base == nullptr)
-                        {
-                            continue;
-                        }
-                        
+                        const ComponentID id = cm.columns[c].id;
+
                         bool willBeConstructed = ((TypeID<std::decay_t<std::tuple_element_t<Is, TupleType>>>::Value() == id) || ...);
-                        
+
                         if (!willBeConstructed)
                         {
-                            void* ptr = static_cast<std::byte*>(info.base) + entityIndex * info.stride;
-                            info.descriptor.DefaultConstruct(ptr);
+                            void* ptr = chunk->GetComponentPointer(id, entityIndex);
+                            cm.columns[c].descriptor->DefaultConstruct(ptr);
                         }
                     }
-                    
+
                     ((chunk->ConstructComponentAt(entityIndex, std::get<Is>(std::move(componentTuple)))), ...);
                 }(std::make_index_sequence<tupleSize>{});
                 
@@ -451,30 +448,26 @@ namespace Astra
 
             auto& dstChunk = m_chunks[dstChunkIndex];
             auto& srcChunk = srcArchetype.m_chunks[srcChunkIndex];
-            const auto& dstArrays = dstChunk->GetComponentArrays();
-            const auto& srcArrays = srcChunk->GetComponentArrays();
+            const ArchetypeColumnMeta& dm = m_columnMeta;
+            const ArchetypeColumnMeta& sm = srcArchetype.m_columnMeta;
 
-            for (const auto& dstDesc : m_componentDescriptors)
+            // Iterate the destination's storage columns; move each from the matching
+            // source column (per-element), default-constructing components the source
+            // lacks. (Tags carry no column, so nothing to skip here.)
+            for (uint16_t c = 0; c < dm.columnCount; ++c)
             {
-                ComponentID id = dstDesc.id;
-                const auto& dstInfo = dstArrays[id];
+                const ComponentID id = dm.columns[c].id;
+                void* dstPtr = dstChunk->GetComponentPointer(id, dstEntityIndex);
 
-                if (dstInfo.base == nullptr) ASTRA_UNLIKELY
+                const int sc = sm.idToColumn[id];
+                if (sc >= 0) ASTRA_LIKELY
                 {
-                    continue;  // empty component: presence is carried by the mask
-                }
-
-                void* dstPtr = static_cast<std::byte*>(dstInfo.base) + dstEntityIndex * dstInfo.stride;
-
-                const auto& srcInfo = srcArrays[id];
-                if (srcInfo.isValid) ASTRA_LIKELY
-                {
-                    void* srcPtr = static_cast<std::byte*>(srcInfo.base) + srcEntityIndex * srcInfo.stride;
-                    dstInfo.descriptor.MoveConstruct(dstPtr, srcPtr);
+                    void* srcPtr = srcChunk->GetComponentPointer(id, srcEntityIndex);
+                    dm.columns[c].descriptor->MoveConstruct(dstPtr, srcPtr);
                 }
                 else ASTRA_UNLIKELY
                 {
-                    dstInfo.descriptor.DefaultConstruct(dstPtr);
+                    dm.columns[c].descriptor->DefaultConstruct(dstPtr);
                 }
             }
         }
@@ -878,8 +871,12 @@ namespace Astra
                     return ResultType::Err(SerializationError::CorruptedData);
                 }
 
-                // Create new chunk
-                auto chunk = componentPool ? componentPool->CreateChunk(static_cast<size_t>(entitiesPerChunk), descriptors) : nullptr;
+                // Create new chunk. The reconstructed archetype's Initialize() above
+                // already built its m_columnMeta (via BuildColumnMeta) from `descriptors`,
+                // and its m_componentDescriptors (which the meta's descriptor pointers
+                // reference) is set once and never reassigned, so this pointer is stable
+                // for the life of every chunk created here.
+                auto chunk = componentPool ? componentPool->CreateChunk(static_cast<size_t>(entitiesPerChunk), &archetype->GetColumnMeta()) : nullptr;
                 if (!chunk)
                 {
                     // Out of memory - cannot continue
@@ -1177,7 +1174,7 @@ namespace Astra
                 
                 for (size_t i = 0; i < newChunksNeeded; ++i)
                 {
-                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, m_componentDescriptors);
+                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         // Failed to allocate all required chunks - return empty to indicate failure
@@ -1370,7 +1367,7 @@ namespace Astra
                 }
             }
             
-            auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, m_componentDescriptors);
+            auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
             if (!chunk) ASTRA_UNLIKELY
             {
                 return {INVALID_CHUNK_INDEX, false};
@@ -1436,24 +1433,23 @@ namespace Astra
                 EntityLocation destEntityLocation = EntityLocation::Create(destChunkIndex, destEntityIndex);
                 movedEntities.emplace_back(entity, destEntityLocation);
                 
-                // Move components using O(1) lookups
-                const auto& srcArrays = srcChunk->GetComponentArrays();
-                const auto& destArrays = destChunk->GetComponentArrays();
-                
-                for (ComponentID id = 0; id < MAX_COMPONENTS; ++id)
+                // Move components column by column. Both chunks belong to this
+                // archetype, so they share m_columnMeta (identical column layout).
+                // destEntityIndex is transiently >= destChunk's count here (the count
+                // is bumped after the loop), so resolve the base directly and index it
+                // rather than going through GetComponentPointer's count-bounded assert.
+                for (uint16_t c = 0; c < m_columnMeta.columnCount; ++c)
                 {
-                    const auto& srcInfo = srcArrays[id];
-                    if (!srcInfo.isValid || srcInfo.base == nullptr)
-                    {
-                        continue;
-                    }
+                    const ComponentID id = m_columnMeta.columns[c].id;
+                    const uint32_t stride = m_columnMeta.columns[c].stride;
+                    const ComponentDescriptor& desc = *m_columnMeta.columns[c].descriptor;
 
-                    void* srcPtr = static_cast<std::byte*>(srcInfo.base) + srcEntityIndex * srcInfo.stride;
-                    void* destPtr = static_cast<std::byte*>(destArrays[id].base) + destEntityIndex * destArrays[id].stride;
-                    
+                    void* srcPtr = static_cast<std::byte*>(srcChunk->GetComponentArrayByID(id)) + srcEntityIndex * stride;
+                    void* destPtr = static_cast<std::byte*>(destChunk->GetComponentArrayByID(id)) + destEntityIndex * stride;
+
                     // Use move constructor to transfer component data
-                    srcInfo.descriptor.MoveConstruct(destPtr, srcPtr);
-                    srcInfo.descriptor.Destruct(srcPtr);
+                    desc.MoveConstruct(destPtr, srcPtr);
+                    desc.Destruct(srcPtr);
                 }
                 
                 // Remove entity from source chunk's entity vector
