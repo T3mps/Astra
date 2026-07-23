@@ -108,11 +108,19 @@ nothing about chunks/archetypes/components — a byte allocator with a small sur
 
 | constant | stock tlsf.c (64-bit) | Astra Tlsf | rationale |
 |---|---|---|---|
-| `ALIGN_SIZE_LOG2` | 3 (8B) | **6 (64B)** | chunk bases must be cache-line aligned; eliminates the small-block path (all chunks ≥ 4KB) and the `memalign` gap-trim path entirely |
+| `ALIGN_SIZE_LOG2` | 3 (8B) | **6 (64B)** | chunk bases must be cache-line aligned — achieved via a **size-congruence rule**, not the reference's `memalign` gap-trim path (see below) |
 | `SL_INDEX_COUNT_LOG2` | 5 | 5 (32 sub-lists) | keep proven granularity |
-| `FL_INDEX_SHIFT` | 8 | `5 + 6 = 11` | derived; `SMALL_BLOCK_SIZE = 1<<11 = 2048` (< min chunk, so small-block branch is dead) |
-| `FL_INDEX_MAX` | 32 (4GB) | sized to cover max arena (e.g. 26 → 64MB) | shrinks `control_t` to a few KB |
-| `FL_INDEX_COUNT` | 25 | `FL_INDEX_MAX - FL_INDEX_SHIFT + 1` (~16) | `blocks[FL][32]` pointer table |
+| `FL_INDEX_SHIFT` | 8 | `5 + 6 = 11` | derived; `SMALL_BLOCK_SIZE = 1<<11 = 2048`. The small-block mapping branch **stays** (split remainders smaller than 2KB are real free blocks) |
+| `FL_INDEX_MAX` | 32 (4GB) | 26 (64MB max arena) | shrinks the control tables to a few KB |
+| `FL_INDEX_COUNT` | 25 | `FL_INDEX_MAX - FL_INDEX_SHIFT + 1` = 16 | `blocks[FL][32]` pointer table |
+
+**64B-payload alignment via size congruence** (the one deliberate deviation from the reference,
+replacing its `memalign` gap-trim path): with the boundary-tag layout, consecutive payloads obey
+`payload_{n+1} = payload_n + size_n + overhead(8)`. Keeping **every block size ≡ 56 (mod 64)**
+— request rounding `adjusted = align_up(bytes + 8, 64) - 8`, minimum block 56 — and placing each
+arena's first payload on a 64B boundary makes every payload permanently 64B-aligned. The rule is
+closed under split (`remainder = size - request - 8 ≡ 56`) and merge (`size + other + 8 ≡ 56`),
+and is enforced by the heap-walk `Validate()` invariant check in the unit suite.
 
 **Ported faithfully** (reference correctness inherited): `mapping_insert` / `mapping_search`
 (fli/sli from size, with the round-up in search), the `block_header_t` boundary-tag layout
