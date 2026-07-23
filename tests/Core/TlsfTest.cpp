@@ -341,3 +341,29 @@ TEST(TlsfTest, DeterministicStressPattern)
     EXPECT_EQ(tlsf.GetFreeBytes(), initialFree);
     EXPECT_TRUE(tlsf.Validate());
 }
+
+// MultipleArenasServeAllocationsAndReportFullyFree exercises ForEachFullyFreeArena
+// with two arenas, but never establishes the fresh-single-arena baseline (1 free
+// arena before anything is carved) -- it only checks 0 (carved) then 2 (both
+// freed). This closes that gap: single arena, 1 -> 0 -> 1 across one carve and
+// one coalesce-back-to-whole free.
+TEST(TlsfTest, FullyFreeArenaDetection)
+{
+    ArenaBuffer buf(1 << 20);
+    Astra::Tlsf tlsf;
+    ASSERT_TRUE(tlsf.AddArena(buf.base, buf.bytes));
+
+    auto countFree = [&tlsf]
+    {
+        size_t n = 0;
+        tlsf.ForEachFullyFreeArena([&n](void*, size_t) { ++n; });
+        return n;
+    };
+
+    EXPECT_EQ(countFree(), 1u);            // fresh arena is fully free
+    void* p = tlsf.Allocate(4096);
+    ASSERT_NE(p, nullptr);
+    EXPECT_EQ(countFree(), 0u);            // carved: not releasable
+    tlsf.Free(p);
+    EXPECT_EQ(countFree(), 1u);            // coalesced back: releasable again
+}
