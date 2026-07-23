@@ -228,8 +228,8 @@ i.e. roughly **flecs parity on the same model**, which is the stated goal.
 
 **Actual end-state (2026-07-23, all of A–C landed):** add 55.6 · remove 40.8 · create 49.2 · random_get 58.4
 · iterate2 1.069 — add/remove/create all landed **better** than this rough target (create in particular:
-the target range didn't anticipate Astra out-pacing flecs outright), random_get/iterate2 landed within the
-target range. Net: not just flecs parity but **ahead of flecs on create, at parity on add**, with only
+the target range didn't anticipate Astra out-pacing flecs outright); random_get (58.4) also landed **better**
+than its ~70-80 ns target, and iterate2 landed within the target range. Net: not just flecs parity but **ahead of flecs on create, at parity on add**, with only
 remove/random_get/iteration retaining a modest (1.1×-1.4×) flecs lead. See Phase C above and
 `bench-compare/RESULTS.md` for the full honest breakdown (including the W4-no-op / W5-attribution
 correction).

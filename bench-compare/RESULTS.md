@@ -136,7 +136,7 @@ discarded. The worktree was removed after data collection (`git worktree remove`
 
 | Operation | Before (pre-C, `a8712d6`, this session, n=8) | After (Phase C, n=8) | Delta |
 |---|---|---|---|
-| create (2 comp) | 129.4 ns | 49.2 ns | **61.9% faster (2.63×)** |
+| create (2 comp) | 129.4 ns | 49.2 ns | **62.0% faster (2.63×)** |
 | add component | 131.2 ns | 55.6 ns | **57.6% faster (2.36×)** |
 | remove component | 85.6 ns | 40.8 ns | **52.4% faster (2.10×)** |
 | random get | 58.8 ns | 58.4 ns | flat (±1%, within noise — W7's headroom was small post-W1, as expected) |
