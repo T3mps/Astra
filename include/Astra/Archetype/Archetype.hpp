@@ -451,24 +451,43 @@ namespace Astra
             const ArchetypeColumnMeta& dm = m_columnMeta;
             const ArchetypeColumnMeta& sm = srcArchetype.m_columnMeta;
 
-            // Iterate the destination's storage columns; move each from the matching
-            // source column (per-element), default-constructing components the source
-            // lacks. (Tags carry no column, so nothing to skip here.)
-            for (uint16_t c = 0; c < dm.columnCount; ++c)
+            // Merge-join over the two archetypes' storage columns -- both sorted ascending by id
+            // (BuildColumnMeta guarantees this). For each destination column: a matching source
+            // column is moved (std::memcpy for a trivially-copyable component, MoveConstruct
+            // otherwise); a destination-only column is default-constructed. Source-only columns
+            // (present in src, absent from dst) are simply advanced past -- their slots are
+            // destructed by the caller's source-entity removal, so this function only ever
+            // CONSTRUCTS into the destination (never destructs the source).
+            //
+            // The per-column is_trivially_copyable check is the CORRECTNESS GATE, not a mere
+            // optimization: memcpy of a move-only / non-trivially-relocatable component (e.g. one
+            // owning a unique_ptr, or with lifetime-counting invariants) would skip its move ctor
+            // and corrupt it. It must NOT be widened to a blanket memcpy.
+            uint16_t a = 0, b = 0;
+            while (a < dm.columnCount)
             {
-                const ComponentID id = dm.columns[c].id;
-                void* dstPtr = dstChunk->GetComponentPointer(id, dstEntityIndex);
+                const ComponentID dId = dm.columns[a].id;
+                // dstEntityIndex is < the dst chunk's count here: AllocateEntitySlot (invoked by
+                // MoveEntityInternal before this runs) already bumped the destination slot's
+                // count, so the count-asserting GetComponentPointer is safe on the destination.
+                void* dstPtr = dstChunk->GetComponentPointer(dId, dstEntityIndex);
 
-                const int sc = sm.idToColumn[id];
-                if (sc >= 0) ASTRA_LIKELY
+                // Advance src past any ids strictly less than dId (src-only columns: dropped).
+                while (b < sm.columnCount && sm.columns[b].id < dId) ++b;
+
+                if (b < sm.columnCount && sm.columns[b].id == dId) ASTRA_LIKELY   // matched: move src -> dst
                 {
-                    void* srcPtr = srcChunk->GetComponentPointer(id, srcEntityIndex);
-                    dm.columns[c].descriptor->MoveConstruct(dstPtr, srcPtr);
+                    void* srcPtr = srcChunk->GetComponentPointer(dId, srcEntityIndex);
+                    const ComponentDescriptor& desc = *dm.columns[a].descriptor;
+                    if (desc.is_trivially_copyable) std::memcpy(dstPtr, srcPtr, dm.columns[a].stride);
+                    else                            desc.MoveConstruct(dstPtr, srcPtr);
+                    ++b;
                 }
-                else ASTRA_UNLIKELY
+                else ASTRA_UNLIKELY                                              // dst-only: default-construct
                 {
-                    dm.columns[c].descriptor->DefaultConstruct(dstPtr);
+                    dm.columns[a].descriptor->DefaultConstruct(dstPtr);
                 }
+                ++a;
             }
         }
 

@@ -1209,3 +1209,53 @@ TEST(ArchetypeColumnMeta, TagExcludedAndComplexFlag)
     // Tracked is not trivially copyable => archetype is complex.
     EXPECT_TRUE(m.isComplex);
 }
+
+// W3: BuildColumnMeta must SORT columns ascending by id even when Initialize receives the
+// descriptors in a NON-ascending order. The cross-archetype merge-join move (MoveEntityFrom)
+// depends on both archetypes' column lists being ascending; the other ArchetypeColumnMeta tests
+// feed ascending descriptors (GetDescriptors iterates ids 0..MAX_COMPONENTS), so they'd still
+// pass if the std::sort were dropped. Feed REVERSED-id-order descriptors and assert the meta
+// comes out ascending with idToColumn round-tripping -- this exercises the sort itself.
+TEST(ArchetypeColumnMeta, ColumnsSortedAscendingRegardlessOfInitializeOrder)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponents<Position, Velocity, Health>();
+
+    auto mask = Astra::MakeComponentMask<Position, Velocity, Health>();
+
+    // Build descriptors in DESCENDING id order (reversed vs. every real call site, which feeds
+    // ascending). Iterating ids high->low guarantees a non-ascending input for the sort.
+    std::vector<Astra::ComponentDescriptor> descriptors;
+    for (int id = static_cast<int>(Astra::MAX_COMPONENTS) - 1; id >= 0; --id)
+    {
+        if (mask.Test(static_cast<Astra::ComponentID>(id)))
+        {
+            const auto* desc = registry.GetComponentDescriptor(static_cast<Astra::ComponentID>(id));
+            if (desc)
+            {
+                descriptors.push_back(*desc);
+            }
+        }
+    }
+    ASSERT_EQ(descriptors.size(), 3u);
+    // Sanity: the input really is non-ascending, so a dropped std::sort would be observable.
+    EXPECT_GT(descriptors.front().id, descriptors.back().id);
+
+    Astra::ArchetypeChunkPool componentPool;
+    Archetype a(mask);
+    a.SetComponentPool(&componentPool);
+    a.Initialize(descriptors);
+
+    const ArchetypeColumnMeta& m = a.GetColumnMeta();
+    ASSERT_EQ(m.columnCount, 3u);
+    // Columns strictly ascending by id despite the reversed Initialize order:
+    EXPECT_LT(m.columns[0].id, m.columns[1].id);
+    EXPECT_LT(m.columns[1].id, m.columns[2].id);
+    // idToColumn round-trips for every present component after the sort:
+    EXPECT_EQ(m.idToColumn[m.columns[0].id], 0);
+    EXPECT_EQ(m.idToColumn[m.columns[1].id], 1);
+    EXPECT_EQ(m.idToColumn[m.columns[2].id], 2);
+}

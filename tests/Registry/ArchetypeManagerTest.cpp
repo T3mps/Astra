@@ -810,3 +810,80 @@ TEST_F(ArchetypeManagerTest, FastAppendPreservesAllProvidedValues)
         EXPECT_FLOAT_EQ(v->dz, 0.0f);
     }
 }
+
+// W3: trivially-copyable components move via memcpy across an archetype transition and keep
+// their exact values. Position is trivially copyable, so the cross-archetype move takes the
+// std::memcpy fast path; this guards that the bit-copy lands the right bytes in the right slot.
+TEST_F(ArchetypeManagerTest, TrivialTransitionMovePreservesValues)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    Entity e(2, 1);
+    manager->AddEntityWith<Position>(e, Position{3, 4, 5});   // archetype {Position}
+    manager->AddComponent<Velocity>(e, Velocity{6, 7, 8});    // transition memcpy's Position across
+
+    Position* p = manager->GetComponent<Position>(e);
+    ASSERT_NE(p, nullptr);
+    EXPECT_FLOAT_EQ(p->x, 3.0f);
+    EXPECT_FLOAT_EQ(p->y, 4.0f);
+    EXPECT_FLOAT_EQ(p->z, 5.0f);
+
+    Velocity* v = manager->GetComponent<Velocity>(e);
+    ASSERT_NE(v, nullptr);
+    EXPECT_FLOAT_EQ(v->dx, 6.0f);
+    EXPECT_FLOAT_EQ(v->dy, 7.0f);
+    EXPECT_FLOAT_EQ(v->dz, 8.0f);
+}
+
+// W3 (LOAD-BEARING): a non-trivially-relocatable component MUST take the MoveConstruct path
+// across a transition, never memcpy. Tracked::s_live counts live instances; MoveConstruct does
+// ++s_live but a bitwise memcpy does not -- so after the source slot is destructed a buggy
+// memcpy leaves s_live imbalanced by one. `value` alone can't catch it (both copy the int);
+// s_live can.
+//
+// This test exercises BOTH cross-archetype move paths with Tracked as the moved (matched) non-
+// trivial column: AddComponent routes through MoveAndAdd (the add-transition move), and
+// RemoveComponent routes through MoveEntityFrom (the remove-transition move this task rewrites
+// with the merge-join + memcpy fast path). Without the RemoveComponent leg no test touches
+// MoveEntityFrom's matched-column path, so a blanket memcpy there would pass the whole suite --
+// the RemoveComponent<Position> + s_live guard below is what makes the is_trivially_copyable
+// gate load-bearing (verified RED against a deliberately un-gated blanket memcpy).
+TEST_F(ArchetypeManagerTest, ComplexTransitionMoveUsesMoveConstructNotMemcpy)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    // Tracked is not registered by the fixture (SetUp only registers Position/Velocity/Health);
+    // register it here, matching the other Tracked tests in this file. Registration constructs
+    // no instances, so it leaves s_live untouched.
+    componentRegistry->RegisterComponents<Tracked>();
+
+    const int baseLive = Tracked::s_live;
+    Entity e(3, 1);
+    manager->AddEntityWith<Tracked>(e, Tracked{42});          // archetype {Tracked}; net +1 live
+    ASSERT_EQ(Tracked::s_live, baseLive + 1);
+
+    // Add transition {Tracked} -> {Tracked, Position} (MoveAndAdd): MoveConstruct Tracked into
+    // the new archetype (++s_live), then the source slot is destructed by the caller (--s_live).
+    // Net change ZERO.
+    manager->AddComponent<Position>(e, Position{1, 2, 3});
+    EXPECT_EQ(Tracked::s_live, baseLive + 1) << "memcpy of a move-only type imbalances s_live";
+    Tracked* t = manager->GetComponent<Tracked>(e);
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->value, 42);                                  // value survives the move
+
+    // Remove transition {Tracked, Position} -> {Tracked} (MoveEntityFrom, this task's merge-join):
+    // Tracked is a MATCHED non-trivial column -> it must MoveConstruct (++s_live), then the source
+    // slot is destructed (--s_live) -> net ZERO. Position is source-only and is dropped. A blanket
+    // memcpy of Tracked here would skip the ++ and leave s_live one short.
+    ASSERT_TRUE(manager->RemoveComponent<Position>(e));
+    EXPECT_EQ(Tracked::s_live, baseLive + 1) << "MoveEntityFrom bit-copied a move-only column";
+    Tracked* t2 = manager->GetComponent<Tracked>(e);
+    ASSERT_NE(t2, nullptr);
+    EXPECT_EQ(t2->value, 42);                                 // value survives the reverse move
+    EXPECT_EQ(manager->GetComponent<Position>(e), nullptr);  // source-only Position was dropped
+
+    manager->RemoveEntity(e);                                 // destructs the one live Tracked
+    EXPECT_EQ(Tracked::s_live, baseLive) << "destroy must return the live count to baseline";
+}
