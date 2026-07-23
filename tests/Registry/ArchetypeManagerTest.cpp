@@ -778,3 +778,35 @@ TEST_F(ArchetypeManagerTest, V2LoadNullsSurvivingRootStaleEdges)
     EXPECT_FLOAT_EQ(p->z, 3.0f);
     EXPECT_EQ(manager->GetComponent<Position>(fresh), p);
 }
+
+// W4: fast-append must not leave provided components default/zeroed, and must write each
+// entity's values into the correct packed column (no cross-column or stale-slot corruption).
+TEST_F(ArchetypeManagerTest, FastAppendPreservesAllProvidedValues)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    constexpr int N = 500;
+    std::vector<Entity> ents;
+    for (int i = 0; i < N; ++i)
+    {
+        Entity e(static_cast<uint32_t>(i + 1), 1);
+        manager->AddEntityWith<Position, Velocity>(
+            e, Position{float(i), float(i) + 0.5f, float(i) + 0.25f}, Velocity{float(-i), 0.0f, 0.0f});
+        ents.push_back(e);
+    }
+
+    for (int i = 0; i < N; ++i)
+    {
+        Position* p = manager->GetComponent<Position>(ents[i]);
+        Velocity* v = manager->GetComponent<Velocity>(ents[i]);
+        ASSERT_NE(p, nullptr) << "i=" << i;
+        ASSERT_NE(v, nullptr) << "i=" << i;
+        EXPECT_FLOAT_EQ(p->x, float(i));
+        EXPECT_FLOAT_EQ(p->y, float(i) + 0.5f);
+        EXPECT_FLOAT_EQ(p->z, float(i) + 0.25f);
+        EXPECT_FLOAT_EQ(v->dx, float(-i));
+        EXPECT_FLOAT_EQ(v->dy, 0.0f);
+        EXPECT_FLOAT_EQ(v->dz, 0.0f);
+    }
+}
