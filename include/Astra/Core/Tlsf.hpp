@@ -103,6 +103,12 @@ namespace Astra
         };
 
     public:
+        // Arena registration bounds. Exposed so an owner can size the regions it
+        // hands to AddArena without duplicating the limit; AddArena refuses
+        // anything outside [MIN_ARENA_BYTES, MAX_ARENA_BYTES].
+        static constexpr size_t MIN_ARENA_BYTES = kMinArenaBytes;
+        static constexpr size_t MAX_ARENA_BYTES = kMaxArenaBytes;
+
         Tlsf() = default;
         Tlsf(const Tlsf&) = delete;
         Tlsf& operator=(const Tlsf&) = delete;

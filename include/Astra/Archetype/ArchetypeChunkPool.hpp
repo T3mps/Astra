@@ -14,10 +14,10 @@
 #include <vector>
 
 #include "../Component/Component.hpp"
-#include "../Container/FlatMap.hpp"
 #include "../Container/SmallVector.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/Memory.hpp"
+#include "../Core/Tlsf.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Entity/Entity.hpp"
 
@@ -555,11 +555,11 @@ namespace Astra
         // default argument that needs Config's NSDMIs before the enclosing class is complete.
         ArchetypeChunkPool() : ArchetypeChunkPool(Config{}) {}
 
-        explicit ArchetypeChunkPool(const Config& config) : m_config(config), m_freeList(nullptr)
+        explicit ArchetypeChunkPool(const Config& config) : m_config(config)
         {
             ASTRA_ASSERT(m_config.chunkSize >= MIN_CHUNK_SIZE && m_config.chunkSize <= MAX_CHUNK_SIZE, "Chunk size must be between 4KB and 1MB");
             ASTRA_ASSERT((m_config.chunkSize & (m_config.chunkSize - 1)) == 0, "Chunk size must be a power of 2");
-            
+
             if (m_config.chunksPerBlock == 0)
             {
                 m_config.chunksPerBlock = std::max(size_t(1), HUGE_PAGE_SIZE / m_config.chunkSize);
@@ -568,74 +568,68 @@ namespace Astra
             {
                 m_config.maxChunks = m_config.chunksPerBlock;
             }
-            
-            // Reserve space for maximum possible blocks to prevent reallocation
-            // This ensures ChunkNode pointers remain stable
-            size_t maxBlocks = (m_config.maxChunks + m_config.chunksPerBlock - 1) / m_config.chunksPerBlock;
-            m_blocks.reserve(maxBlocks);
-            
+
+            // initialBlocks pre-allocates arenas. A failure here is not fatal:
+            // the pool stays usable and CreateChunk retries the growth later.
             for (size_t i = 0; i < m_config.initialBlocks; ++i)
             {
-                AllocateBlock();
+                if (!GrowArena(0)) ASTRA_UNLIKELY
+                    break;
             }
         }
-        
+
         ~ArchetypeChunkPool()
         {
-            // Clear the map first (no need to maintain it during destruction)
-            m_memoryToNode.Clear();
-            
-            for (const auto& block : m_blocks)
+            // The Tlsf heap only indexes memory it was handed; releasing the
+            // arenas here is what actually returns it to the OS.
+            for (const ArenaRecord& arena : m_arenas)
             {
-                FreeMemory(block.memory, block.size, block.usedHugePages);
+                FreeMemory(arena.memory, arena.size, arena.usedHugePages);
             }
         }
-        
+
         ArchetypeChunkPool(const ArchetypeChunkPool&) = delete;
         ArchetypeChunkPool& operator=(const ArchetypeChunkPool&) = delete;
-        
+
         ArchetypeChunkPool(ArchetypeChunkPool&& other) noexcept :
             m_config(other.m_config),
-            m_blocks(std::move(other.m_blocks)),
-            m_freeList(other.m_freeList),
-            m_memoryToNode(std::move(other.m_memoryToNode)),
+            m_tlsf(std::move(other.m_tlsf)),
+            m_arenas(std::move(other.m_arenas)),
             m_totalChunks(other.m_totalChunks.load()),
-            m_freeChunks(other.m_freeChunks.load()),
             m_acquireCount(other.m_acquireCount.load()),
             m_releaseCount(other.m_releaseCount.load()),
             m_blockAllocations(other.m_blockAllocations.load()),
             m_failedAcquires(other.m_failedAcquires.load())
         {
-            other.m_freeList = nullptr;
+            other.ResetCounters();
         }
-        
+
         ArchetypeChunkPool& operator=(ArchetypeChunkPool&& other) noexcept
         {
             if (this != &other)
             {
-                for (const auto& block : m_blocks)
+                for (const ArenaRecord& arena : m_arenas)
                 {
-                    FreeMemory(block.memory, block.size, block.usedHugePages);
+                    FreeMemory(arena.memory, arena.size, arena.usedHugePages);
                 }
-                
+                m_arenas.clear();
+
                 m_config = other.m_config;
-                m_blocks = std::move(other.m_blocks);
-                m_memoryToNode = std::move(other.m_memoryToNode);
-                m_freeList = other.m_freeList;
+                m_tlsf = std::move(other.m_tlsf);
+                m_arenas = std::move(other.m_arenas);
                 m_totalChunks.store(other.m_totalChunks.load());
-                m_freeChunks.store(other.m_freeChunks.load());
                 m_acquireCount.store(other.m_acquireCount.load());
                 m_releaseCount.store(other.m_releaseCount.load());
                 m_blockAllocations.store(other.m_blockAllocations.load());
                 m_failedAcquires.store(other.m_failedAcquires.load());
-                other.m_freeList = nullptr;
+                other.ResetCounters();
             }
             return *this;
         }
 
         std::unique_ptr<Chunk, ChunkDeleter> CreateChunk(size_t entitiesPerChunk, const ArchetypeColumnMeta* meta)
         {
-            void* memory = AcquireMemory();
+            void* memory = AllocateChunkBytes(m_config.chunkSize);
             if (!memory) ASTRA_UNLIKELY
             {
                 return nullptr;
@@ -650,55 +644,37 @@ namespace Astra
         {
             if (!memory) ASTRA_UNLIKELY
                 return;
-            
-            // O(1) lookup using FlatMap
-            auto it = m_memoryToNode.Find(memory);
-            if (it == m_memoryToNode.end()) ASTRA_UNLIKELY
-            {
-                // This should never happen in normal operation
-                // but we need to handle it gracefully in all builds
-                ASTRA_ASSERT(false, "Returned chunk not found in memory map");
-                return;  // Always return, not just in debug builds
-            }
-            
-            ChunkNode* node = it->second;
-            
-            // Validate block index before use
-            if (node->blockIndex >= m_blocks.size()) ASTRA_UNLIKELY
-            {
-                // Block was removed during defragmentation
-                ASTRA_ASSERT(false, "Block index out of range - block was likely removed");
-                return;
-            }
-            
-            // Track block usage (atomic decrement for thread safety)
-            m_blocks[node->blockIndex].usedChunks.fetch_sub(1, std::memory_order_relaxed);
-            
-            // Mark for lazy clearing instead of clearing now
-            node->needsClear = true;
-            
-            // Add to free list
-            node->next = m_freeList;
-            m_freeList = node;
-            
-            m_freeChunks.fetch_add(1, std::memory_order_relaxed);
+
+            // Tlsf::Free is O(1) and coalesces with free physical neighbours, so
+            // no side table from memory back to a node is needed any more.
+            m_tlsf.Free(memory);
+
+            ASTRA_ASSERT(m_totalChunks.load(std::memory_order_relaxed) > 0, "ReturnChunk without a matching CreateChunk");
+            m_totalChunks.fetch_sub(1, std::memory_order_relaxed);
             m_releaseCount.fetch_add(1, std::memory_order_relaxed);
         }
-        
+
         ASTRA_NODISCARD size_t GetChunkSize() const { return m_config.chunkSize; }
-        
+
         ASTRA_NODISCARD Stats GetStats() const
         {
             Stats snapshot;
-            snapshot.totalChunks = m_totalChunks.load(std::memory_order_relaxed);
-            snapshot.freeChunks = m_freeChunks.load(std::memory_order_relaxed);
+            // m_totalChunks counts LIVE chunks now (the block pool counted carved
+            // capacity). Reporting live + "how many more chunks the free bytes
+            // could serve" keeps the old reading of totalChunks as pool capacity,
+            // which callers use to see that a returned chunk is retained, not
+            // released to the OS.
+            const size_t live = m_totalChunks.load(std::memory_order_relaxed);
+            const size_t freeEquivalent = m_tlsf.GetFreeBytes() / m_config.chunkSize;
+            snapshot.totalChunks = live + freeEquivalent;
+            snapshot.freeChunks = freeEquivalent;
             snapshot.acquireCount = m_acquireCount.load(std::memory_order_relaxed);
             snapshot.releaseCount = m_releaseCount.load(std::memory_order_relaxed);
             snapshot.blockAllocations = m_blockAllocations.load(std::memory_order_relaxed);
             snapshot.failedAcquires = m_failedAcquires.load(std::memory_order_relaxed);
             return snapshot;
         }
-        
+
         struct DefragmentResult
         {
             size_t blocksReleased = 0;
@@ -710,348 +686,149 @@ namespace Astra
         DefragmentResult Defragment()
         {
             DefragmentResult result;
-            
-            // Can't defragment if we have no blocks
-            if (m_blocks.empty())
-                return result;
-            
-            // Identify completely empty blocks
-            std::vector<size_t> emptyBlockIndices;
-            for (size_t i = 0; i < m_blocks.size(); ++i)
-            {
-                size_t used = m_blocks[i].usedChunks.load(std::memory_order_acquire);
-                if (used == 0)
-                {
-                    emptyBlockIndices.push_back(i);
-                }
-                else
-                {
-                    result.chunksInUse += used;
-                }
-            }
-            
-            // Keep at least one block as reserve to avoid allocation thrashing
-            size_t blocksToRelease = 0;
-            if (emptyBlockIndices.size() > 1)
-            {
-                // Keep one empty block, release the rest
-                blocksToRelease = emptyBlockIndices.size() - 1;
-            }
-            else if (emptyBlockIndices.size() == 1 && m_blocks.size() > 1)
-            {
-                // We have other blocks with chunks in use, can release the empty one
-                blocksToRelease = 1;
-            }
-            
-            if (blocksToRelease == 0)
-            {
-                result.blocksKept = m_blocks.size();
-                return result;
-            }
-            
-            // Remove nodes from free list for blocks we're releasing
-            ChunkNode* newFreeList = nullptr;
-            ChunkNode* newFreeListTail = nullptr;
 
-            // Build new free list without nodes from blocks being released
-            ChunkNode* current = m_freeList;
-            while (current)
-            {
-                bool shouldKeep = true;
+            // Collect first: ForEachFullyFreeArena walks Tlsf's arena list by
+            // reference, so RemoveArena must not run inside the callback.
+            SmallVector<void*, 8> releasable;
+            m_tlsf.ForEachFullyFreeArena([&releasable](void* base, size_t) { releasable.push_back(base); });
 
-                // Check if this node belongs to a block being released
-                for (size_t i = 0; i < blocksToRelease; ++i)
-                {
-                    if (current->blockIndex == emptyBlockIndices[i])
-                    {
-                        shouldKeep = false;
-                        break;
-                    }
-                }
-                
-                ChunkNode* next = current->next;
-                
-                if (shouldKeep)
-                {
-                    if (!newFreeList)
-                    {
-                        newFreeList = current;
-                        newFreeListTail = current;
-                    }
-                    else
-                    {
-                        newFreeListTail->next = current;
-                        newFreeListTail = current;
-                    }
-                    current->next = nullptr;
-                }
-                
-                current = next;
-            }
-            
-            m_freeList = newFreeList;
-            
-            // Track which blocks we actually release
-            std::vector<size_t> actuallyReleasedIndices;
-            actuallyReleasedIndices.reserve(blocksToRelease);
-            
-            // Process blocks to be released
-            for (size_t i = 0; i < blocksToRelease; ++i)
+            // Mirror the old block policy: when EVERY arena is free keep one as
+            // reserve to avoid allocation thrashing; otherwise every fully-free
+            // arena can go, because live chunks still hold the others open.
+            const size_t startIndex = (releasable.size() == m_arenas.size() && !releasable.empty()) ? 1 : 0;
+            for (size_t i = startIndex; i < releasable.size(); ++i)
             {
-                size_t idx = emptyBlockIndices[i];
-                auto& block = m_blocks[idx];
-                
-                // Double-check that block is truly empty (use acquire to synchronize with Release operations)
-                // A chunk was acquired after our initial check -- expected under concurrent
-                // Acquire/Release, not a guard failure. Skip the block and move on.
-                size_t blockUsed = block.usedChunks.load(std::memory_order_acquire);
-                if (blockUsed != 0) ASTRA_UNLIKELY
+                void* base = releasable[i];
+                if (!m_tlsf.RemoveArena(base)) ASTRA_UNLIKELY
+                    continue;   // became carved up again: leave it registered
+
+                bool found = false;
+                for (size_t j = 0; j < m_arenas.size(); ++j)
                 {
-                    continue;
+                    if (m_arenas[j].memory != base)
+                        continue;
+
+                    result.bytesFreed += m_arenas[j].size;
+                    FreeMemory(m_arenas[j].memory, m_arenas[j].size, m_arenas[j].usedHugePages);
+                    m_arenas[j] = m_arenas.back();
+                    m_arenas.pop_back();
+                    ++result.blocksReleased;
+                    found = true;
+                    break;
                 }
-                
-                // Remove all nodes from this block from the memory map
-                for (size_t j = 0; j < block.chunkCount; ++j)
-                {
-                    m_memoryToNode.Erase(block.nodes[j].memory);
-                }
-                
-                result.bytesFreed += block.size;
-                result.blocksReleased++;
-                
-                // Free the memory
-                FreeMemory(block.memory, block.size, block.usedHugePages);
-                
-                // Update statistics
-                m_totalChunks.fetch_sub(block.chunkCount, std::memory_order_relaxed);
-                m_freeChunks.fetch_sub(block.chunkCount, std::memory_order_relaxed);
-                
-                // Track that we actually released this block
-                actuallyReleasedIndices.push_back(idx);
+                // Tlsf only ever reports arenas this pool registered, so a miss
+                // would mean the two records have diverged (and leak the region).
+                ASTRA_ASSERT(found, "Detached a TLSF arena the pool does not own");
+                (void)found;
             }
-            
-            // Batch remove blocks using erase-remove idiom for better performance
-            // Mark blocks to remove by setting memory to nullptr
-            for (size_t idx : actuallyReleasedIndices)
-            {
-                m_blocks[idx].memory = nullptr;
-            }
-            
-            // Remove all marked blocks in one pass
-            m_blocks.erase(
-                std::remove_if(m_blocks.begin(), m_blocks.end(),
-                    [](const BlockInfo& block) { return block.memory == nullptr; }),
-                m_blocks.end()
-            );
-            
-            // Update block indices for all blocks that may have shifted position
-            // After removal, blocks that were after removed blocks have new indices
-            // We need to update all blocks, as we don't know which ones shifted
-            for (size_t i = 0; i < m_blocks.size(); ++i)
-            {
-                for (size_t j = 0; j < m_blocks[i].chunkCount; ++j)
-                {
-                    m_blocks[i].nodes[j].blockIndex = i;
-                }
-            }
-            
-            result.blocksKept = m_blocks.size();
-            
+
+            result.blocksKept = m_arenas.size();
+            result.chunksInUse = m_totalChunks.load(std::memory_order_relaxed);
             return result;
         }
-        
+
     private:
-        // Non-intrusive free list node to avoid corrupting chunk memory
-        struct ChunkNode
-        {
-            void* memory = nullptr;      // Pointer to the actual chunk memory
-            ChunkNode* next = nullptr;   // Next free chunk
-            bool needsClear = false;      // Whether chunk needs clearing before use
-            size_t blockIndex = 0;        // Which block this chunk belongs to
-            
-            // Explicit default constructor to ensure initialization
-            ChunkNode() : memory(nullptr), next(nullptr), needsClear(false), blockIndex(0) {}
-        };
-        
-        struct BlockInfo
+        // One OS region registered with the Tlsf heap. Tlsf never calls the OS
+        // itself, so the pool keeps what it needs to hand the region back.
+        struct ArenaRecord
         {
             void* memory = nullptr;
             size_t size = 0;
-            size_t chunkCount = 0;
             bool usedHugePages = false;
-            std::unique_ptr<ChunkNode[]> nodes;  // Heap-allocated nodes for stable addresses
-            std::atomic<size_t> usedChunks{0};   // Number of chunks currently in use (atomic for thread safety)
-
-            // Need explicit move operations because atomic is not moveable
-            BlockInfo() = default;
-            BlockInfo(BlockInfo&& other) noexcept
-                : memory(other.memory)
-                , size(other.size)
-                , chunkCount(other.chunkCount)
-                , usedHugePages(other.usedHugePages)
-                , nodes(std::move(other.nodes))
-                , usedChunks(other.usedChunks.load(std::memory_order_relaxed))
-            {
-                other.memory = nullptr;
-                other.size = 0;
-                other.chunkCount = 0;
-                other.usedHugePages = false;
-            }
-            BlockInfo& operator=(BlockInfo&& other) noexcept
-            {
-                if (this != &other)
-                {
-                    memory = other.memory;
-                    size = other.size;
-                    chunkCount = other.chunkCount;
-                    usedHugePages = other.usedHugePages;
-                    nodes = std::move(other.nodes);
-                    usedChunks.store(other.usedChunks.load(std::memory_order_relaxed), std::memory_order_relaxed);
-                    other.memory = nullptr;
-                    other.size = 0;
-                    other.chunkCount = 0;
-                    other.usedHugePages = false;
-                }
-                return *this;
-            }
-            BlockInfo(const BlockInfo&) = delete;
-            BlockInfo& operator=(const BlockInfo&) = delete;
         };
 
-        void* AcquireMemory()
+        // Acquires one region from the OS and registers it with the heap.
+        // minBytes is the allocation that triggered the growth; the new arena
+        // must be able to serve it.
+        bool GrowArena(size_t minBytes)
         {
-            // Check free list first
-            if (m_freeList) ASTRA_LIKELY
-            {
-                ChunkNode* node = m_freeList;
-                m_freeList = node->next;
-                
-                // Clear memory only if needed (was previously used)
-                if (node->needsClear)
-                {
-                    std::memset(node->memory, 0, m_config.chunkSize);
-                    node->needsClear = false;
-                }
-                
-                // Track block usage (atomic increment for thread safety)
-                m_blocks[node->blockIndex].usedChunks.fetch_add(1, std::memory_order_relaxed);
-                
-                void* memory = node->memory;
-                node->next = nullptr;  // Clear the link
-                
-                m_freeChunks.fetch_sub(1, std::memory_order_relaxed);
-                m_acquireCount.fetch_add(1, std::memory_order_relaxed);
-                
-                return memory;
-            }
-            
-            if (m_totalChunks < m_config.maxChunks) ASTRA_UNLIKELY
-            {
-                if (AllocateBlock())
-                {
-                    return AcquireMemory();
-                }
-            }
-            
-            m_failedAcquires.fetch_add(1, std::memory_order_relaxed);
-            return nullptr;
-        }
+            // Arena sizing: the legacy chunksPerBlock x chunkSize hint, at least
+            // enough for the request plus TLSF bookkeeping (front pad 64 +
+            // sentinel 16 + rounding; 256 is comfortably safe), and always inside
+            // the range AddArena accepts.
+            constexpr size_t kArenaOverhead = 256;
+            ASTRA_ASSERT(minBytes + kArenaOverhead <= Tlsf::MAX_ARENA_BYTES, "Chunk request larger than the biggest registerable arena");
+            size_t want = std::max(m_config.chunksPerBlock * m_config.chunkSize, minBytes + kArenaOverhead);
+            want = std::clamp(want, Tlsf::MIN_ARENA_BYTES, Tlsf::MAX_ARENA_BYTES);
 
-        bool AllocateBlock()
-        {
-            size_t remainingCapacity = m_config.maxChunks - m_totalChunks;
-            if (remainingCapacity == 0) ASTRA_UNLIKELY
-                return false;
-            
-            size_t chunksToAllocate = std::min(m_config.chunksPerBlock, remainingCapacity);
-            size_t blockSize = chunksToAllocate * m_config.chunkSize;
-            
-            // Blocks are cache-line aligned; chunk bases inherit this, so the
-            // strongest alignment a component array can rely on is
-            // CACHE_LINE_SIZE (64). (Windows VirtualAlloc gives 64KB anyway;
-            // this matters on the POSIX posix_memalign fallback.)
-            constexpr size_t BLOCK_ALIGNMENT = CACHE_LINE_SIZE;
-            AllocFlags flags = AllocFlags::ZeroMem;
+            // Do NOT pre-round to huge pages here: AllocateMemory already rounds
+            // internally when it takes the huge-page path (size >= 2MB), and small
+            // arena hints (e.g. chunksPerBlock=4 in tests) must stay small for
+            // parity with the old per-block allocation. Register r.size (actual).
+            // No ZeroMem either: Chunk's constructor memsets its own bytes.
+            AllocFlags flags = AllocFlags::None;
             if (m_config.useHugePages)
             {
                 flags = flags | AllocFlags::HugePages;
             }
 
-            AllocResult result = AllocateMemory(blockSize, BLOCK_ALIGNMENT, flags);
-            if (!result.ptr) ASTRA_UNLIKELY
+            AllocResult r = AllocateMemory(want, CACHE_LINE_SIZE, flags);
+            if (!r.ptr) ASTRA_UNLIKELY
                 return false;
-            
-            BlockInfo blockInfo;
-            blockInfo.memory = result.ptr;
-            blockInfo.size = result.size;
-            blockInfo.chunkCount = chunksToAllocate;
-            blockInfo.usedHugePages = result.usedHugePages;
-            
-            // Create chunk nodes for non-intrusive list
-            blockInfo.nodes = std::make_unique<ChunkNode[]>(chunksToAllocate);
-            auto* chunks = static_cast<std::byte*>(result.ptr);
-            
-            size_t blockIndex = m_blocks.size();  // Index this block will have
-            for (size_t i = 0; i < chunksToAllocate; ++i)
+
+            // AllocateMemory is at least cache-line aligned, which is what
+            // AddArena demands; refuse-and-release rather than leak if it is not.
+            if (!m_tlsf.AddArena(r.ptr, r.size)) ASTRA_UNLIKELY
             {
-                blockInfo.nodes[i].memory = chunks + i * m_config.chunkSize;
-                blockInfo.nodes[i].needsClear = false;  // Already zeroed by AllocateMemory
-                blockInfo.nodes[i].next = nullptr;
-                blockInfo.nodes[i].blockIndex = blockIndex;
+                FreeMemory(r.ptr, r.size, r.usedHugePages);
+                return false;
             }
-            
-            // Store the old free list head before we move the block
-            ChunkNode* oldFreeList = m_freeList;
-            
-            // Ensure we don't trigger reallocation which would invalidate pointers
-            ASTRA_ASSERT(m_blocks.size() < m_blocks.capacity(), 
-                "Block vector would reallocate, invalidating node pointers in FlatMap");
-            
-            m_blocks.push_back(std::move(blockInfo));
-            
-            // Now set up the linked list in the newly added block
-            auto& newBlock = m_blocks.back();
-            ASTRA_ASSERT(newBlock.nodes != nullptr, "Nodes array is null after move");
-            for (size_t i = 0; i < chunksToAllocate; ++i)
-            {
-                ASTRA_ASSERT(newBlock.nodes[i].memory != nullptr, "Node memory is null");
-                // Add to memory-to-node map for fast lookup
-                m_memoryToNode.Insert({newBlock.nodes[i].memory, &newBlock.nodes[i]});
-                
-                if (i < chunksToAllocate - 1)
-                {
-                    newBlock.nodes[i].next = &newBlock.nodes[i + 1];
-                }
-                else
-                {
-                    // Last node points to the old free list head
-                    newBlock.nodes[i].next = oldFreeList;
-                }
-            }
-            
-            // Update free list head to point to first node of new block
-            m_freeList = &newBlock.nodes[0];
-            
-            m_totalChunks.fetch_add(chunksToAllocate, std::memory_order_relaxed);
-            m_freeChunks.fetch_add(chunksToAllocate, std::memory_order_relaxed);
+
+            m_arenas.push_back(ArenaRecord{r.ptr, r.size, r.usedHugePages});
             m_blockAllocations.fetch_add(1, std::memory_order_relaxed);
-            
             return true;
         }
-        
+
+        // Single allocation path for chunk storage. Task 4 calls this with a
+        // per-archetype size; today CreateChunk always passes m_config.chunkSize.
+        void* AllocateChunkBytes(size_t chunkBytes)
+        {
+            if (m_totalChunks.load(std::memory_order_relaxed) >= m_config.maxChunks) ASTRA_UNLIKELY
+            {
+                m_failedAcquires.fetch_add(1, std::memory_order_relaxed);
+                return nullptr;
+            }
+
+            void* p = m_tlsf.Allocate(chunkBytes);
+            if (!p)
+            {
+                if (!GrowArena(chunkBytes)) ASTRA_UNLIKELY
+                {
+                    m_failedAcquires.fetch_add(1, std::memory_order_relaxed);
+                    return nullptr;
+                }
+                p = m_tlsf.Allocate(chunkBytes);
+                if (!p) ASTRA_UNLIKELY
+                {
+                    m_failedAcquires.fetch_add(1, std::memory_order_relaxed);
+                    return nullptr;
+                }
+            }
+
+            m_totalChunks.fetch_add(1, std::memory_order_relaxed);
+            m_acquireCount.fetch_add(1, std::memory_order_relaxed);
+            return p;
+        }
+
+        // Zeroes the counters of a moved-from pool so its GetStats() cannot
+        // report chunks it no longer owns (its Tlsf and arenas are empty).
+        void ResetCounters() noexcept
+        {
+            m_totalChunks.store(0, std::memory_order_relaxed);
+            m_acquireCount.store(0, std::memory_order_relaxed);
+            m_releaseCount.store(0, std::memory_order_relaxed);
+            m_blockAllocations.store(0, std::memory_order_relaxed);
+            m_failedAcquires.store(0, std::memory_order_relaxed);
+        }
+
         Config m_config;
-        SmallVector<BlockInfo, 16> m_blocks;
-        ChunkNode* m_freeList;  // Head of free list
-        
-        // Fast lookup from memory pointer to ChunkNode
-        // Using FlatMap since this is "build once (on block allocation), query many (on every return)"
-        FlatMap<void*, ChunkNode*> m_memoryToNode;
-        
-        std::atomic<size_t> m_totalChunks{0};
-        std::atomic<size_t> m_freeChunks{0};
+        Tlsf m_tlsf;
+        SmallVector<ArenaRecord, 16> m_arenas;
+
+        std::atomic<size_t> m_totalChunks{0};       // LIVE chunks (see GetStats)
         std::atomic<size_t> m_acquireCount{0};
         std::atomic<size_t> m_releaseCount{0};
-        std::atomic<size_t> m_blockAllocations{0};
+        std::atomic<size_t> m_blockAllocations{0};  // arenas acquired from the OS
         std::atomic<size_t> m_failedAcquires{0};
     };
 }
