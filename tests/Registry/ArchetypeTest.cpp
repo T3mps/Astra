@@ -1114,3 +1114,98 @@ TEST(Archetype, EdgeStorageLazyGetSetAndClear)
     EXPECT_EQ(a.GetRemoveEdge(7), nullptr);   // was -> c, cleared
     EXPECT_EQ(a.GetAddEdge(9), nullptr);      // was -> c, cleared
 }
+
+// W5: per-archetype column metadata is built once, excludes tags, sorts columns by id,
+// maps id->column, and flags complex (non-trivially-copyable) component sets.
+TEST(ArchetypeColumnMeta, BuiltOnceExcludesTagsAndMapsIds)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    // Build an archetype over Position + Velocity (both non-empty, trivially copyable).
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponents<Position, Velocity, Health>();
+
+    auto mask = Astra::MakeComponentMask<Position, Velocity>();
+
+    std::vector<Astra::ComponentDescriptor> descriptors;
+    for (Astra::ComponentID id = 0; id < Astra::MAX_COMPONENTS; ++id)
+    {
+        if (mask.Test(id))
+        {
+            const auto* desc = registry.GetComponentDescriptor(id);
+            if (desc)
+            {
+                descriptors.push_back(*desc);
+            }
+        }
+    }
+    ASSERT_EQ(descriptors.size(), 2u);
+
+    Astra::ArchetypeChunkPool componentPool;
+    Archetype a(mask);
+    a.SetComponentPool(&componentPool);
+    a.Initialize(descriptors);
+
+    const ArchetypeColumnMeta& m = a.GetColumnMeta();
+    ASSERT_EQ(m.columnCount, 2u);
+    // Columns ascending by id:
+    EXPECT_LT(m.columns[0].id, m.columns[1].id);
+    // idToColumn round-trips for present components:
+    EXPECT_EQ(m.idToColumn[m.columns[0].id], 0);
+    EXPECT_EQ(m.idToColumn[m.columns[1].id], 1);
+    // stride == descriptor size; descriptor pointer non-null and points at the right id:
+    EXPECT_EQ(m.columns[0].stride, static_cast<uint32_t>(m.columns[0].descriptor->size));
+    EXPECT_EQ(m.columns[0].descriptor->id, m.columns[0].id);
+    // An id NOT in the archetype maps to -1:
+    ComponentID absent = TypeID<Health>::Value();
+    EXPECT_EQ(m.idToColumn[absent], -1);
+    // Trivially-copyable set => not complex:
+    EXPECT_FALSE(m.isComplex);
+}
+
+// W5: tags (zero-size components) contribute no column and don't count toward columnCount;
+// a non-trivially-copyable component in the set flags the whole archetype complex.
+TEST(ArchetypeColumnMeta, TagExcludedAndComplexFlag)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    // Player is an empty/tag component; Tracked is move-only (not trivially copyable).
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponents<Player, Tracked>();
+
+    auto mask = Astra::MakeComponentMask<Player, Tracked>();
+
+    std::vector<Astra::ComponentDescriptor> descriptors;
+    for (Astra::ComponentID id = 0; id < Astra::MAX_COMPONENTS; ++id)
+    {
+        if (mask.Test(id))
+        {
+            const auto* desc = registry.GetComponentDescriptor(id);
+            if (desc)
+            {
+                descriptors.push_back(*desc);
+            }
+        }
+    }
+    ASSERT_EQ(descriptors.size(), 2u);
+
+    Astra::ArchetypeChunkPool componentPool;
+    Archetype a(mask);
+    a.SetComponentPool(&componentPool);
+    a.Initialize(descriptors);
+
+    const ArchetypeColumnMeta& m = a.GetColumnMeta();
+    ComponentID tagId = TypeID<Player>::Value();
+    ComponentID trackedId = TypeID<Tracked>::Value();
+
+    // Tag excluded: no column, idToColumn stays -1.
+    EXPECT_EQ(m.idToColumn[tagId], -1);
+    ASSERT_EQ(m.columnCount, 1u);
+    EXPECT_EQ(m.columns[0].id, trackedId);
+    EXPECT_EQ(m.idToColumn[trackedId], 0);
+
+    // Tracked is not trivially copyable => archetype is complex.
+    EXPECT_TRUE(m.isComplex);
+}

@@ -23,6 +23,27 @@
 
 namespace Astra
 {
+    // Per-archetype column metadata, built once and shared by every chunk of the archetype.
+    // The heavy ComponentDescriptor lives here once (via pointer into the archetype's canonical
+    // list) instead of by-value in every chunk slot. Columns are storage-bearing components only
+    // (tags excluded), sorted ascending by id so cross-archetype moves can merge-join.
+    struct ArchetypeColumnMeta
+    {
+        struct ColumnDesc
+        {
+            ComponentID id{0};
+            uint32_t stride{0};                          // == descriptor->size
+            const ComponentDescriptor* descriptor{nullptr};
+        };
+
+        uint16_t  columnCount{0};                        // N: storage-bearing components
+        bool      isComplex{false};                      // any column not trivially copyable
+        ColumnDesc columns[MAX_COMPONENTS]{};            // [0, columnCount) valid, ascending id
+        int16_t   idToColumn[MAX_COMPONENTS];            // id -> column index, or -1 (absent OR tag)
+
+        ArchetypeColumnMeta() { for (auto& c : idToColumn) c = -1; }
+    };
+
     class ArchetypeChunkPool
     {
     public:

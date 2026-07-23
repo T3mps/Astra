@@ -64,13 +64,43 @@ namespace Astra
         {}
         
         ~Archetype() = default;
-        
+
+    private:
+        // Builds m_columnMeta from m_componentDescriptors: excludes tags (desc.size == 0) from
+        // columns, sorts columns ascending by id (required by the merge-join used for
+        // cross-archetype moves), maps id -> column index, and flags the archetype complex if
+        // any column is not trivially copyable. Called once, from Initialize(), immediately
+        // after m_componentDescriptors is set.
+        void BuildColumnMeta()
+        {
+            m_columnMeta = ArchetypeColumnMeta{};   // resets idToColumn to -1, columnCount/isComplex to 0/false
+            for (const ComponentDescriptor& desc : m_componentDescriptors)
+            {
+                if (desc.size == 0) continue;       // tag: no storage column (idToColumn stays -1)
+                const uint16_t col = m_columnMeta.columnCount++;
+                m_columnMeta.columns[col] = { desc.id, static_cast<uint32_t>(desc.size), &desc };
+                if (!desc.is_trivially_copyable) m_columnMeta.isComplex = true;
+            }
+            // Guarantee ascending-by-id column order (merge-join requirement in W3). If
+            // m_componentDescriptors is already id-ascending this is a no-op; sort defensively.
+            std::sort(m_columnMeta.columns, m_columnMeta.columns + m_columnMeta.columnCount,
+                      [](const ArchetypeColumnMeta::ColumnDesc& a, const ArchetypeColumnMeta::ColumnDesc& b)
+                      { return a.id < b.id; });
+            for (uint16_t c = 0; c < m_columnMeta.columnCount; ++c)
+                m_columnMeta.idToColumn[m_columnMeta.columns[c].id] = static_cast<int16_t>(c);
+        }
+
+    public:
         void Initialize(const std::vector<ComponentDescriptor>& componentDescriptors)
         {
             if (m_initialized) ASTRA_UNLIKELY
                 return;
 
             m_componentDescriptors = componentDescriptors;
+            // m_columnMeta.descriptor pointers point into m_componentDescriptors above, which is
+            // a std::vector set once here and never mutated afterward -- see the stability note
+            // on m_columnMeta's declaration.
+            BuildColumnMeta();
 
             size_t perEntitySize = 0;
 
@@ -1055,6 +1085,7 @@ namespace Astra
 
         ASTRA_NODISCARD const std::vector<std::unique_ptr<ArchetypeChunk, ArchetypeChunkPool::ChunkDeleter>>& GetChunks() const { return m_chunks; }
         ASTRA_NODISCARD const std::vector<ComponentDescriptor>& GetComponentDescriptors() const { return m_componentDescriptors; }
+        ASTRA_NODISCARD const ArchetypeColumnMeta& GetColumnMeta() const noexcept { return m_columnMeta; }
 
         void SetComponentPool(ArchetypeChunkPool* pool) { m_chunkPool = pool; }
 
@@ -1442,6 +1473,9 @@ namespace Astra
         ComponentMask m_mask;
         size_t m_componentCount;  // Cached component count for fast access
         std::vector<ComponentDescriptor> m_componentDescriptors;
+        // Built once by BuildColumnMeta() in Initialize(); columns[*].descriptor points into
+        // m_componentDescriptors above, which is set once and never reassigned afterward.
+        ArchetypeColumnMeta m_columnMeta;
         std::vector<std::unique_ptr<ArchetypeChunk, ArchetypeChunkPool::ChunkDeleter>> m_chunks;
         size_t m_entityCount;
         size_t m_entitiesPerChunk;
