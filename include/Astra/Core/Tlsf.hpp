@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 #include <Mosaic/Bits.hpp>
 
@@ -42,12 +43,15 @@ namespace Astra
     // size -- the search starts one bucket higher. Under the size-congruence rule
     // above, sizes are always 56 (mod 64) while bucket boundaries are multiples of
     // 2^(fl+5) (>= 64), so for blocks >= SMALL_BLOCK_SIZE that is EVERY block:
-    // an isolated free block of size S never satisfies a later request for S; it
-    // satisfies requests up to the start of its own bucket, i.e. up to ~S/32 less.
-    // Such a block becomes reusable again as soon as it coalesces with a free
-    // neighbor. Owners that recycle one fixed size over and over should therefore
-    // expect stranded holes until neighbors free, and rely on defragmentation /
-    // arena release rather than on exact-size recycling.
+    // an isolated free block of size S would never satisfy a later request for S.
+    // That is fatal for an owner that recycles a handful of fixed sizes (the
+    // chunk pool), so Allocate adds an EXACT-FIT PEEK on top of the reference: it
+    // first checks the head of the bucket the request would itself be FILED in,
+    // and takes it when it is big enough. One extra load, O(1), and the size test
+    // keeps it safe. Same-size reuse therefore works; what remains good-fit (and
+    // may still skip a usable block) is only the non-exact case, where the search
+    // can carve fresh bytes rather than reuse a slightly larger stranded hole.
+    // Defragmentation / arena release remain the answer for that residue.
     class Tlsf
     {
     public:
@@ -113,12 +117,31 @@ namespace Astra
         ASTRA_NODISCARD void* Allocate(size_t bytes) noexcept
         {
             const size_t adjusted = AdjustRequestSize(bytes);
-            if (adjusted == 0) ASTRA_UNLIKELY
+            if (adjusted == 0 || adjusted > kMaxRequest) ASTRA_UNLIKELY
                 return nullptr;
 
             int fl = 0, sl = 0;
-            MappingSearch(adjusted, fl, sl);
-            BlockHeader* block = SearchSuitable(fl, sl);
+            BlockHeader* block = nullptr;
+
+            // Exact-fit peek. MappingSearch rounds up to guarantee any block in
+            // the located list fits, which makes it skip the bucket a same-size
+            // block is filed in (our sizes are never on a bucket boundary -- see
+            // the header note on the congruence rule). Checking that bucket's
+            // head first restores same-size reuse for the common case at the cost
+            // of one load; the size test keeps it safe when the head is smaller.
+            MappingInsert(adjusted, fl, sl);
+            BlockHeader* head = m_blocks[fl][sl];
+            if (head && BlockSize(head) >= adjusted)
+            {
+                // fl/sl already identify the bucket head is filed under, by
+                // definition of being that bucket's list head.
+                block = head;
+            }
+            else
+            {
+                MappingSearch(adjusted, fl, sl);
+                block = SearchSuitable(fl, sl);
+            }
             if (!block) ASTRA_UNLIKELY
                 return nullptr;
 
@@ -173,6 +196,9 @@ namespace Astra
         }
 
         // Arenas whose whole span is one free block again (releasable to the OS).
+        // The callback MUST NOT mutate the arena set: it iterates m_arenas by
+        // reference, so calling AddArena / RemoveArena from fn invalidates the
+        // iteration. Collect the bases first, then act on them after returning.
         template<typename F>
         void ForEachFullyFreeArena(F&& fn) const
         {
@@ -221,6 +247,10 @@ namespace Astra
             {
                 const std::byte* arenaBegin = static_cast<const std::byte*>(a.base);
                 const std::byte* arenaEnd = arenaBegin + a.bytes;
+                // The first block must sit exactly where AddArena puts it, and
+                // nothing physically precedes it, so its prev-free bit is clear.
+                if (reinterpret_cast<const std::byte*>(a.first) != arenaBegin + ALIGN_SIZE - kStartOffset) return false;
+                if (IsPrevFree(a.first)) return false;
                 const BlockHeader* b = a.first;
                 bool prevFree = false;
                 for (;;)
@@ -246,8 +276,13 @@ namespace Astra
                         freeBytesSeen += size;
                         ++freeCountSeen;
                     }
+                    // Bounds- and monotonicity-check next BEFORE dereferencing
+                    // it: a corrupt-but-congruent size must not fault the
+                    // integrity checker (the loop-top check comes too late).
                     const BlockHeader* next = NextBlockConst(b);
-                    if (reinterpret_cast<uintptr_t>(next) <= reinterpret_cast<uintptr_t>(b)) return false;
+                    const std::byte* nextRaw = reinterpret_cast<const std::byte*>(next);
+                    if (nextRaw <= raw) return false;
+                    if (nextRaw < arenaBegin || nextRaw + kStartOffset > arenaEnd) return false;
                     if (IsFree(b) && next->prevPhys != b) return false;
                     prevFree = IsFree(b);
                     b = next;
@@ -349,7 +384,9 @@ namespace Astra
         }
 
         ASTRA_NODISCARD static int Fls(size_t v) noexcept { return Mosaic::Bits::FindLastSet(v) - 1; }
-        ASTRA_NODISCARD static int Ffs(uint32_t v) noexcept { return v ? Mosaic::Bits::CountTrailingZeros(v) : -1; }
+        // static_cast keeps the conditional's common type signed, so the -1
+        // "no bit set" sentinel cannot round-trip through an unsigned type.
+        ASTRA_NODISCARD static int Ffs(uint32_t v) noexcept { return v ? static_cast<int>(Mosaic::Bits::CountTrailingZeros(v)) : -1; }
 
         static void MappingInsert(size_t size, int& fl, int& sl) noexcept
         {
@@ -382,6 +419,10 @@ namespace Astra
         {
             ASTRA_ASSERT(fl >= 0 && fl < static_cast<int>(FL_INDEX_COUNT) && sl >= 0 && sl < static_cast<int>(SL_INDEX_COUNT),
                          "TLSF: free-list index out of range on insert");
+            // Unreachable today, but asserts compile out in shipping builds and
+            // this is a cold path: refuse rather than write outside m_blocks.
+            if (fl < 0 || fl >= static_cast<int>(FL_INDEX_COUNT) || sl < 0 || sl >= static_cast<int>(SL_INDEX_COUNT)) ASTRA_UNLIKELY
+                return;
             BlockHeader* current = m_blocks[fl][sl];
             block->nextFree = current;
             block->prevFree = nullptr;
@@ -397,6 +438,9 @@ namespace Astra
             ASTRA_ASSERT(fl >= 0 && fl < static_cast<int>(FL_INDEX_COUNT) && sl >= 0 && sl < static_cast<int>(SL_INDEX_COUNT),
                          "TLSF: free-list index out of range on remove");
             ASTRA_ASSERT(m_freeBytes >= BlockSize(block), "TLSF: free-byte accounting underflow");
+            // See InsertFreeBlock: cold-path guard for shipping builds.
+            if (fl < 0 || fl >= static_cast<int>(FL_INDEX_COUNT) || sl < 0 || sl >= static_cast<int>(SL_INDEX_COUNT)) ASTRA_UNLIKELY
+                return;
             BlockHeader* prev = block->prevFree;
             BlockHeader* next = block->nextFree;
             if (next) next->prevFree = prev;
