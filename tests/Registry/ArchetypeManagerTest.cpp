@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
+#include <cstring>
 #include <span>
 #include <vector>
 #include "../TestComponents.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
 #include "Astra/Archetype/ArchetypeManager.hpp"
 #include "Astra/Entity/EntityTable.hpp"
+#include "Astra/Serialization/BinaryArchive.hpp"
+#include "Astra/Serialization/BinaryReader.hpp"
+#include "Astra/Serialization/BinaryWriter.hpp"
 
 class ArchetypeManagerTest : public ::testing::Test
 {
@@ -691,4 +695,86 @@ TEST_F(ArchetypeManagerTest, EdgesInvalidatedWhenArchetypeDefragmented)
     Position* p = manager->GetComponent<Position>(e1);
     ASSERT_NE(p, nullptr);
     EXPECT_FLOAT_EQ(p->x, 2.0f);               // still correct after the transition
+}
+
+// Review Task 5 (latent UAF): loading a v2-format archive OVER a manager that
+// has already cached a root transition edge must null that edge. Deserialize
+// mass-frees every non-root archetype (the pop_back loop) but carries the root
+// at index 0 over as a reused object. The v3 branch replaces index 0 outright,
+// so a v3 round-trip is safe -- and does NOT exercise this bug. The v2-and-
+// earlier branch (firstArchetypeIndex == 1) never touches index 0, so pre-fix
+// the carried-over root kept its cached add-edge pointing at the just-freed
+// {Position} archetype -- a dangling pointer the next root AddComponent would
+// follow into freed memory (UAF).
+//
+// This is a deterministic state-check + behavioral path-exerciser. The root-
+// edge-is-null EXPECT below FAILS pre-fix (stale non-null pointer survives the
+// v2 load) and PASSES post-fix (ClearAllEdges nulled it) -- a genuine RED->GREEN
+// guard that never DEREFERENCES the freed archetype (it only compares the stored
+// pointer value against nullptr, which is well-defined against the still-live
+// root). Full UAF detection -- actually following the dangling edge -- needs an
+// ASan CI run, a tracked deferred follow-up.
+TEST_F(ArchetypeManagerTest, V2LoadNullsSurvivingRootStaleEdges)
+{
+    using namespace Astra::Test;
+
+    // Capture the root archetype via a component-less entity that stays in it.
+    // The root object lives at m_archetypes[0] and survives Deserialize, so this
+    // raw pointer remains valid across the load.
+    Astra::Entity keeper(1, 1);
+    manager->AddEntity(keeper);
+    Astra::Archetype* root = manager->GetEntityRecord(keeper)->archetype;
+    ASSERT_NE(root, nullptr);
+
+    // Cache a root add-edge for Position: adding Position to a root-resident
+    // entity transitions root -> {Position} and stores that edge on the root.
+    Astra::Entity mover(2, 1);
+    manager->AddEntity(mover);
+    ASSERT_NE(manager->AddComponent<Position>(mover), nullptr);
+    const Astra::ComponentID posId = Astra::TypeID<Position>::Value();
+    ASSERT_NE(root->GetAddEdge(posId), nullptr);   // sanity: the edge is cached
+
+    // Build a minimal v2-format archive. Only the header's version field is load-
+    // bearing here -- it drives ArchetypeManager::Deserialize down the v2 branch
+    // (firstArchetypeIndex == 1), which carries the root over instead of replacing
+    // it. The payload is an empty archetype/entity set (archetypeCount == 0), which
+    // keeps the crafted buffer trivial while still exercising the v2 path: the bug
+    // is about the PRE-LOAD cached edge to the {Position} archetype (freed by
+    // Deserialize's mass-free), independent of what the archive itself contains.
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryHeader header;                  // ctor stamps magic/endianness/current version...
+        header.version = 2;                           // ...override to the pre-v3 format
+        const auto* raw = reinterpret_cast<const std::byte*>(&header);
+        buf.insert(buf.end(), raw, raw + sizeof(header));
+
+        Astra::BinaryWriter writer(buf);             // memory mode appends after the header bytes
+        writer(static_cast<uint32_t>(0));             // archetypeCount = 0
+        writer(static_cast<uint32_t>(0));             // entityCount    = 0
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    ASSERT_TRUE(reader.ReadHeader().IsOk());           // sets the reader's version to 2
+    ASSERT_EQ(reader.GetVersion(), 2u);                // confirm we drive the v2 branch
+    ASSERT_TRUE(manager->Deserialize(reader));
+
+    // Deterministic guard: the {Position} archetype the root's add-edge pointed at
+    // was freed by Deserialize's mass-free. Pre-fix the v2 branch left the edge
+    // dangling (non-null); post-fix ClearAllEdges nulled it. Comparison only -- the
+    // freed archetype is never dereferenced.
+    EXPECT_EQ(root->GetAddEdge(posId), nullptr);
+
+    // Behavioral path-exerciser: a post-load root transition must recompute cleanly
+    // rather than follow the stale edge. Pre-fix this is the actual UAF site
+    // (GetArchetypeWithAdded would return the freed archetype); post-fix the null
+    // edge forces a correct recompute into a fresh {Position} archetype.
+    Astra::Entity fresh(3, 1);
+    manager->AddEntity(fresh);
+    Position* p = manager->AddComponent<Position>(fresh, 1.0f, 2.0f, 3.0f);
+    ASSERT_NE(p, nullptr);
+    EXPECT_FLOAT_EQ(p->x, 1.0f);
+    EXPECT_FLOAT_EQ(p->y, 2.0f);
+    EXPECT_FLOAT_EQ(p->z, 3.0f);
+    EXPECT_EQ(manager->GetComponent<Position>(fresh), p);
 }

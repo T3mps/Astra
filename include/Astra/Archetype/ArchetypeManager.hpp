@@ -831,6 +831,16 @@ namespace Astra
                 m_archetypes.pop_back();
             }
             m_archetypeMap.Clear();
+
+            // Every non-root archetype was just freed, so the surviving root's cached
+            // transition edges are all dangling -- null them before anything can follow one.
+            // (v3 replaces index 0 below, making this a no-op there; v2 and earlier carry
+            // the root over unchanged, where this is the actual fix for a latent UAF: a
+            // post-load root AddComponent/RemoveComponent would otherwise follow a stale
+            // edge into freed memory.) Only index 0 (the root) survives as a reused object;
+            // every other archetype is re-created fresh below with null edges.
+            if (!m_archetypes.empty() && m_archetypes[0].archetype)
+                m_archetypes[0].archetype->ClearAllEdges();
             // Do NOT clear the shared record table: EntityManager::Deserialize has
             // already restored versions (and created the segments) into it; this
             // pass only writes archetype/location back into those same slots.

@@ -1085,6 +1085,14 @@ namespace Astra
             if (m_addEdges)    for (ComponentID i = 0; i < MAX_COMPONENTS; ++i) if (m_addEdges[i]    == target) m_addEdges[i]    = nullptr;
             if (m_removeEdges) for (ComponentID i = 0; i < MAX_COMPONENTS; ++i) if (m_removeEdges[i] == target) m_removeEdges[i] = nullptr;
         }
+        // Drop ALL cached transition edges (both directions). Used when every edge
+        // target has been freed en masse (e.g. Deserialize replaces the archetype set)
+        // so lazy recompute repopulates correctly instead of reading freed archetypes.
+        void ClearAllEdges() noexcept
+        {
+            m_addEdges.reset();
+            m_removeEdges.reset();
+        }
 
     private:
         static constexpr size_t INVALID_CHUNK_INDEX = std::numeric_limits<size_t>::max();
