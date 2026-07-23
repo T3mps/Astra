@@ -9,9 +9,12 @@ Goal: close the same-machine benchmark gap to flecs (`bench-compare/RESULTS.md`)
 iteration and dead-last on all structural churn — **behind flecs on the SAME storage model**, so these are
 optimization gaps, not architectural limits.
 
-**Status (2026-07-22): W1, W6, W2 landed** (W1 on `perf/w1-unified-entity-record`; W6+W2 on
-`perf/w6-w2-archetype-edges`, benchmark-confirmed). Table below is the pre-W1 baseline that motivated this
-plan; see Phase A for W1's measured after-numbers and Phase B for W6+W2's. **Next: Phase C (W5⇒W4⇒W3⇒W7).**
+**Status (2026-07-23): W1, W6, W2, W5, W7, W4, W3 all landed** (W1 on `perf/w1-unified-entity-record`; W6+W2
+on `perf/w6-w2-archetype-edges`; W5+W7+W4+W3 on `perf/phase-c-chunk-storage`, all benchmark-confirmed). Table
+below is the pre-W1 baseline that motivated this plan; see Phase A for W1's measured after-numbers, Phase B
+for W6+W2's, and Phase C for W5/W7/W4/W3's. **Phase C exceeded its own directional targets on
+create/add/remove — Astra now beats flecs on create and is near parity on add (see Phase C below). Next:
+Phase D (command-buffer batch path + change detection — roadmap features, not benchmark movers).**
 
 | op (pre-W1 baseline) | Astra | flecs | ratio | EnTT |
 |---|---|---|---|---|
@@ -147,21 +150,49 @@ priorities (add + create).
       `ArchetypeChunkPool.hpp:365-396`) — unchanged by W2, and now the clearest lever, which is exactly
       **W3**'s (Phase C) target.
 
-### Phase C — Chunk storage modernization  *(invasive core refactor; create + iterate + memory; SDD with opus, 3-config verify)*
-Bundle these — they share the same layout change and the 0..128→0..N cleanup:
-- **W5 — Metadata once per archetype.** `ComponentArrayInfo` holds `const ComponentDescriptor*` (shared,
-  like flecs `ti`) instead of by-value; chunk carries a packed `[N]` present-columns array
-  `{void* base; uint32 stride; const ComponentDescriptor* desc;}` rather than 128 absolute-id slots; drop
-  the duplicate `m_componentDescriptors` vector. Kills ~23 KB/chunk and lets every hot loop iterate `0..N`.
-- **W4 — Fast-append.** In `AddEntity` (`ArchetypeChunkPool.hpp:110`), skip `DefaultConstruct` when the
-  caller emplaces (or `memset` trivial types), iterate the N present columns. Expected: create 367→~150.
-- **W3 — Trivial memcpy move.** Per-archetype `isComplex` flag (any non-trivially-relocatable component);
-  trivial archetypes memcpy each of the N columns via a size-specialised copy; merge-join over the two
-  archetypes' sorted id lists (no per-id `isValid` test). Keep the per-element path for complex types.
-  Expected: amplifies W2 on add/remove; helps create.
-- **W7 — Compact `int16 id→column[]` + get fast path.** Resolve record→component via an int16 index into a
-  small per-archetype array + base-pointer arithmetic, not a walk of the 176 B `ComponentArrayInfo`.
-  Expected: random_get 147→~70 (combined with W1); helps iterate.
+### Phase C — Chunk storage modernization  *(invasive core refactor; create + iterate + memory; SDD with opus, 3-config verify)* — ✅ DONE (2026-07-23, `perf/phase-c-chunk-storage`)
+Bundled these — they share the same layout change and the 0..128→0..N cleanup:
+- **W5 — Metadata once per archetype. ✅ DONE.** `ArchetypeColumnMeta` holds `const ComponentDescriptor*`
+  (shared, like flecs `ti`) instead of by-value; the chunk carries a packed `[N]` present-columns array
+  rather than 128 absolute-id slots; dropped the duplicate `m_componentDescriptors` vector. Kills ~23 KB/chunk
+  and lets every hot loop (`AddEntity`, `AddEntityWithComponents`, transition moves) iterate `0..N`
+  (`ArchetypeChunkPool.hpp:137,144,190,199,226,244,380,399,523`) instead of `0..MAX_COMPONENTS`(128).
+- **W4 — Fast-append. ✅ DONE — confirmed a genuine NO-OP.** Git archaeology (commit `3b77b30`) showed
+  `AddEntityWithComponents` already avoided double-constructing caller-supplied components *before* Phase C
+  touched anything (predates the W5 metadata scaffold). Zero production-code diff; the commit adds only a
+  regression-guard test (`FastAppendPreservesAllProvidedValues`). `AddEntity` (no-value path) is deliberately
+  left doing a full `DefaultConstruct` per column — chunk slots reused after swap-and-pop hold stale bytes,
+  not zeros, so skipping it would leak stale data.
+- **W3 — Trivial memcpy move. ✅ DONE.** Per-column `is_trivially_copyable` gate (correctness gate, not a mere
+  optimization — a blanket memcpy would skip a move-only/lifetime-counting type's move ctor and corrupt it);
+  trivial columns get `std::memcpy`, non-trivial columns keep `desc.MoveConstruct`. Landed on **both**
+  transition directions: the remove path `MoveEntityFrom` (`Archetype.hpp:439,462,482`) and the add path
+  `MoveAndAdd`/`MoveAndAddByID` (`ArchetypeManager.hpp:1178,1208-1213,1433,1491-1496`) — both merge-join over
+  the packed `idToColumn`-indexed column lists (no per-id `isValid` scan).
+- **W7 — Compact `idToColumn` get. ✅ DONE.** Record→component resolution now indexes a small per-archetype
+  `idToColumn[id]` array instead of walking the old by-value `ComponentArrayInfo` array; necessarily rides on
+  W5's layout (the old 128-slot direct array is gone).
+
+**Measured (median of 8 interleaved pre-C/post-C runs, `bench-compare/`, pre-C = commit `a8712d6` built in a
+temp worktree; see `bench-compare/RESULTS.md` "Phase C" section for full methodology):**
+- create (2 comp): **129.4 → 49.2 ns (2.63× faster)** — bigger than the W4-attributed ~367→~150 estimate;
+  the create win is NOT from W4 (confirmed no-op) but from **W5** killing the `0..128` scan in
+  `AddEntity`/`AddEntityWithComponents` — the plan's fix-matrix (§2) rated W5's create impact "●"
+  (contributory) and W4 "●●●" (dominant); in practice, since W4's construct-avoidance had already shipped
+  pre-Phase-C, W5 turned out to be the dominant create lever instead. **Astra now beats flecs on create**
+  (49.2 vs 94.6 ns, 1.92× faster) — the plan's original 3.5×-behind gap is inverted.
+- add component: **131.2 → 55.6 ns (2.36× faster)** — exceeded the brief's optimistic ~90-100 ns guidance;
+  now essentially at flecs parity (53.6 ns, 1.04×), closing what had been the single biggest remaining
+  structural gap (2.8× pre-W2, 2.41× post-W6+W2).
+- remove component: **85.6 → 40.8 ns (2.10× faster)** — exceeded the brief's ~55-65 ns guidance; gap to
+  flecs now 1.24× (down from 6.4× pre-W1, 2.64× post-W6+W2).
+- random get: flat (58.8 → 58.4 ns, within noise) — as expected, W7's headroom was small post-W1 (already
+  near flecs parity at 1.11×; now 1.08×).
+- iterate 1/2/3 comp: flat within run-to-run noise, no regression — W5's cache-density argument was a
+  possible iteration lever, but this session's data shows no measurable win there; reported honestly as flat
+  rather than reading a win into noise. Chunk-size/prefetch tuning remains open for a future pass.
+
+Full numbers, raw CSV, and the A/B methodology: `bench-compare/RESULTS.md` (updated 2026-07-23).
 
 ### Phase D — Deferred/strategic  *(NOT benchmark movers — roadmap features)*
 - **Wire `CommandBuffer::Execute` through the existing batch path.** Astra already has
@@ -195,15 +226,22 @@ benchmarkable change so wins/regressions are attributable.
 add ~80-90 · remove ~50-60 · create ~120-150 · random_get ~70-80 · iterate2 ~1.0-1.2 —
 i.e. roughly **flecs parity on the same model**, which is the stated goal.
 
+**Actual end-state (2026-07-23, all of A–C landed):** add 55.6 · remove 40.8 · create 49.2 · random_get 58.4
+· iterate2 1.069 — add/remove/create all landed **better** than this rough target (create in particular:
+the target range didn't anticipate Astra out-pacing flecs outright), random_get/iterate2 landed within the
+target range. Net: not just flecs parity but **ahead of flecs on create, at parity on add**, with only
+remove/random_get/iteration retaining a modest (1.1×-1.4×) flecs lead. See Phase C above and
+`bench-compare/RESULTS.md` for the full honest breakdown (including the W4-no-op / W5-attribution
+correction).
+
 ## 7. Suggested execution order
 ~~W1~~ ✅ done (2026-07-22) → ~~W6~~ ✅ done (2026-07-22) → ~~W2~~ ✅ done (2026-07-22) →
-**Phase C (next): W5 ⇒ W4 ⇒ W3 ⇒ W7**, beginning with W5. Reuse the SDD model
-(brainstorm→spec→plan→SDD; opus on the core storage diffs in Phase C; independent 3-config verify;
-finish = merge-to-dev-local-FF, delete branch, don't push). W1/W6/W2 were small enough to each land as
-their own SDD unit with quick, independently-benchmarkable wins; Phase C is the larger, invasive chunk-
-storage refactor (shared layout change across W5/W4/W3/W7) and should be scoped/sequenced accordingly —
-W5 lands first since W4/W3/W7 build on its layout change; W3 (trivial memcpy move) is the clearest lever
-on add/remove per the W6+W2 measured results above once that groundwork is in place.
+~~Phase C: W5 ⇒ W4 ⇒ W3 ⇒ W7~~ ✅ done (2026-07-23, `perf/phase-c-chunk-storage`) — W5 landed first as
+planned (the metadata-layout change W4/W3/W7 built on); W4 confirmed a no-op; W3 (trivial memcpy move,
+both transition directions) turned out to be the clearest add/remove lever as predicted, and W5 (not W4)
+turned out to be the dominant create lever. **Next: Phase D** (command-buffer batch path + per-chunk change
+detection) — roadmap features, not benchmark movers, since the immediate single-entity API this benchmark
+exercises is now close to fully optimized against flecs.
 
 ---
 

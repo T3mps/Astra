@@ -1,22 +1,25 @@
-# Astra vs EnTT vs flecs — same-machine head-to-head (2026-07-21, updated 2026-07-22 post-W6+W2)
+# Astra vs EnTT vs flecs — same-machine head-to-head (2026-07-21, updated 2026-07-23 post-Phase-C)
 
-**Setup:** one machine, identical hand-rolled harness (`bench_common.hpp`), identical component layout, 1,000,000 entities, MSVC `/std:c++20 /O2 /DNDEBUG /EHsc`, view/query/group created once (pure-iteration), median of runs. EnTT master, flecs v4.1.6, Astra @ `perf/w6-w2-archetype-edges` (post-W6 avalanche hash mix + W2 array-indexed archetype edges). Each library uses its idiomatic fast path. Numbers are **ns per entity/op** (lower = better); M/s in parens.
+**Setup:** one machine, identical hand-rolled harness (`bench_common.hpp`), identical component layout, 1,000,000 entities, MSVC `/std:c++20 /O2 /DNDEBUG /EHsc`, view/query/group created once (pure-iteration), median of runs. EnTT master, flecs v4.1.6, Astra @ `perf/phase-c-chunk-storage` (post-W5+W7+W4+W3 chunk storage modernization — see the Phase C section below). Each library uses its idiomatic fast path. Numbers are **ns per entity/op** (lower = better); M/s in parens.
 
 | Operation | Astra | EnTT | flecs | Rank |
 |---|---|---|---|---|
-| iterate 1 comp | 0.432 (2315) | 0.542 (1845) | **0.377 (2653)** | flecs > **Astra** > EnTT |
-| iterate 2 comp | 1.222 (819) | 2.299 view / 1.083 group | **0.844 (1185)** | flecs > EnTT-group > **Astra** > EnTT-view |
-| iterate 3 comp | 1.192 (839) | 3.192 view (313) | **1.159 (863)** | flecs > **Astra** > EnTT-view |
-| create (2 comp) | 133.2 (7.51) | **39.4 (25.4)** | 95.1 (10.5) | EnTT > flecs > **Astra** |
-| add component | 131.5 (7.60) | **11.5 (86.6)** | 54.6 (18.3) | EnTT > flecs > **Astra** |
-| remove component | 86.4 (11.57) | **16.3 (61.3)** | 32.7 (30.6) | EnTT > flecs > **Astra** |
-| random get | 63.8 (15.68) | **22.2 (45.0)** | 57.4 (17.4) | EnTT > flecs > **Astra** |
+| iterate 1 comp | 0.451 (2218) | 0.512 (1955) | **0.389 (2574)** | flecs > **Astra** > EnTT |
+| iterate 2 comp | 1.069 (936) | 2.303 view / 1.046 group | **0.773 (1294)** | flecs > EnTT-group ≈ **Astra** > EnTT-view |
+| iterate 3 comp | 1.176 (850) | 3.249 view (308) | **0.980 (1020)** | flecs > **Astra** > EnTT-view |
+| create (2 comp) | **49.2 (20.3)** | 38.2 (26.2) | 94.6 (10.6) | EnTT > **Astra** > flecs |
+| add component | 55.6 (18.0) | **11.3 (88.2)** | 53.6 (18.6) | EnTT > **Astra** ≈ flecs |
+| remove component | 40.8 (24.5) | **16.0 (62.4)** | 32.8 (30.5) | EnTT > flecs > **Astra** |
+| random get | 58.4 (17.1) | **19.0 (52.6)** | 54.2 (18.5) | EnTT > flecs > **Astra** |
 
-Astra numbers are the median of 6 same-session runs (see "Measurement methodology" in the W6+W2 section
-below — this machine was noticeably noisier than the 2026-07-21 session, so EnTT/flecs were re-measured
-here too, not reused, to keep the table internally consistent). All three libraries' absolute numbers moved
-a few percent vs the 2026-07-21 session (background load, not code changes — EnTT/flecs are unmodified);
-rankings are unchanged.
+Astra numbers are the median of 8 interleaved same-session runs against a pre-Phase-C worktree build (see
+"Phase C" below for the full A/B methodology). EnTT/flecs are the median of 4 fresh same-session runs
+(unmodified code — re-measured, not reused from 2026-07-22, to keep the table internally consistent; this
+machine's absolute numbers drift a few percent session-to-session from background load, same caveat as the
+W6+W2 session). **create and add both changed rank this update** — Astra now beats flecs on create and is
+within measurement noise of flecs on add (see "Residual gap to flecs" under Phase C for the honest
+before/after and the caveat that create/add rank swaps rest on cross-library comparisons across sessions,
+not the tightly-controlled pre/post-C A/B, which only compares Astra against itself).
 
 ## W1 (unified paged entity record) — landed 2026-07-22
 
@@ -96,6 +99,94 @@ session's own fresh pre-W2/flecs medians), remove 86.4 vs flecs 32.7 (2.64×, do
 106.0/32.7). Both gaps shrank but flecs is still meaningfully ahead — consistent with the move-cost diagnosis
 above (W3/W4/W5, Phase C, is where that residual gap should close further).
 
+## Phase C (chunk storage modernization: W5+W7+W4+W3) — landed 2026-07-23
+
+Phase C bundled four work items sharing one layout change:
+- **W5 — metadata once per archetype.** `ArchetypeColumnMeta` now holds a shared `const ComponentDescriptor*`
+  per column instead of a 176 B by-value copy, and the chunk's present-component storage is a packed
+  `columns[0..columnCount)` array (ascending id) instead of a `MAX_COMPONENTS`(128)-slot absolute-id-indexed
+  array — killing the ~23 KB/chunk metadata bloat and letting every hot loop iterate `0..N` instead of `0..128`.
+- **W7 — compact `idToColumn` get.** Record→component resolution now indexes a small per-archetype
+  `idToColumn[id]` array instead of walking the old by-value `ComponentArrayInfo` array; this necessarily
+  rides on W5's layout (the old 128-slot direct array is gone).
+- **W4 — fast-append.** Confirmed a **genuine no-op**: git archaeology (commit `3b77b30`) shows
+  `AddEntityWithComponents` already avoided double-constructing caller-supplied components *before* Phase C
+  touched anything (it predates the W5 metadata scaffold). The commit has **zero production-code diff** — it
+  only adds a regression-guard test (`FastAppendPreservesAllProvidedValues`) pinning the property. `AddEntity`
+  (no-value-provided path) is deliberately left doing a full `DefaultConstruct` per column, since chunk slots
+  reused after swap-and-pop hold stale bytes, not zeros — skipping it would leak stale data.
+- **W3 — trivial memcpy transition move**, gated on `is_trivially_copyable` as a **correctness gate, not an
+  optimization** (a blanket memcpy would skip a move-only/lifetime-counting type's move ctor and corrupt it).
+  Verified in source on **both** transition directions: the remove path `MoveEntityFrom`
+  (`Archetype.hpp:439,462,482`) and the add path `MoveAndAdd`/`MoveAndAddByID`
+  (`ArchetypeManager.hpp:1178,1208-1213,1433,1491-1496`) — both merge-join over the two archetypes' packed
+  `idToColumn`-indexed column lists (no per-id `isValid` scan) and `memcpy` any trivially-copyable column,
+  falling back to `desc.MoveConstruct` otherwise.
+
+### Measurement methodology
+
+Following the W6+W2 session's finding that this machine can be noisy, a second `bench_astra.exe` was built
+from the pre-Phase-C commit (`a8712d6`, the last commit before the W5 metadata scaffold) in a temporary git
+worktree (`git worktree add <path> a8712d6`). The bench harness files (`bench_astra.cpp`, `bench_common.hpp`,
+`build_one.bat`) aren't tracked by git, so they were copied by hand into the worktree's `bench-compare/`
+(with `build_one.bat`'s `cd` path adjusted to the worktree) and built with the identical flags. The two
+binaries were then run **interleaved, back-to-back, 8 rounds total** (pre-C, post-C, pre-C, post-C, ...).
+Unlike the W6+W2 session, all 8 rounds were internally consistent — no noisy leading window needed to be
+discarded. The worktree was removed after data collection (`git worktree remove`).
+
+| Operation | Before (pre-C, `a8712d6`, this session, n=8) | After (Phase C, n=8) | Delta |
+|---|---|---|---|
+| create (2 comp) | 129.4 ns | 49.2 ns | **61.9% faster (2.63×)** |
+| add component | 131.2 ns | 55.6 ns | **57.6% faster (2.36×)** |
+| remove component | 85.6 ns | 40.8 ns | **52.4% faster (2.10×)** |
+| random get | 58.8 ns | 58.4 ns | flat (±1%, within noise — W7's headroom was small post-W1, as expected) |
+| iterate 1/2/3 comp | 0.435 / 1.074 / 1.188 ns | 0.451 / 1.069 / 1.176 ns | flat within run-to-run noise, no regression |
+
+The win is real and consistent, not a fluke: across all 8 paired rounds, every post-C sample was strictly
+below every pre-C sample for all three structural ops — create pre-C range [128.6, 130.6] vs post-C
+[48.5, 50.6]; add pre-C [128.7, 134.5] vs post-C [54.9, 57.8]; remove pre-C [85.0, 90.5] vs post-C
+[39.4, 42.5] — non-overlapping distributions.
+
+### Honest attribution — the create win is NOT from W4
+
+W4 was independently confirmed a no-op (no source diff — see above), exactly as this task's brief predicted.
+Yet create moved 129.4 → 49.2 ns (2.63×), a bigger win than add or remove got. The actual mechanism is **W5**:
+pre-Phase-C, `AddEntity`/`AddEntityWithComponents` scanned the full `0..MAX_COMPONENTS` (128) slot range with
+an `isValid`-gated `DefaultConstruct` per slot (root causes R4/R5 in the plan); post-W5, those same functions
+iterate the packed `m_meta->columnCount` present-column array (`ArchetypeChunkPool.hpp:137,144,190,199`) — for
+the benchmark's 2-component archetype, that's a 2-iteration loop, not a 128-iteration scan with 126 wasted
+`isValid` checks. The plan's fix-matrix rated W5's create impact as "●" (merely contributory) and gave W4 the
+dominant "●●●" — in practice, since W4's own construct-avoidance logic had already shipped before Phase C,
+killing the 0..128 scan (which is what W5 actually did) turned out to be the dominant create lever. The win
+is genuine and verified in source; it was just attributed to the wrong work item in the original matrix.
+
+### Add/remove: bigger than predicted, too
+
+The brief's directional guidance suggested add moving toward ~90-100 ns and remove toward ~55-65 ns from the
+pre-C baseline (~131/86). Measured: add 55.6 ns, remove 40.8 ns — both **better than the optimistic end of
+that range**. W3's memcpy gate (verified correct and present on both transition directions — see above)
+compounds with W5: the merge-join over present columns now walks a packed `0..N` array of shared descriptor
+pointers (cache-friendly) instead of scanning 128 by-value 176 B `ComponentDescriptor`s, so both the
+"which columns move" bookkeeping and the per-column move itself got cheaper together.
+
+### Residual gap to flecs, post-Phase-C
+
+- **create — Astra is now AHEAD of flecs:** 49.2 vs 94.6 ns (Astra **1.92× faster**). This is a genuine
+  result: flecs's own numbers are stable and its code is unmodified, and Astra's A/B against its own pre-C
+  build is a clean, non-overlapping 2.63× win. The plan's original 3.5× flecs-behind gap on create is now
+  inverted.
+- **add — near parity:** 55.6 vs 53.6 ns (1.04×). This comparison is cross-library and cross-session (not
+  the tightly-controlled pre/post-C worktree A/B), so treat "near parity" rather than a precise ranking as
+  the honest takeaway; the plan's Phase-B residual of 2.41× is closed to essentially zero either way.
+- **remove — gap much smaller, still real:** 40.8 vs 32.8 ns (1.24×, down from 2.64× post-W6+W2 and 6.4×
+  pre-W1).
+- **random_get — unchanged, near parity:** 58.4 vs 54.2 ns (1.08×), as expected — get was never a Phase C
+  target and W7's remaining headroom post-W1 was small.
+- **iteration — flecs still ahead, unchanged:** iterate1 1.16×, iterate2 1.38×, iterate3 1.20× flecs-ahead.
+  W5's cache-density argument (per-chunk metadata shrink) was expected to possibly help iteration, but this
+  session's data does not show a measurable win there — reported honestly as flat/unchanged rather than
+  reading a win into session-level noise. Chunk-size/prefetch tuning remains open for a future pass.
+
 ## Honest verdict (updated post-W1)
 
 - My original "Astra **can't out-perform** EnTT/flecs" was **wrong**: Astra beats EnTT's common `view` idiom on 2- and 3-component iteration (1.9×–2.8×) and beats EnTT on single-component.
@@ -111,7 +202,39 @@ flecs uses the **same storage model** as Astra. Pre-W1 it was 1.7× faster on it
 - **Remaining structural gap (add especially):** W2 replaced the two pointer-keyed `FlatMap` probes with array-indexed edges and measurably helped (add 2.79×→2.41× behind flecs, remove 3.24×→2.64×), but the transition **move** cost (per-element ctor/dtor via fn-ptr, not memcpy) now dominates what's left — that's **W3**'s target.
 - **random_get** is close to flecs (63.8 vs 57.4 ns, 1.11×) — W1 alone nearly closed this gap, exactly as the plan predicted (W1 "dominates random_get"); W2 doesn't touch this path, as expected (flat).
 
-**Takeaway for the roadmap:** W1 validated the "optimization gaps, not architectural limits" diagnosis — a single surgical change (paged record, no API change) closed most of random_get and a meaningful slice of create/add/remove. **W6+W2 landed 2026-07-22** (avalanche hash mix + array-indexed archetype edges): a real but smaller-than-predicted add/remove win (13.7%/18.4%, below the rebased ≈27-34% prediction — see the W6+W2 section above), confirming the edge lookup was a genuine but not dominant cost. Next up per the plan's execution order: **Phase C** (chunk storage modernization: W5 ⇒ W4 ⇒ W3 ⇒ W7), beginning with W5 — the shared metadata-layout change W4/W3/W7 build on; W3 (trivial memcpy move) is the clearest lever on add/remove once that groundwork lands.
+**Takeaway for the roadmap (as of the W6+W2 landing):** W1 validated the "optimization gaps, not architectural limits" diagnosis — a single surgical change (paged record, no API change) closed most of random_get and a meaningful slice of create/add/remove. **W6+W2 landed 2026-07-22** (avalanche hash mix + array-indexed archetype edges): a real but smaller-than-predicted add/remove win (13.7%/18.4%, below the rebased ≈27-34% prediction — see the W6+W2 section above), confirming the edge lookup was a genuine but not dominant cost. Next up per the plan's execution order: **Phase C** (chunk storage modernization: W5 ⇒ W4 ⇒ W3 ⇒ W7), beginning with W5 — the shared metadata-layout change W4/W3/W7 build on; W3 (trivial memcpy move) is the clearest lever on add/remove once that groundwork lands.
+
+## Honest verdict (updated post-Phase C, 2026-07-23)
+
+**Phase C landed 2026-07-22/23** (W5 metadata-once + packed columns, W7 compact `idToColumn` get, W4
+confirmed no-op, W3 memcpy move on both transition directions) and **exceeded the plan's Phase C
+expectations on every structural op**, not just met them:
+
+- **create: 129.4 → 49.2 ns (2.63×), Astra now beats flecs (94.6 ns) outright** — the single biggest
+  surprise of this round. The plan attributed create's dominant lever to W4; W4 turned out to be a no-op,
+  and the real driver was W5 killing the `0..128` scan in `AddEntity`/`AddEntityWithComponents` (see "Honest
+  attribution" above). The plan's original 3.5×-behind-flecs create gap is now inverted to Astra being ahead.
+- **add: 131.2 → 55.6 ns (2.36×), essentially at flecs parity (53.6 ns, 1.04×)** — beyond the brief's
+  optimistic ~90-100 ns guidance, and closing what had been the single biggest remaining structural gap
+  (2.8× behind flecs pre-W2, 2.41× post-W6+W2) to near-zero.
+- **remove: 85.6 → 40.8 ns (2.10×)**, gap to flecs now 1.24× (down from 6.4× pre-W1, 2.64× post-W6+W2) —
+  smaller than add's closure but still a large, real win.
+- **random_get and iteration are honestly flat**, as predicted (W7's headroom was small post-W1; iteration
+  was never Phase C's primary target and this session's data shows no measurable movement there, reported
+  as such rather than reading a win into noise).
+
+**Updated overall picture:** what started as "Astra is a distant #3 behind flecs on every structural op"
+(pre-W1: 2.3×-6.4× behind) is now "Astra leads flecs on create, ties it on add, and trails by only ~1.1×-1.2×
+on remove/random_get" — with iteration (flecs's own strength, ~1.2×-1.4× ahead of Astra) the only place flecs
+still holds a clear edge. This confirms the plan's central diagnosis end-to-end: the gaps were optimization
+gaps in Astra's implementation of the same archetype model flecs uses, not model-inherent limits — three
+surgical phases (W1, then W6+W2, then W5+W7+W4+W3) closed nearly all of them.
+
+**Next per the plan's execution order (§3/§7): Phase D** — wiring `CommandBuffer::Execute` through the
+existing `GroupEntitiesByArchetype`/batch-move machinery, and per-chunk change versions for change detection.
+Both are **roadmap features, not benchmark movers** (the immediate single-entity API this benchmark exercises
+is already close to fully optimized); Phase D's value is real-world batched-workload throughput and the
+change-detection feature itself, not this microbenchmark's numbers.
 
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`.
