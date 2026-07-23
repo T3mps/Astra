@@ -1190,6 +1190,9 @@ namespace Astra
             for (uint16_t c = 0; c < dm.columnCount; ++c)
             {
                 const ComponentID id = dm.columns[c].id;
+                // dstEntityIdx is < the dst chunk's count: AllocateEntitySlot (invoked by
+                // MoveEntityInternal before this runs) already bumped the destination slot's
+                // count, so the count-asserting GetComponentPointer is safe on the destination.
                 void* dstPtr = dstChunk->GetComponentPointer(id, dstEntityIdx);
 
                 if (id == newComponentId) ASTRA_UNLIKELY
@@ -1201,13 +1204,19 @@ namespace Astra
                     const int sc = sm.idToColumn[id];
                     if (sc >= 0) ASTRA_LIKELY
                     {
+                        // Carried-over (shared) column: move src -> dst. The per-column
+                        // is_trivially_copyable check is the CORRECTNESS GATE, not a mere
+                        // optimization -- memcpy of a move-only / lifetime-counting component
+                        // would skip its move ctor and corrupt it. Must NOT be a blanket memcpy.
                         void* srcPtr = srcChunk->GetComponentPointer(id, srcEntityIdx);
-                        dm.columns[c].descriptor->MoveConstruct(dstPtr, srcPtr);
+                        const ComponentDescriptor& desc = *dm.columns[c].descriptor;
+                        if (desc.is_trivially_copyable) std::memcpy(dstPtr, srcPtr, dm.columns[c].stride);
+                        else                            desc.MoveConstruct(dstPtr, srcPtr);
                     }
                 }
             }
         }
-        
+
         template<Component T, typename... Args>
         void MoveEntitiesWithComponent(Archetype* srcArchetype, Archetype* dstArchetype, SmallVector<std::pair<Entity, EntityLocation>, 8>& entities, Args&&... args)
         {
@@ -1439,6 +1448,9 @@ namespace Astra
             for (uint16_t c = 0; c < dm.columnCount; ++c)
             {
                 const ComponentID id = dm.columns[c].id;
+                // dstEntityIdx is < the dst chunk's count: AllocateEntitySlot (invoked by
+                // MoveEntityWithComponentByID before this runs) already bumped the destination
+                // slot's count, so the count-asserting GetComponentPointer is safe on the dst.
                 void* dstPtr = dstChunk->GetComponentPointer(id, dstEntityIdx);
 
                 if (id == newComponentId) ASTRA_UNLIKELY
@@ -1475,8 +1487,14 @@ namespace Astra
                     const int sc = sm.idToColumn[id];
                     if (sc >= 0) ASTRA_LIKELY
                     {
+                        // Carried-over (shared) column: move src -> dst. The per-column
+                        // is_trivially_copyable check is the CORRECTNESS GATE, not a mere
+                        // optimization -- memcpy of a move-only / lifetime-counting component
+                        // would skip its move ctor and corrupt it. Must NOT be a blanket memcpy.
                         void* srcPtr = srcChunk->GetComponentPointer(id, srcEntityIdx);
-                        dm.columns[c].descriptor->MoveConstruct(dstPtr, srcPtr);
+                        const ComponentDescriptor& desc = *dm.columns[c].descriptor;
+                        if (desc.is_trivially_copyable) std::memcpy(dstPtr, srcPtr, dm.columns[c].stride);
+                        else                            desc.MoveConstruct(dstPtr, srcPtr);
                     }
                 }
             }

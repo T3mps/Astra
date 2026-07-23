@@ -887,3 +887,20 @@ TEST_F(ArchetypeManagerTest, ComplexTransitionMoveUsesMoveConstructNotMemcpy)
     manager->RemoveEntity(e);                                 // destructs the one live Tracked
     EXPECT_EQ(Tracked::s_live, baseLive) << "destroy must return the live count to baseline";
 }
+
+// W3: a trivially-copyable MATCHED column moved through MoveEntityFrom (the remove path)
+// keeps its exact value via the memcpy fast path.
+TEST_F(ArchetypeManagerTest, RemovePathTrivialMovePreservesValues)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+    Entity e(41, 1);
+    manager->AddEntityWith<Position, Velocity>(e, Position{9, 8, 7}, Velocity{1, 2, 3});
+    manager->RemoveComponent<Velocity>(e);            // {Position,Velocity} -> {Position} via MoveEntityFrom
+    Position* p = manager->GetComponent<Position>(e); // Position = matched trivial column, memcpy'd across
+    ASSERT_NE(p, nullptr);
+    EXPECT_FLOAT_EQ(p->x, 9.0f);
+    EXPECT_FLOAT_EQ(p->y, 8.0f);
+    EXPECT_FLOAT_EQ(p->z, 7.0f);
+    EXPECT_EQ(manager->GetComponent<Velocity>(e), nullptr);  // Velocity removed
+}
