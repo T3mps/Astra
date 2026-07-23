@@ -449,3 +449,62 @@ TEST_F(CommandBufferTest, RollbackDestroysOnlyUncommittedEntities)
     EXPECT_TRUE(registry->IsValid(e3));
     EXPECT_EQ(registry->Size(), 3u);
 }
+
+// W3 coverage gap (Task 4c): a deferred CommandBuffer AddComponent on an entity
+// that ALREADY holds a move-only component must MoveConstruct that carried-over
+// (shared) column across the archetype transition, never bit-copy it.
+//
+// ROUTING (verified against the source): cmdBuffer->AddComponent<Position>(e, ...)
+// records a deferred AddComponent; Execute() -> ExecuteAddComponent ->
+// Registry::AddComponentByID -> ArchetypeManager::AddComponentByID ->
+// MoveEntityWithComponentByID -> MoveAndAddByID (ArchetypeManager.hpp ~:1433).
+// There the NEW column (Position) is written from the type-erased payload, while
+// the SHARED column (Tracked) is moved src->dst under the per-column
+// is_trivially_copyable gate (~:1496). Tracked is NOT trivially copyable, so it
+// must take desc.MoveConstruct (++s_live); the old row is then destructed on
+// removal (--s_live) -> net zero live instances. A blanket memcpy at that gate
+// would skip the ++ and leave s_live one short after the source is destructed --
+// which `value` alone cannot detect (both copy the int), but s_live can. This is
+// the CommandBuffer/ByID twin of ArchetypeManagerTest's
+// ComplexTransitionMoveUsesMoveConstructNotMemcpy, closing the gap where a
+// move-only SHARED column had no coverage through the type-erased add path.
+TEST_F(CommandBufferTest, CommandBufferAddByIDComplexMoveUsesMoveConstructNotMemcpy)
+{
+    using Astra::Test::Position;
+    using Astra::Test::Tracked;
+
+    const int baseLive = Tracked::s_live;
+
+    // Entity starts in archetype {Tracked}. EmplaceComponent (not AddComponent)
+    // because Tracked is move-only: it forwards ctor args and constructs in
+    // place, whereas Registry::AddComponent takes const T& and needs a copy.
+    Entity e = registry->CreateEntity();
+    registry->EmplaceComponent<Tracked>(e, 42);
+    ASSERT_EQ(Tracked::s_live, baseLive + 1);
+    ASSERT_TRUE(registry->HasComponent<Tracked>(e));
+
+    // Defer {Tracked} -> {Tracked, Position}. At flush the shared Tracked column
+    // is carried over through MoveAndAddByID (see routing note above).
+    cmdBuffer->AddComponent(e, Position{1.0f, 2.0f, 3.0f});
+    auto result = cmdBuffer->Execute();
+    ASSERT_TRUE(result.IsOk());
+
+    // MoveConstruct(++) + source-slot destruct(--) == net zero: still exactly one
+    // live Tracked. A blanket memcpy of the shared column would read baseLive.
+    EXPECT_EQ(Tracked::s_live, baseLive + 1)
+        << "MoveAndAddByID bit-copied a move-only shared column (memcpy imbalances s_live)";
+
+    Tracked* t = registry->GetComponent<Tracked>(e);
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->value, 42) << "moved Tracked lost its value across the transition";
+
+    Position* p = registry->GetComponent<Position>(e);
+    ASSERT_NE(p, nullptr);
+    EXPECT_EQ(p->x, 1.0f);
+    EXPECT_EQ(p->y, 2.0f);
+    EXPECT_EQ(p->z, 3.0f);
+
+    // Destroy returns the live count to baseline (the one Tracked is destructed).
+    registry->DestroyEntity(e);
+    EXPECT_EQ(Tracked::s_live, baseLive) << "destroy must return the live count to baseline";
+}
