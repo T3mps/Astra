@@ -40,8 +40,6 @@ namespace Astra
     class ArchetypeManager;
     class Registry;
 
-    using ArchetypeChunk = ArchetypeChunkPool::Chunk;
-
     template<Component... Components>
     ASTRA_NODISCARD ComponentMask MakeComponentMask() noexcept
     {
