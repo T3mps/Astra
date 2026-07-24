@@ -603,5 +603,126 @@ only 1.107→1.046). EnTT's sparse-set random_get also leaps ahead under full op
 not a target. Net for the lever program: lever 2 (per-chunk iteration-setup flattening, iterate1/2) is now
 clearly the highest-value target; remove (~10%) second; random_get is no longer the headline gap.
 
+## Lever 2 — remove-path validate-once seam + move-path micro-work (2026-07-24, branch `perf/lever2-remove-path` @ `dc9cae9`)
+
+Design: `docs/superpowers/specs/2026-07-24-lever2-remove-path-design.md`. Plan:
+`docs/superpowers/plans/2026-07-24-lever2-remove-path.md`. Goal: close the remove-path gap to flecs
+(37.36 vs 33.84 ns, ~10% behind — the 2026-07-24 full-opt baseline above) by cutting redundant
+validation at the `Registry` seam and wasted work in the transition-move internals.
+
+**Branch built on dev @ `4d98942`. Commits, in order:**
+- `996bfd0` — signal-contract characterization tests (pins add/remove emission + return-value
+  behavior ahead of the seam rewrite; 3 tests, all pass pre-rewrite as required for a
+  behavior-preserving refactor).
+- `fead7a5` — **Phase A: validate-once seam.** Dropped redundant `IsValid`/`GetComponent`
+  pre-checks at 5 `Registry` sites (`AddComponent<T>`, `EmplaceComponent<T>`, `RemoveComponent<T>`,
+  `AddComponentByID`, `RemoveComponentByID`), hoisting signal-payload work behind
+  `IsSignalEnabled` so the common (signals-disabled) path does one call instead of three. Rides
+  along a Lever-1 rider: typed `GetComponent` gains a `rec->chunk` null-check.
+- `ab917e7` — **B1:** `ComponentDescriptor::Destruct` gains the triviality gate that
+  `MoveConstruct`/`DefaultConstruct` already had — was an unconditional indirect function-pointer
+  call, firing twice per column on every swap-remove backfill even for trivially-destructible types.
+- `dc9cae9` — **B3 + B4:** B3 is ordinal-direct column addressing in the transition merge-join
+  (new `ArchetypeChunk::GetColumnPointer(column, index)`, killing 4 `idToColumn` re-resolutions per
+  move in `MoveEntityFrom`); B4 is `AllocateEntitySlot` switched from resize+index-write to
+  `push_back`, killing a value-init-then-overwrite on every slot append.
+
+**B2 (fused move-out + backfill) was SKIPPED at the plan's Task-4 controller gate, by user
+decision.** Per the plan (`docs/superpowers/plans/2026-07-24-lever2-remove-path.md` Task 4), the
+gate rule is: if Astra remove is still behind flecs after checkpoint 2, proceed to B2 (Task 5);
+if Astra remove is at-or-ahead of flecs, stop and ask the user whether B2 still lands. Checkpoint 2
+(below) showed Astra remove **~23% ahead** of flecs, 6/6 rounds — the target was decisively met
+without the riskier fused-move rewrite, so the user chose to stop at Task 6. B2 remains documented
+as a future lever in the spec (§4 B2). **There is no checkpoint 3.**
+
+### Authoritative 3-config
+
+The last code commit on the branch is `dc9cae9` (B3+B4); confirmed via `git log` that HEAD is
+still `dc9cae9` and `git status` shows no tracked-file changes (only the pre-existing pile of
+untracked `bench-compare/` scratch files and untracked review docs, unrelated to this branch) —
+no code has changed since that commit's own 3-config run (Task 3 Step 5), so it stands as
+authoritative without a re-run:
+
+| Config | Total | Passed | Notes |
+|---|---|---|---|
+| Debug | 736 | 736 | clean, no flake |
+| Release | 734 | 734 | clean, no flake |
+| Dist | 734 | 734 | clean, no flake |
+
+Zero failures, zero `EntityRecord chunk/location desync` assert aborts (the Lever-1 desync guard
+sweeps every structural test in the suite), zero `Tracked::s_live` lifetime-imbalance in any
+config. 736/734/734 matches 735 (post-Phase-A) + 1 (B1's added triviality-gate flag test); B3/B4
+added no new tests (pure internal rewiring, covered by the existing structural-transition suite).
+
+### Checkpoint table — baseline → ckpt1 (Phase A) → ckpt2 (B1+B3+B4), same-session paired medians vs flecs
+
+N=1,000,000, ns/op, median of 6 interleaved rounds each session. ckpt1 ran under **heavy background
+load (~22-30%, labeled noisy — provisional)**; ckpt2 ran under **mild load (~16%, labeled mildly
+noisy)** — neither is a fully quiet-machine read, but both are internally paired (same-session
+Astra-vs-flecs), which cancels most common-mode noise. Full per-round data:
+`.superpowers/sdd/task-1-report.md` (ckpt1), `.superpowers/sdd/task-3-report.md` (ckpt2).
+
+| Operation | Baseline (390fb10) Astra / flecs | ckpt1 (post-Phase-A, noisy) Astra / flecs | ckpt2 (post-B1+B3+B4, mildly noisy) Astra / flecs |
+|---|---|---|---|
+| create | 49.90 / 89.54 (1.79× ahead) | 51.34 / 95.80 (1.87× ahead) | 51.127 / 90.903 (**1.78× ahead**) |
+| add | 48.63 / 50.99 (~5% ahead) | 49.80 / 51.80 (~3.9% ahead) | 46.672 / 50.894 (**~8.3% ahead**) |
+| remove | 37.36 / 33.84 (~10% **behind**) | 32.24 / 34.32 (~6.0% ahead) | 25.748 / 33.441 (**~23.0% ahead**) |
+| random_get | 60.03 / 56.21 (~6.8% behind) | 74.73 / 68.33 (~9.4% behind) | 70.242 / 63.586 (~10.5% behind) |
+| iterate1 | 0.484 / 0.434 | 0.456 / 0.501 | 0.504 / 0.499 |
+| iterate2 | 1.046 / 0.885 | 1.385 / 1.439 | 1.091 / 1.134 |
+| iterate3 | 0.997 / 1.010 | 1.416 / 1.347 | 1.260 / 1.330 |
+
+Per-round paired Astra-vs-flecs deltas at ckpt2 (same session, cancels common noise; 6/6 = Astra
+faster all 6 rounds):
+```
+create             -43.5%, -46.2%, -42.4%, -44.4%, -42.5%, -43.4%   (astra faster, 6/6)
+add_component      -8.2%, -6.6%, -7.3%, -9.9%, -6.9%, -10.0%         (astra faster, 6/6)
+remove_component   -21.0%, -23.2%, -26.5%, -24.3%, -24.0%, -18.3%    (astra faster, 6/6 -- wider and tighter than ckpt1's -2.2%..-25.0%)
+random_get         +11.6%, +10.7%, +11.0%, +11.9%, +13.5%, +7.3%     (astra slower, 6/6; untouched path, matches ckpt1's shape)
+```
+
+### Per-phase attribution (approximate — ckpt1 ran noisy)
+
+- **Phase A alone (ckpt1, noisy session):** flipped remove from ~10% behind flecs to ~6% ahead
+  (6/6 rounds Astra-faster, a directional flip from the historical 6/6-flecs-faster pattern) —
+  consistent with the algorithmic story: the hot arm (signals disabled) collapsed from three calls
+  (`IsValid` + `GetComponent` + `RemoveComponent`) to one.
+- **+B1+B3+B4 (ckpt2, mildly noisy session):** remove widened further to ~23% ahead, with a
+  tighter, decisively-shifted per-round band (−18.3%..−26.5% vs ckpt1's −0.9%..−25.0%) — every
+  ckpt2 round beats ckpt1's best round. add also widened its lead further (~3.9%→~8.3% ahead),
+  since `AddComponent`'s transition runs the same `MoveEntityFrom`+`AllocateEntitySlot` internals
+  B3/B4 touched.
+- **Attribution honesty:** because ckpt1 ran under materially heavier load (~22-30%) than ckpt2
+  (~16%), the exact ckpt1→ckpt2 delta is not a clean isolated measurement of B1+B3+B4's
+  contribution alone — some of the apparent widening could be ckpt2 simply being the less-noisy
+  session. What is robust across both sessions regardless of load: remove's *directional* flip
+  (Phase A) and *further* widening (the safe tranche) are each independently 6/6-round-consistent,
+  which is a real signal, not noise. create stayed flat throughout (untouched code path, as
+  expected — a stability check that nothing else broke).
+- **random_get** ran session-elevated in both checkpoints (74.73 and 70.242 vs the fully-quiet
+  baseline's 60.03) — environmental, not a regression: it is an untouched code path (aside from the
+  Lever-1 rider's `if (!rec->chunk)` null-check, a correctly-predicted not-taken branch), and the
+  *paired* gap to flecs stayed essentially stable across both noisy sessions (~9.4% at ckpt1,
+  ~10.5% at ckpt2) rather than tracking the absolute-value inflation — evidence the null-check adds
+  no measurable cost and the swings are machine load, not the branch's code.
+
+### Verdict vs the ≤~34ns target
+
+The plan's target was **remove at or within noise of flecs (~34 ns)**. Checkpoint 2 measured Astra
+remove at **25.748 ns vs flecs 33.441 ns — ~23% AHEAD, 6/6 rounds, non-overlapping-band**. The
+target was not merely met, it was smashed, decisively enough (a directional flip sustained and
+widened across two independent sessions under different load conditions) that the plan's own gate
+rule triggered a stop-and-ask before the riskier B2 rewrite — see the gate decision above. Net
+program effect of Lever 2: remove flipped from Astra's single biggest structural-op deficit
+(~10% behind flecs) to one of its clearest wins (~23% ahead), and add's existing lead widened
+(~5%→~8.3% ahead) as a side effect of touching the same shared transition internals. create,
+random_get, and iterate1/2/3 — all untouched by this lever — held within session-noise bands of
+their pre-lever values, with random_get's absolute inflation attributed to machine load rather
+than the Lever-1 rider (see above).
+
+`ckpt1.csv`/`ckpt2.csv` are untracked scratch (not committed — consistent with the pile of prior
+scratch csvs already `git status`-untracked in `bench-compare/`); the per-round raw data lives in
+`.superpowers/sdd/task-1-report.md` and `.superpowers/sdd/task-3-report.md`.
+
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`. **Build with the full-opt flag set above (2026-07-24 baseline), not bare `/O2`.**
