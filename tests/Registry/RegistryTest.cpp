@@ -680,3 +680,75 @@ TEST_F(RegistryTest, GetComponentByHashTagAgreesWithHas)
     // A component the entity does NOT have still returns nullptr.
     EXPECT_EQ(registry->GetComponentByHash(e, Astra::TypeID<Enemy>::Hash()), nullptr);
 }
+
+// Phase 2 Unit D. On pre-CompactChunks code this test EXPOSES the stale-
+// chunkIndex defect in CoalesceChunks (middle-chunk erase shifts later chunks
+// without updating their records). Run it at RED to confirm; CompactChunks
+// makes it pass by reporting every live entity's new location.
+TEST_F(RegistryTest, DefragmentPreservesEveryComponentValue)
+{
+    // Enough entities for several chunks under the 4KB-first ramp.
+    constexpr uint32_t kCount = 8000;
+    std::vector<Astra::Entity> entities;
+    entities.reserve(kCount);
+    for (uint32_t i = 0; i < kCount; ++i)
+    {
+        entities.push_back(registry->CreateEntityWith(Astra::Test::Position{float(i), float(i * 2), float(i * 3)}));
+    }
+
+    // Punch a hole: destroy a contiguous creation-order band (lands in the
+    // middle chunks) so fill ratio drops below the 0.5 trigger.
+    for (uint32_t i = kCount / 4; i < (3 * kCount) / 4; ++i)
+    {
+        registry->DestroyEntity(entities[i]);
+    }
+
+    auto result = registry->Defragment();
+    EXPECT_GT(result.entitiesMoved, 0u);
+
+    // EVERY survivor must still resolve to ITS OWN component values.
+    for (uint32_t i = 0; i < kCount / 4; ++i)
+    {
+        auto* p = registry->GetComponent<Astra::Test::Position>(entities[i]);
+        ASSERT_NE(p, nullptr) << "entity " << i << " lost its component";
+        EXPECT_EQ(p->x, float(i)) << "entity " << i << " resolves to another entity's data";
+    }
+    for (uint32_t i = (3 * kCount) / 4; i < kCount; ++i)
+    {
+        auto* p = registry->GetComponent<Astra::Test::Position>(entities[i]);
+        ASSERT_NE(p, nullptr) << "entity " << i << " lost its component";
+        EXPECT_EQ(p->x, float(i)) << "entity " << i << " resolves to another entity's data";
+    }
+}
+
+// Move-only lifetime balance across compaction (mirrors Phase C's Tracked
+// s_live guard): compaction must MoveConstruct+Destruct (or memcpy trivials),
+// never duplicate or leak.
+TEST_F(RegistryTest, DefragmentBalancesMoveOnlyLifetimes)
+{
+    const auto baseline = Astra::Test::Tracked::s_live;   // match s_live's declared type
+    constexpr uint32_t kCount = 4000;
+    std::vector<Astra::Entity> entities;
+    entities.reserve(kCount);
+    for (uint32_t i = 0; i < kCount; ++i)
+    {
+        entities.push_back(registry->CreateEntityWith(Astra::Test::Tracked{int(i)}));
+    }
+    EXPECT_EQ(Astra::Test::Tracked::s_live, baseline + kCount);
+
+    for (uint32_t i = 0; i < kCount; i += 2)   // half, spread across chunks
+    {
+        registry->DestroyEntity(entities[i]);
+    }
+    EXPECT_EQ(Astra::Test::Tracked::s_live, baseline + kCount / 2);
+
+    registry->Defragment();
+    EXPECT_EQ(Astra::Test::Tracked::s_live, baseline + kCount / 2) << "compaction leaked or double-destroyed";
+
+    for (uint32_t i = 1; i < kCount; i += 2)
+    {
+        auto* t = registry->GetComponent<Astra::Test::Tracked>(entities[i]);
+        ASSERT_NE(t, nullptr);
+        EXPECT_EQ(t->value, int(i));
+    }
+}

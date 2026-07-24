@@ -1106,125 +1106,124 @@ namespace Astra
             return ResultType::Ok(std::move(archetype));
         }
         
-        ASTRA_NODISCARD bool ShouldCoalesce(float utilizationThreshold = 0.5f) const
+        // Rebuild-style compaction (Phase 2 Unit D): repack every live entity
+        // into fresh chunks sized for the CURRENT live count (the study formula
+        // applied directly -- N is known here), free all old chunks (TLSF
+        // coalesces them), and report EVERY entity's new location so the caller
+        // rewrites all records. Column moves memcpy whole runs for trivially
+        // copyable columns and MoveConstruct+Destruct element-wise otherwise.
+        //
+        // Replaces the old ShouldCoalesce/CoalesceChunks pair, which erased empty
+        // middle chunks from m_chunks -- shifting every later chunk's index -- but
+        // reported new locations only for the entities it moved, leaving entities
+        // in the shifted chunks with stale chunkIndex records (a since-confirmed
+        // out-of-bounds/aliasing defect). Reporting every entity's location makes
+        // that whole class of bug impossible.
+        std::pair<size_t, std::vector<std::pair<Entity, EntityLocation>>> CompactChunks()
         {
-            if (m_chunks.size() <= 1) ASTRA_LIKELY return false;
-            
-            // Simple heuristic: coalesce if we have sparse chunks
-            for (size_t i = 1; i < m_chunks.size(); ++i)
+            std::vector<std::pair<Entity, EntityLocation>> newLocations;
+            if (m_chunks.size() <= 1 || m_entityCount == 0)
+                return {0, std::move(newLocations)};
+
+            const size_t oldChunkCount = m_chunks.size();
+            const size_t targetBytes = [this]
             {
-                const size_t capacity = m_chunks[i]->GetCapacity();
-                float utilization = capacity > 0 ? static_cast<float>(m_chunks[i]->GetCount()) / static_cast<float>(capacity) : 1.0f;
-                if (utilization < utilizationThreshold)
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
+                if (!m_chunkPool || m_perEntitySize == 0)
+                    return m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                const size_t liveBytes = m_entityCount * m_perEntitySize;
+                return std::clamp(liveBytes / m_chunkPool->GetGrowDivisor(),
+                                  m_chunkPool->GetMinChunkBytes(), m_chunkPool->GetMaxChunkBytes());
+            }();
 
-        std::pair<size_t, std::vector<std::pair<Entity, EntityLocation>>> CoalesceChunks(float utilizationThreshold = 0.5f)
-        {
-            std::vector<std::pair<Entity, EntityLocation>> allMovedEntities;
-            if (m_chunks.size() <= 1) ASTRA_LIKELY return {0, allMovedEntities};
-
-            // Single pass: find sparse chunks and calculate total entities to move
-            std::vector<std::pair<size_t, float>> sparseChunks;
-            size_t totalEntitiesToMove = 0;
-            size_t totalAvailableSpace = 0;
-            
-            for (size_t i = 0; i < m_chunks.size(); ++i)
+            // Build the new chunk list on the side; on ANY allocation failure,
+            // abort untouched (compaction is an optimization, not an obligation).
+            std::vector<std::unique_ptr<ArchetypeChunk, ArchetypeChunkPool::ChunkDeleter>> newChunks;
+            const size_t capacity = ComputeCapacityForBytes(targetBytes);
+            if (capacity == 0) ASTRA_UNLIKELY
+                return {0, std::move(newLocations)};
+            const size_t chunkCountNeeded = (m_entityCount + capacity - 1) / capacity;
+            newChunks.reserve(chunkCountNeeded);
+            for (size_t i = 0; i < chunkCountNeeded; ++i)
             {
-                size_t count = m_chunks[i]->GetCount();
-                const size_t capacity = m_chunks[i]->GetCapacity();
-                float utilization = capacity > 0 ? static_cast<float>(count) / static_cast<float>(capacity) : 1.0f;
-
-                if (i > 0 && utilization < utilizationThreshold)  // Skip first chunk for sparse check
-                {
-                    sparseChunks.emplace_back(i, utilization);
-                    totalEntitiesToMove += count;
-                }
-
-                // Calculate available space in all chunks
-                // We count space in all chunks because sparse chunks can consolidate into each other
-                size_t available = capacity - count;
-                if (available > 0)
-                {
-                    totalAvailableSpace += available;
-                }
+                auto chunk = m_chunkPool->CreateChunk(capacity, targetBytes, &m_columnMeta);
+                if (!chunk) ASTRA_UNLIKELY
+                    return {0, std::move(newLocations)};   // old chunks untouched
+                newChunks.emplace_back(std::move(chunk));
             }
 
-            // Early exit: no sparse chunks
-            if (sparseChunks.empty()) ASTRA_LIKELY return {0, allMovedEntities};
-            
-            // Early exit: not enough space to consolidate meaningfully
-            if (totalAvailableSpace < totalEntitiesToMove / 2)
+            newLocations.reserve(m_entityCount);
+            size_t dstChunk = 0, dstIndex = 0;
+            for (auto& src : m_chunks)
             {
-                return {0, allMovedEntities};
-            }
-
-            // Only sort if we have multiple sparse chunks
-            if (sparseChunks.size() > 1)
-            {
-                std::sort(sparseChunks.begin(), sparseChunks.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
-            }
-
-            // Try to pack entities from sparse chunks into denser ones
-            for (const auto& [sparseIndex, _] : sparseChunks)
-            {
-                auto& sparseChunk = m_chunks[sparseIndex];
-                size_t entitiesToMove = sparseChunk->GetCount();
-
-                if (entitiesToMove == 0) continue;
-
-                // Find destination chunks with available space
-                for (size_t destIndex = 0; destIndex < m_chunks.size(); ++destIndex)
+                const size_t srcCount = src->GetCount();
+                size_t srcIndex = 0;
+                while (srcIndex < srcCount)
                 {
-                    if (destIndex == sparseIndex) continue;
+                    if (dstIndex == capacity) { ++dstChunk; dstIndex = 0; }
+                    auto& dst = newChunks[dstChunk];
+                    const size_t run = std::min(srcCount - srcIndex, capacity - dstIndex);
 
-                    auto& destChunk = m_chunks[destIndex];
-                    size_t available = destChunk->GetCapacity() - destChunk->GetCount();
-
-                    if (available > 0)
+                    // Entities: bulk-append the run.
+                    auto& srcEntities = src->GetEntities();
+                    auto& dstEntities = dst->GetEntities();
+                    for (size_t k = 0; k < run; ++k)
                     {
-                        size_t toMove = std::min(available, entitiesToMove);
-
-                        // Move entities from sparse to destination chunk
-                        auto movedEntities = MoveEntitiesBetweenChunks(sparseIndex, destIndex, toMove);
-                        allMovedEntities.insert(allMovedEntities.end(), movedEntities.begin(), movedEntities.end());
-
-                        entitiesToMove -= toMove;
-                        if (entitiesToMove == 0) break;
+                        const Entity e = srcEntities[srcIndex + k];
+                        dstEntities.push_back(e);
+                        newLocations.emplace_back(e, EntityLocation::Create(dstChunk, dstIndex + k));
                     }
+
+                    // Components: per column, memcpy the whole run when trivially
+                    // copyable, else per-element MoveConstruct + Destruct.
+                    for (uint16_t c = 0; c < m_columnMeta.columnCount; ++c)
+                    {
+                        const ComponentID id = m_columnMeta.columns[c].id;
+                        const uint32_t stride = m_columnMeta.columns[c].stride;
+                        const ComponentDescriptor& desc = *m_columnMeta.columns[c].descriptor;
+                        std::byte* srcPtr = static_cast<std::byte*>(src->GetComponentArrayByID(id)) + srcIndex * stride;
+                        std::byte* dstPtr = static_cast<std::byte*>(dst->GetComponentArrayByID(id)) + dstIndex * stride;
+                        if (desc.is_trivially_copyable)
+                        {
+                            std::memcpy(dstPtr, srcPtr, run * static_cast<size_t>(stride));
+                        }
+                        else
+                        {
+                            for (size_t k = 0; k < run; ++k)
+                            {
+                                desc.MoveConstruct(dstPtr + k * stride, srcPtr + k * stride);
+                                desc.Destruct(srcPtr + k * stride);
+                            }
+                        }
+                    }
+
+                    dst->SetCount(dst->GetCount() + run);
+                    srcIndex += run;
+                    dstIndex += run;
                 }
+                // Every element was moved out (trivial columns need no Destruct;
+                // complex ones were destructed above): make the chunk inert so its
+                // destructor doesn't re-destruct moved-from slots.
+                src->GetEntities().clear();
+                src->SetCount(0);
             }
 
-            // Early exit: if no entities were moved, no chunks will be freed
-            if (allMovedEntities.empty())
-            {
-                return {0, allMovedEntities};
-            }
+            m_chunks = std::move(newChunks);   // old chunks free here -> TLSF coalesces
+            m_totalCapacity = chunkCountNeeded * capacity;
+            // Every new chunk except possibly the last is packed exactly full. Point
+            // m_firstNonFullChunkIndex at the last chunk when it has room; when the
+            // live count is an exact multiple of capacity the last chunk is itself
+            // full, so point one past the end -- mirroring the "chunk became full ->
+            // chunkIndex + 1" convention AllocateEntitySlot/AddEntities already use.
+            // GetOrCreateChunk tolerates either (it rescans from this index and
+            // appends when nothing is free), but the precise value spares the next
+            // allocation a wasted IsFull() probe. (The brief's literal code used a
+            // flat size()-1; this refinement is documented in the task report.)
+            m_firstNonFullChunkIndex = m_chunks.back()->IsFull() ? m_chunks.size() : m_chunks.size() - 1;
 
-            // Remove empty chunks
-            size_t chunksFreed = 0;
-            for (size_t i = m_chunks.size() - 1; i > 0; --i)  // Keep first chunk
-            {
-                if (m_chunks[i]->IsEmpty())
-                {
-                    m_chunks.erase(m_chunks.begin() + i);
-                    ++chunksFreed;
-                }
-            }
-
-            if (chunksFreed > 0)
-            {
-                // Bulk removal from the middle: resync the running capacity sum.
-                RecomputeTotalCapacity();
-            }
-
-            return {chunksFreed, allMovedEntities};
+            const size_t freed = oldChunkCount > m_chunks.size() ? oldChunkCount - m_chunks.size() : 0;
+            return {freed, std::move(newLocations)};
         }
-        
+
         ASTRA_NODISCARD bool IsInitialized() const noexcept { return m_initialized; }
         ASTRA_NODISCARD const ComponentMask& GetMask() const noexcept { return m_mask; }
 

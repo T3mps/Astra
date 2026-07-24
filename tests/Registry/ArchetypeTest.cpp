@@ -540,27 +540,29 @@ TEST_F(ArchetypeTest, CalculateRemainingCapacity)
     EXPECT_EQ(remainingCapacity, entitiesPerChunk - toAdd);
 }
 
-// Test chunk metrics and coalescing
-TEST_F(ArchetypeTest, ChunkCoalescing)
+// Test rebuild-style chunk compaction (Phase 2 Unit D, replaces the old
+// ShouldCoalesce/CoalesceChunks pair). CompactChunks repacks every live entity
+// into fresh right-sized chunks and reports every one's new location.
+TEST_F(ArchetypeTest, ChunkCompaction)
 {
     using namespace Astra::Test;
-    
+
     auto mask = Astra::MakeComponentMask<Position>();
     Astra::Archetype archetype(mask);
     archetype.SetComponentPool(&componentPool);
     archetype.Initialize(GetDescriptors(mask));
-    
+
     size_t entitiesPerChunk = archetype.GetChunks()[0]->GetCapacity();
-    
+
     // Fill multiple chunks
     size_t totalEntities = entitiesPerChunk * 3;
     std::vector<Astra::EntityLocation> locations;
-    
+
     for (size_t i = 0; i < totalEntities; ++i)
     {
         locations.push_back(archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(i), 1)));
     }
-    
+
     // Remove many entities to create sparse chunks
     std::vector<Astra::EntityLocation> toRemove;
     // Remove 80% of entities from chunks 1 and 2
@@ -571,29 +573,29 @@ TEST_F(ArchetypeTest, ChunkCoalescing)
             toRemove.push_back(locations[i]);
         }
     }
-    
+
     archetype.RemoveEntities(toRemove);
-    
-    // Check if coalescing is needed
-    bool needsCoalescing = archetype.ShouldCoalesce();
-    // This depends on thresholds but with 80% removed, it should need coalescing
-    
-    if (needsCoalescing)
-    {
-        // Perform coalescing
-        auto [chunksFreed, movedEntities] = archetype.CoalesceChunks();
-        
-        // Should have freed at least one chunk
-        EXPECT_GT(chunksFreed, 0u);
-    }
-    
-    // Verify all remaining entities are still accessible
+
+    const size_t survivorsBefore = archetype.GetEntityCount();
+    const size_t chunksBefore = archetype.GetChunks().size();
+    ASSERT_GT(chunksBefore, 1u);
+
+    // Rebuild-style compaction: always repacks (no ShouldCoalesce gate). With
+    // 80% of two of three chunks emptied it must reclaim at least one chunk and
+    // report a location for EVERY surviving entity.
+    auto [chunksFreed, movedEntities] = archetype.CompactChunks();
+    EXPECT_GT(chunksFreed, 0u);
+    EXPECT_EQ(movedEntities.size(), survivorsBefore);
+    EXPECT_EQ(archetype.GetChunks().size(), chunksBefore - chunksFreed);
+
+    // Compaction preserves the live count and keeps every survivor accessible.
     size_t remainingCount = 0;
     archetype.ForEach<Position>([&](Astra::Entity, Position&) {
         remainingCount++;
     });
-    
-    EXPECT_GT(remainingCount, 0u);
+
+    EXPECT_EQ(remainingCount, survivorsBefore);
+    EXPECT_EQ(archetype.GetEntityCount(), survivorsBefore);
 }
 
 // Test with different component sizes

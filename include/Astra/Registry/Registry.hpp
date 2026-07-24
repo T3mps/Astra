@@ -1146,8 +1146,11 @@ namespace Astra
                     float fragmentationThreshold = 1.0f - options.chunkUtilizationThreshold;
                     if (archFragmentation < fragmentationThreshold) continue;
                     
-                    // Perform chunk coalescing with the configured threshold
-                    auto [chunksFreed, movedEntities] = arch->CoalesceChunks(options.chunkUtilizationThreshold);
+                    // Rebuild-style compaction: repacks every live entity into
+                    // fresh right-sized chunks and reports every one's new
+                    // location (movedEntities covers the whole archetype). The
+                    // SetEntityLocation loop below already handles that.
+                    auto [chunksFreed, movedEntities] = arch->CompactChunks();
                     
                     // Update entity locations in ArchetypeManager
                     for (const auto& [entity, newLocation] : movedEntities)
