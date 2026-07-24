@@ -33,7 +33,7 @@ TEST(ChunkPoolTest, CreateReturnReuseCycle)
     Astra::ArchetypeChunkPool pool;   // default 16KB fixed config
     auto meta = MakeSingleColumnMeta();
 
-    auto c1 = pool.CreateChunk(64, &meta);
+    auto c1 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
     ASSERT_NE(c1, nullptr);
     EXPECT_EQ(c1->GetCapacity(), 64u);
 
@@ -44,7 +44,7 @@ TEST(ChunkPoolTest, CreateReturnReuseCycle)
     stats = pool.GetStats();
     EXPECT_EQ(stats.releaseCount, 1u);
 
-    auto c2 = pool.CreateChunk(64, &meta);
+    auto c2 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
     ASSERT_NE(c2, nullptr);
     stats = pool.GetStats();
     EXPECT_EQ(stats.acquireCount, 2u);
@@ -62,11 +62,11 @@ TEST(ChunkPoolTest, MaxChunksCapRefusesFurtherChunks)
     Astra::ArchetypeChunkPool pool(config);
     auto meta = MakeSingleColumnMeta();
 
-    auto c1 = pool.CreateChunk(64, &meta);
-    auto c2 = pool.CreateChunk(64, &meta);
+    auto c1 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
+    auto c2 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
     ASSERT_NE(c1, nullptr);
     ASSERT_NE(c2, nullptr);
-    auto c3 = pool.CreateChunk(64, &meta);
+    auto c3 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
     EXPECT_EQ(c3, nullptr);
     EXPECT_GT(pool.GetStats().failedAcquires, 0u);
 }
@@ -78,10 +78,10 @@ TEST(ChunkPoolTest, DefragmentReleasesEmptyArenasKeepingReserve)
     Astra::ArchetypeChunkPool pool(config);
     auto meta = MakeSingleColumnMeta();
 
-    std::vector<decltype(pool.CreateChunk(64, &meta))> chunks;
+    std::vector<decltype(pool.CreateChunk(64, pool.GetChunkSize(), &meta))> chunks;
     for (int i = 0; i < 16; ++i)
     {
-        auto c = pool.CreateChunk(64, &meta);
+        auto c = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
         ASSERT_NE(c, nullptr);
         chunks.push_back(std::move(c));
     }
@@ -93,7 +93,7 @@ TEST(ChunkPoolTest, DefragmentReleasesEmptyArenasKeepingReserve)
     EXPECT_GT(result.bytesFreed, 0u);
 
     // Pool still usable after release.
-    auto c = pool.CreateChunk(64, &meta);
+    auto c = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
     EXPECT_NE(c, nullptr);
 }
 
@@ -111,9 +111,9 @@ TEST(ChunkPoolTest, DefragmentKeepsOneReserveArenaEvenWhenOthersAreInUse)
     Astra::ArchetypeChunkPool pool(config);
     auto meta = MakeSingleColumnMeta();
 
-    auto c1 = pool.CreateChunk(64, &meta);
-    auto c2 = pool.CreateChunk(64, &meta);
-    auto c3 = pool.CreateChunk(64, &meta);
+    auto c1 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
+    auto c2 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
+    auto c3 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
     ASSERT_NE(c1, nullptr);
     ASSERT_NE(c2, nullptr);
     ASSERT_NE(c3, nullptr);
@@ -135,7 +135,7 @@ TEST(ChunkPoolTest, DefragmentKeepsOneReserveArenaEvenWhenOthersAreInUse)
     EXPECT_EQ(result.chunksInUse, 1u);
 
     // Pool still usable (the reserve arena can serve a new chunk).
-    auto c4 = pool.CreateChunk(64, &meta);
+    auto c4 = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
     EXPECT_NE(c4, nullptr);
 }
 
@@ -150,7 +150,7 @@ TEST(ChunkPoolTest, MoveConstructTransfersArenasAndInertsSource)
     auto meta = MakeSingleColumnMeta();
 
     Astra::ArchetypeChunkPool poolA(config);
-    auto held = poolA.CreateChunk(64, &meta);
+    auto held = poolA.CreateChunk(64, poolA.GetChunkSize(), &meta);
     ASSERT_NE(held, nullptr);
     EXPECT_EQ(poolA.GetStats().acquireCount, 1u);
 
@@ -165,7 +165,7 @@ TEST(ChunkPoolTest, MoveConstructTransfersArenasAndInertsSource)
 
     // The moved-to pool genuinely owns the transferred state: prove it by
     // creating AND returning a fresh chunk through it.
-    auto c2 = poolB.CreateChunk(64, &meta);
+    auto c2 = poolB.CreateChunk(64, poolB.GetChunkSize(), &meta);
     ASSERT_NE(c2, nullptr);
     EXPECT_EQ(poolB.GetStats().acquireCount, 2u);   // the pre-move chunk + this one
     c2.reset();
@@ -193,12 +193,12 @@ TEST(ChunkPoolTest, MoveAssignReplacesDestinationOwnershipWithoutLeaking)
     auto meta = MakeSingleColumnMeta();
 
     Astra::ArchetypeChunkPool poolA(config);
-    auto a1 = poolA.CreateChunk(64, &meta);
+    auto a1 = poolA.CreateChunk(64, poolA.GetChunkSize(), &meta);
     ASSERT_NE(a1, nullptr);
     EXPECT_EQ(poolA.GetStats().acquireCount, 1u);
 
     Astra::ArchetypeChunkPool poolB(config);
-    auto b1 = poolB.CreateChunk(64, &meta);
+    auto b1 = poolB.CreateChunk(64, poolB.GetChunkSize(), &meta);
     ASSERT_NE(b1, nullptr);
     EXPECT_EQ(poolB.GetStats().acquireCount, 1u);
     b1.reset();   // return through poolB while it is still its own owner
@@ -226,6 +226,6 @@ TEST(ChunkPoolTest, MoveAssignReplacesDestinationOwnershipWithoutLeaking)
     EXPECT_EQ(poolB.GetStats().releaseCount, 1u);
 
     // Pool still usable post-assignment.
-    auto c = poolB.CreateChunk(64, &meta);
+    auto c = poolB.CreateChunk(64, poolB.GetChunkSize(), &meta);
     EXPECT_NE(c, nullptr);
 }

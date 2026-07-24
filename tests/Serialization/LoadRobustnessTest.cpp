@@ -681,7 +681,7 @@ TEST(LoadRobustness, RootArchetypeEntitiesPerChunkUnboundedIsRejected)
     //     archetype index(uint32_t)=0, then Archetype::Serialize:
     //       ComponentMask (Astra::ComponentMask::WORD_COUNT * uint64_t words,
     //       all zero for the root archetype) + m_entityCount(uint64_t)=0 +
-    //       m_entitiesPerChunk(uint64_t)  <-- target field
+    //       maxChunkEntityCount(uint64_t)  <-- target field
     constexpr size_t kHeaderSize = 32;
     constexpr size_t kEntityManagerBlockSize =
         3 * sizeof(IDType) + sizeof(float) + sizeof(bool) + sizeof(uint64_t) +
@@ -696,14 +696,20 @@ TEST(LoadRobustness, RootArchetypeEntitiesPerChunkUnboundedIsRejected)
     ASSERT_GE(full.size(), kEntitiesPerChunkOffset + sizeof(uint64_t));
 
     // Sanity-check the offset actually lands on the real field before
-    // corrupting it: the legitimate value there for the root
-    // (zero-component) archetype is always 256 (Archetype::Initialize's
-    // perEntitySize==0 fallback, already a power of two) -- this confirms
-    // the test isn't silently corrupting the wrong bytes if the wire format
-    // ever shifts.
+    // corrupting it -- this confirms the test isn't silently corrupting the
+    // wrong bytes if the wire format ever shifts. The field's on-disk POSITION
+    // and WIDTH are unchanged; Phase 2 (variable-capacity chunks, Task 4)
+    // changed what it carries: Archetype::Serialize now writes the MAXIMUM
+    // per-chunk entity count (floored at 1) instead of a uniform per-chunk
+    // capacity, because chunks of one archetype no longer share a capacity.
+    // This registry is empty, so the root archetype's single chunk holds 0
+    // entities and the floor makes the legitimate value 1 (it was 256 under
+    // the retired uniform-capacity write). What the reader does with the
+    // field -- bound every chunkEntityCount against it -- is unchanged, and so
+    // is this test's point: an unbounded value must be rejected, not reserved.
     uint64_t existing;
     std::memcpy(&existing, full.data() + kEntitiesPerChunkOffset, sizeof(existing));
-    ASSERT_EQ(existing, 256u);
+    ASSERT_EQ(existing, 1u);
 
     // Corrupt to a huge value -- same order of magnitude as the sweep's
     // original repro (~1.1 TB in entity-count terms). perEntitySize is 0 for

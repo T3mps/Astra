@@ -478,6 +478,10 @@ namespace Astra
             }
             
             ASTRA_NODISCARD bool IsFull() const noexcept { return m_count >= m_capacity; }
+            // Byte size of this chunk's arena. Chunks of one archetype no longer
+            // share a single size (Phase 2), so memory accounting must sum this
+            // per chunk instead of multiplying a chunk count by the pool's size.
+            ASTRA_NODISCARD size_t GetChunkBytes() const noexcept { return m_chunkSize; }
             ASTRA_NODISCARD bool IsEmpty() const noexcept { return m_count == 0; }
             ASTRA_NODISCARD size_t GetCount() const noexcept { return m_count; }
             ASTRA_NODISCARD size_t GetCapacity() const noexcept { return m_capacity; }
@@ -627,15 +631,20 @@ namespace Astra
             return *this;
         }
 
-        std::unique_ptr<Chunk, ChunkDeleter> CreateChunk(size_t entitiesPerChunk, const ArchetypeColumnMeta* meta)
+        // Creates a chunk of `chunkBytes` bytes holding up to `capacity` entities.
+        // The two are independent parameters: the caller (Archetype) owns the
+        // capacity-for-bytes layout math, the pool only owns the allocation.
+        std::unique_ptr<Chunk, ChunkDeleter> CreateChunk(size_t capacity, size_t chunkBytes, const ArchetypeColumnMeta* meta)
         {
-            void* memory = AllocateChunkBytes(m_config.chunkSize);
+            ASTRA_ASSERT(capacity > 0, "Chunk capacity must be positive");
+
+            void* memory = AllocateChunkBytes(chunkBytes);
             if (!memory) ASTRA_UNLIKELY
             {
                 return nullptr;
             }
 
-            auto* chunk = new Chunk(entitiesPerChunk, meta, memory, m_config.chunkSize);
+            auto* chunk = new Chunk(capacity, meta, memory, chunkBytes);
             ChunkDeleter deleter{this, memory};
             return std::unique_ptr<Chunk, ChunkDeleter>(chunk, deleter);
         }
@@ -813,8 +822,8 @@ namespace Astra
             return true;
         }
 
-        // Single allocation path for chunk storage. Task 4 calls this with a
-        // per-archetype size; today CreateChunk always passes m_config.chunkSize.
+        // Single allocation path for chunk storage. CreateChunk forwards the
+        // caller's per-chunk byte size, which no longer has to be m_config.chunkSize.
         void* AllocateChunkBytes(size_t chunkBytes)
         {
             if (m_totalChunks.load(std::memory_order_relaxed) >= m_config.maxChunks) ASTRA_UNLIKELY

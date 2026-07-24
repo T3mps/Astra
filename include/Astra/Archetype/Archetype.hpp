@@ -57,9 +57,6 @@ namespace Astra
             m_mask(mask),
             m_componentCount(mask.Count()),
             m_entityCount(0),
-            m_entitiesPerChunk(0),
-            m_entitiesPerChunkShift(0),
-            m_entitiesPerChunkMask(0),
             m_initialized(false)
         {}
         
@@ -88,6 +85,68 @@ namespace Astra
                       { return a.id < b.id; });
             for (uint16_t c = 0; c < m_columnMeta.columnCount; ++c)
                 m_columnMeta.idToColumn[m_columnMeta.columns[c].id] = static_cast<int16_t>(c);
+        }
+
+        // Exact (non-pow2) capacity for a chunk of chunkBytes, under the same
+        // conservative alignment-overhead estimate Initialize() uses. Zero-size
+        // archetypes (tag-only / the root archetype every registry carries) store
+        // their entities in the chunk's side vector rather than in chunk memory:
+        // give them chunkBytes/64 slots, which reproduces the legacy 256-at-16KB.
+        ASTRA_NODISCARD size_t ComputeCapacityForBytes(size_t chunkBytes) const noexcept
+        {
+            if (m_perEntitySize == 0)
+            {
+                return chunkBytes >> 6;
+            }
+            const size_t usable = chunkBytes > m_alignmentOverhead ? chunkBytes - m_alignmentOverhead : 0;
+            return usable / m_perEntitySize;
+        }
+
+        // THE single chunk-creation path: computes the chunk's exact capacity from
+        // its byte size, allocates it, and keeps m_totalCapacity in step. Returns
+        // nullptr (never throws) when no layout is possible or the pool is out.
+        ArchetypeChunk* AppendChunk(size_t chunkBytes)
+        {
+            const size_t capacity = ComputeCapacityForBytes(chunkBytes);
+            if (capacity == 0 || !m_chunkPool) ASTRA_UNLIKELY
+            {
+                return nullptr;
+            }
+
+            auto chunk = m_chunkPool->CreateChunk(capacity, chunkBytes, &m_columnMeta);
+            if (!chunk) ASTRA_UNLIKELY
+            {
+                return nullptr;
+            }
+
+            m_totalCapacity += capacity;
+            m_chunks.emplace_back(std::move(chunk));
+            return m_chunks.back().get();
+        }
+
+        // Drops the trailing chunk, keeping m_totalCapacity in step. Every chunk
+        // removal must go through here (or recompute the sum) or the running
+        // total silently drifts above the real capacity.
+        void PopBackChunk()
+        {
+            ASTRA_ASSERT(!m_chunks.empty(), "PopBackChunk on an empty chunk list");
+            const size_t capacity = m_chunks.back()->GetCapacity();
+            ASTRA_ASSERT(m_totalCapacity >= capacity, "m_totalCapacity underflow");
+            m_totalCapacity -= capacity;
+            m_chunks.pop_back();
+        }
+
+        // Recomputes the running capacity sum from scratch. Used by the paths that
+        // remove chunks in bulk (defragmentation) instead of one at a time.
+        void RecomputeTotalCapacity() noexcept
+        {
+            size_t total = 0;
+            for (const auto& chunk : m_chunks)
+            {
+                if (chunk) ASTRA_LIKELY
+                    total += chunk->GetCapacity();
+            }
+            m_totalCapacity = total;
         }
 
     public:
@@ -123,45 +182,35 @@ namespace Astra
                 ? (nonEmptyComponents - 1) * CACHE_LINE_SIZE
                 : 0;
 
-            size_t chunkSize = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
-            size_t remainingSpace = chunkSize > alignmentOverhead ? chunkSize - alignmentOverhead : 0;
+            m_perEntitySize = perEntitySize;
+            m_alignmentOverhead = alignmentOverhead;
+
+            const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
 
             // A single entity's footprint must fit in the usable chunk space. The old
-            // code clamped m_entitiesPerChunk to 1 and proceeded even when perEntitySize
-            // exceeded remainingSpace, so writing that one entity's components later
-            // overflowed past the chunk's actual allocation into neighboring memory.
-            // There is no valid per-chunk layout for this component set at this chunk
-            // size: refuse to initialize instead of clamping-and-overflowing. Leave
-            // m_initialized == false and m_entitiesPerChunk == 0 (its constructed
-            // default) and create no chunk; GetOrCreateChunk() and the batch-add paths
-            // check m_entitiesPerChunk == 0 and refuse to create a chunk that could
-            // never legally hold even one entity, so callers degrade gracefully
-            // (entity creation succeeds but the entity never gets this component)
-            // instead of overflowing.
-            if (perEntitySize > remainingSpace) ASTRA_UNLIKELY
+            // code clamped the per-chunk count to 1 and proceeded even when
+            // perEntitySize exceeded that space, so writing that one entity's
+            // components later overflowed past the chunk's actual allocation into
+            // neighboring memory. There is no valid per-chunk layout for this
+            // component set at this chunk size: refuse to initialize instead of
+            // clamping-and-overflowing. Leave m_initialized == false and create no
+            // chunk; GetOrCreateChunk() and the batch-add paths check m_initialized
+            // and refuse to create a chunk that could never legally hold even one
+            // entity, so callers degrade gracefully (entity creation succeeds but the
+            // entity never gets this component) instead of overflowing.
+            if (perEntitySize > 0 && ComputeCapacityForBytes(chunkBytes) == 0) ASTRA_UNLIKELY
             {
                 m_initialized = false;
                 return;
             }
-
-            size_t maxEntities = perEntitySize > 0 ? remainingSpace / perEntitySize : 256;
-
-            // Round down to nearest power of 2 for fast modulo/division operations
-            m_entitiesPerChunk = maxEntities > 0 ? std::bit_floor(maxEntities) : 1;
-            m_entitiesPerChunk = std::max(size_t(1), m_entitiesPerChunk);
-
-            m_entitiesPerChunkMask = m_entitiesPerChunk - 1;
-            m_entitiesPerChunkShift = std::countr_zero(m_entitiesPerChunk);
 
             m_initialized = true;
 
-            auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
-            if (!chunk) ASTRA_UNLIKELY
+            if (!AppendChunk(chunkBytes)) ASTRA_UNLIKELY
             {
                 m_initialized = false;
                 return;
             }
-            m_chunks.emplace_back(std::move(chunk));
         }
 
         EntityLocation AddEntity(Entity entity)
@@ -190,28 +239,28 @@ namespace Astra
             std::vector<EntityLocation> locations;
             locations.reserve(count);
 
-            // Calculate and allocate needed chunks upfront
+            // Calculate and allocate needed chunks upfront. Chunk capacities can
+            // differ, so grow by asking each newly appended chunk what it added
+            // rather than dividing by a uniform per-chunk count.
             size_t remainingCapacity = GetRemainingCapacity();
             if (count > remainingCapacity) ASTRA_UNLIKELY
             {
-                if (m_entitiesPerChunk == 0) ASTRA_UNLIKELY
+                if (!m_initialized) ASTRA_UNLIKELY
                 {
                     // See GetOrCreateChunk(): this archetype never found a valid
                     // per-chunk layout and can never hold an entity.
                     return locations;
                 }
 
-                size_t additionalNeeded = count - remainingCapacity;
-                size_t newChunksNeeded = (additionalNeeded + m_entitiesPerChunk - 1) >> m_entitiesPerChunkShift;
-
-                for (size_t i = 0; i < newChunksNeeded; ++i)
+                const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                while (remainingCapacity < count)
                 {
-                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
+                    ArchetypeChunk* chunk = AppendChunk(chunkBytes);
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         return locations;
                     }
-                    m_chunks.emplace_back(std::move(chunk));
+                    remainingCapacity += chunk->GetCapacity();
                 }
             }
 
@@ -221,7 +270,7 @@ namespace Astra
             while (entityIndex < count && chunkIndex < m_chunks.size()) ASTRA_LIKELY
             {
                 auto& chunk = m_chunks[chunkIndex];
-                size_t available = m_entitiesPerChunk - chunk->GetCount();
+                size_t available = chunk->GetCapacity() - chunk->GetCount();
 
                 if (available > 0) ASTRA_LIKELY
                 {
@@ -263,24 +312,22 @@ namespace Astra
             size_t remainingCapacity = GetRemainingCapacity();
             if (count > remainingCapacity) ASTRA_UNLIKELY
             {
-                if (m_entitiesPerChunk == 0) ASTRA_UNLIKELY
+                if (!m_initialized) ASTRA_UNLIKELY
                 {
                     // See GetOrCreateChunk(): this archetype never found a valid
                     // per-chunk layout and can never hold an entity.
                     return locations;
                 }
 
-                size_t additionalNeeded = count - remainingCapacity;
-                size_t newChunksNeeded = (additionalNeeded + m_entitiesPerChunk - 1) >> m_entitiesPerChunkShift;
-
-                for (size_t i = 0; i < newChunksNeeded; ++i)
+                const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                while (remainingCapacity < count)
                 {
-                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
+                    ArchetypeChunk* chunk = AppendChunk(chunkBytes);
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         return locations;
                     }
-                    m_chunks.emplace_back(std::move(chunk));
+                    remainingCapacity += chunk->GetCapacity();
                 }
             }
 
@@ -354,7 +401,7 @@ namespace Astra
 
             if (chunkIndex == m_chunks.size() - 1 && chunkIndex > 0 && m_chunks[chunkIndex]->IsEmpty()) ASTRA_UNLIKELY
             {
-                m_chunks.pop_back();
+                PopBackChunk();
 
                 if (m_firstNonFullChunkIndex >= m_chunks.size()) ASTRA_UNLIKELY
                 {
@@ -416,7 +463,7 @@ namespace Astra
             {
                 while (!m_chunks.empty() && m_chunks.back()->IsEmpty() && m_chunks.size() > 1) ASTRA_UNLIKELY
                 {
-                    m_chunks.pop_back();
+                    PopBackChunk();
                 }
             }
 
@@ -609,13 +656,15 @@ namespace Astra
         void EnsureCapacity(size_t additionalCount)
         {
             size_t required = m_entityCount + additionalCount;
-            size_t currentCapacity = m_chunks.size() * m_entitiesPerChunk;
 
-            if (required > currentCapacity) ASTRA_UNLIKELY
+            if (required > m_totalCapacity) ASTRA_UNLIKELY
             {
-                // Ceiling division: ceil(a/b) = floor((a + b - 1) / b)
-                // For power of 2: ceil(a/b) = (a + b - 1) >> log2(b)
-                size_t neededChunks = (required - currentCapacity + m_entitiesPerChunk - 1) >> m_entitiesPerChunkShift;
+                // Vector-reserve estimate only: chunk capacities may differ, so
+                // size the estimate off a freshly grown chunk's capacity and let
+                // the actual growth paths append however many are really needed.
+                const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                const size_t perChunk = std::max<size_t>(1, ComputeCapacityForBytes(chunkBytes));
+                const size_t neededChunks = (required - m_totalCapacity + perChunk - 1) / perChunk;
                 m_chunks.reserve(m_chunks.size() + neededChunks);
             }
         }
@@ -628,7 +677,7 @@ namespace Astra
             size_t remaining = 0;
             for (size_t i = m_firstNonFullChunkIndex; i < m_chunks.size(); ++i)
             {
-                remaining += m_entitiesPerChunk - m_chunks[i]->GetCount();
+                remaining += m_chunks[i]->GetCapacity() - m_chunks[i]->GetCount();
             }
             return remaining;
         }
@@ -637,12 +686,15 @@ namespace Astra
         {
             if (m_chunks.empty() || m_entityCount == 0)
                 return 0.0f;
-            
-            // Calculate optimal chunk count (if perfectly packed)
-            size_t optimalChunkCount = (m_entityCount + m_entitiesPerChunk - 1) / m_entitiesPerChunk;
-            
-            // Fragmentation = (actual chunks - optimal chunks) / actual chunks
-            return static_cast<float>(m_chunks.size() - optimalChunkCount) / static_cast<float>(m_chunks.size());
+
+            // Fill-based: 0 == perfectly packed, 1 == all wasted space. With
+            // per-chunk capacities there is no single "optimal chunk count" to
+            // compare against, and unused slots are what defragmentation actually
+            // reclaims -- so measure them directly.
+            if (m_totalCapacity == 0) ASTRA_UNLIKELY
+                return 0.0f;
+
+            return 1.0f - static_cast<float>(m_entityCount) / static_cast<float>(m_totalCapacity);
         }
         
         void Serialize(BinaryWriter& writer) const
@@ -653,7 +705,22 @@ namespace Astra
                 writer(m_mask.Data()[i]);
             }
             writer(static_cast<uint64_t>(m_entityCount));
-            writer(static_cast<uint64_t>(m_entitiesPerChunk));
+
+            // Field layout is unchanged, but its MEANING is now the maximum
+            // per-chunk entity count rather than a uniform per-chunk capacity:
+            // chunks no longer share a capacity, and the bound is all the reader
+            // ever uses this field for (it validates each chunkEntityCount
+            // against it, then sizes each chunk to an exact fit). Floored at 1 so
+            // an all-empty archetype still round-trips through the reader's
+            // `chunkEntityCount > entitiesPerChunk` guard.
+            uint64_t maxChunkEntityCount = 1;
+            for (const auto& chunk : m_chunks)
+            {
+                if (chunk) ASTRA_LIKELY
+                    maxChunkEntityCount = std::max(maxChunkEntityCount, static_cast<uint64_t>(chunk->GetCount()));
+            }
+            writer(maxChunkEntityCount);
+
             writer(static_cast<uint32_t>(m_chunks.size()));
 
             // Write component descriptors
@@ -862,8 +929,10 @@ namespace Astra
                 return ResultType::Err(SerializationError::CorruptedData);
             }
             
-            // Clear the pre-allocated chunk
+            // Clear the pre-allocated chunk. m_totalCapacity is the running sum
+            // over m_chunks, so it has to be reset alongside it.
             archetype->m_chunks.clear();
+            archetype->m_totalCapacity = 0;
             archetype->m_entityCount = 0;
 
             // Read each chunk's data
@@ -890,15 +959,25 @@ namespace Astra
                     return ResultType::Err(SerializationError::CorruptedData);
                 }
 
-                // Create new chunk. The reconstructed archetype's Initialize() above
-                // already built its m_columnMeta (via BuildColumnMeta) from `descriptors`,
-                // and its m_componentDescriptors (which the meta's descriptor pointers
-                // reference) is set once and never reassigned, so this pointer is stable
-                // for the life of every chunk created here.
-                auto chunk = componentPool ? componentPool->CreateChunk(static_cast<size_t>(entitiesPerChunk), &archetype->GetColumnMeta()) : nullptr;
+                // Create the chunk at an EXACT fit for the entities it actually
+                // carries, through the archetype so m_totalCapacity stays correct
+                // (m_chunks was cleared above). This is location-safe: entity slots
+                // stay [0, count) within each chunk, so every serialized
+                // EntityRecord (chunkIndex, entityIndex) still resolves identically.
+                // The reconstructed archetype's Initialize() above already built its
+                // m_columnMeta (via BuildColumnMeta) from `descriptors`, and its
+                // m_componentDescriptors (which the meta's descriptor pointers
+                // reference) is set once and never reassigned, so that pointer is
+                // stable for the life of every chunk created here.
+                const size_t capacity = std::max<size_t>(1, chunkEntityCount);
+                const size_t chunkBytes = archetype->m_perEntitySize == 0
+                    ? std::max<size_t>(64, capacity << 6)
+                    : capacity * archetype->m_perEntitySize + archetype->m_alignmentOverhead;
+
+                ArchetypeChunk* chunk = archetype->AppendChunk(chunkBytes);
                 if (!chunk)
                 {
-                    // Out of memory - cannot continue
+                    // Out of memory (or no valid layout) - cannot continue
                     return ResultType::Err(SerializationError::OutOfMemory);
                 }
 
@@ -971,7 +1050,7 @@ namespace Astra
                     }
                 }
 
-                archetype->m_chunks.push_back(std::move(chunk));
+                // AppendChunk already installed the chunk in archetype->m_chunks.
             }
 
             archetype->m_entityCount = static_cast<size_t>(entityCount);
@@ -986,7 +1065,8 @@ namespace Astra
             // Simple heuristic: coalesce if we have sparse chunks
             for (size_t i = 1; i < m_chunks.size(); ++i)
             {
-                float utilization = static_cast<float>(m_chunks[i]->GetCount()) / m_entitiesPerChunk;
+                const size_t capacity = m_chunks[i]->GetCapacity();
+                float utilization = capacity > 0 ? static_cast<float>(m_chunks[i]->GetCount()) / static_cast<float>(capacity) : 1.0f;
                 if (utilization < utilizationThreshold)
                 {
                     return true;
@@ -1008,17 +1088,18 @@ namespace Astra
             for (size_t i = 0; i < m_chunks.size(); ++i)
             {
                 size_t count = m_chunks[i]->GetCount();
-                float utilization = static_cast<float>(count) / m_entitiesPerChunk;
-                
+                const size_t capacity = m_chunks[i]->GetCapacity();
+                float utilization = capacity > 0 ? static_cast<float>(count) / static_cast<float>(capacity) : 1.0f;
+
                 if (i > 0 && utilization < utilizationThreshold)  // Skip first chunk for sparse check
                 {
                     sparseChunks.emplace_back(i, utilization);
                     totalEntitiesToMove += count;
                 }
-                
+
                 // Calculate available space in all chunks
                 // We count space in all chunks because sparse chunks can consolidate into each other
-                size_t available = m_entitiesPerChunk - count;
+                size_t available = capacity - count;
                 if (available > 0)
                 {
                     totalAvailableSpace += available;
@@ -1054,7 +1135,7 @@ namespace Astra
                     if (destIndex == sparseIndex) continue;
 
                     auto& destChunk = m_chunks[destIndex];
-                    size_t available = m_entitiesPerChunk - destChunk->GetCount();
+                    size_t available = destChunk->GetCapacity() - destChunk->GetCount();
 
                     if (available > 0)
                     {
@@ -1087,6 +1168,12 @@ namespace Astra
                 }
             }
 
+            if (chunksFreed > 0)
+            {
+                // Bulk removal from the middle: resync the running capacity sum.
+                RecomputeTotalCapacity();
+            }
+
             return {chunksFreed, allMovedEntities};
         }
         
@@ -1097,7 +1184,9 @@ namespace Astra
         ASTRA_NODISCARD size_t GetChunkCount() const noexcept { return m_chunks.size(); }
         ASTRA_NODISCARD size_t GetComponentCount() const noexcept { return m_componentCount; }
         ASTRA_NODISCARD size_t GetChunkEntityCount(size_t chunkIndex) const noexcept { return (chunkIndex < m_chunks.size()) ? m_chunks[chunkIndex]->GetCount() : 0; }
-        ASTRA_NODISCARD size_t GetEntitiesPerChunk() const noexcept { return m_entitiesPerChunk; }
+        // Sum of the live chunks' capacities. Chunks are no longer uniformly
+        // sized, so this replaces `chunkCount * entitiesPerChunk` everywhere.
+        ASTRA_NODISCARD size_t GetTotalCapacity() const noexcept { return m_totalCapacity; }
 
         ASTRA_NODISCARD const std::vector<std::unique_ptr<ArchetypeChunk, ArchetypeChunkPool::ChunkDeleter>>& GetChunks() const { return m_chunks; }
         ASTRA_NODISCARD const std::vector<ComponentDescriptor>& GetComponentDescriptors() const { return m_componentDescriptors; }
@@ -1177,35 +1266,32 @@ namespace Astra
             size_t remainingCapacity = GetRemainingCapacity();
             if (count > remainingCapacity) ASTRA_UNLIKELY
             {
-                if (m_entitiesPerChunk == 0) ASTRA_UNLIKELY
+                if (!m_initialized) ASTRA_UNLIKELY
                 {
                     // See GetOrCreateChunk(): this archetype never found a valid
                     // per-chunk layout and can never hold an entity.
                     return {};
                 }
 
-                size_t additionalNeeded = count - remainingCapacity;
-                size_t newChunksNeeded = (additionalNeeded + m_entitiesPerChunk - 1) >> m_entitiesPerChunkShift;
+                // All-or-nothing growth, as before: if any chunk in the run cannot
+                // be allocated, unwind the ones already appended so a failed batch
+                // move leaves the archetype exactly as it found it.
+                const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                const size_t chunksBefore = m_chunks.size();
 
-                // Pre-allocate all chunks needed - ensure we can complete the operation
-                std::vector<std::unique_ptr<ArchetypeChunk, ArchetypeChunkPool::ChunkDeleter>> newChunks;
-                newChunks.reserve(newChunksNeeded);
-                
-                for (size_t i = 0; i < newChunksNeeded; ++i)
+                while (remainingCapacity < count)
                 {
-                    auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
+                    ArchetypeChunk* chunk = AppendChunk(chunkBytes);
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         // Failed to allocate all required chunks - return empty to indicate failure
+                        while (m_chunks.size() > chunksBefore)
+                        {
+                            PopBackChunk();
+                        }
                         return {};
                     }
-                    newChunks.push_back(std::move(chunk));
-                }
-                
-                // All chunks allocated successfully - add them to our chunks vector
-                for (auto& chunk : newChunks)
-                {
-                    m_chunks.emplace_back(std::move(chunk));
+                    remainingCapacity += chunk->GetCapacity();
                 }
             }
 
@@ -1215,7 +1301,7 @@ namespace Astra
             while (entityIndex < count && chunkIndex < m_chunks.size()) ASTRA_LIKELY
             {
                 auto& chunk = m_chunks[chunkIndex];
-                size_t available = m_entitiesPerChunk - chunk->GetCount();
+                size_t available = chunk->GetCapacity() - chunk->GetCount();
 
                 if (available > 0) ASTRA_LIKELY
                 {
@@ -1361,7 +1447,7 @@ namespace Astra
         
         std::pair<size_t, bool> GetOrCreateChunk()
         {
-            if (m_entitiesPerChunk == 0) ASTRA_UNLIKELY
+            if (!m_initialized) ASTRA_UNLIKELY
             {
                 // Initialize() never found a valid per-chunk layout for this component
                 // set (single-entity footprint exceeds the usable chunk space) - refuse
@@ -1386,16 +1472,15 @@ namespace Astra
                 }
             }
             
-            auto chunk = m_chunkPool->CreateChunk(m_entitiesPerChunk, &m_columnMeta);
-            if (!chunk) ASTRA_UNLIKELY
+            const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+            if (!AppendChunk(chunkBytes)) ASTRA_UNLIKELY
             {
                 return {INVALID_CHUNK_INDEX, false};
             }
-            
-            m_chunks.emplace_back(std::move(chunk));
+
             chunkIndex = m_chunks.size() - 1;
             m_firstNonFullChunkIndex = chunkIndex;
-            
+
             return {chunkIndex, true};
         }
 
@@ -1482,9 +1567,6 @@ namespace Astra
             return movedEntities;
         }
 
-        ASTRA_NODISCARD size_t GetEntitiesPerChunkShift() const noexcept { return m_entitiesPerChunkShift; }
-        ASTRA_NODISCARD size_t GetEntitiesPerChunkMask() const noexcept { return m_entitiesPerChunkMask; }
-
         ComponentMask m_mask;
         size_t m_componentCount;  // Cached component count for fast access
         std::vector<ComponentDescriptor> m_componentDescriptors;
@@ -1493,9 +1575,14 @@ namespace Astra
         ArchetypeColumnMeta m_columnMeta;
         std::vector<std::unique_ptr<ArchetypeChunk, ArchetypeChunkPool::ChunkDeleter>> m_chunks;
         size_t m_entityCount;
-        size_t m_entitiesPerChunk;
-        size_t m_entitiesPerChunkShift;     // For fast division via bit shift (log2(m_entitiesPerChunk))
-        size_t m_entitiesPerChunkMask;      // For fast modulo operations (m_entitiesPerChunk - 1)
+        // Chunks of one archetype no longer share a capacity (Phase 2), so the
+        // uniform m_entitiesPerChunk + shift/mask trio is gone. What Initialize
+        // establishes is the LAYOUT (bytes per entity plus the conservative
+        // per-column padding estimate); a chunk's capacity is then derived from
+        // its own byte size, and the archetype only caches the running sum.
+        size_t m_perEntitySize = 0;         // summed non-empty component sizes
+        size_t m_alignmentOverhead = 0;     // conservative per-chunk column padding estimate
+        size_t m_totalCapacity = 0;         // sum of m_chunks[i]->GetCapacity(), maintained incrementally
         size_t m_firstNonFullChunkIndex = 0;  // Track first chunk with available space for O(1) lookup
         bool m_initialized;
         ArchetypeChunkPool* m_chunkPool = nullptr;

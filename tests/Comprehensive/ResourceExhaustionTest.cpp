@@ -157,7 +157,7 @@ TEST_F(ResourceExhaustionTest, ArchetypeChunkPoolExhaustion)
     size_t entitiesPerChunk = 100;
     for (size_t i = 0; i < config.maxChunks + 5; ++i)
     {
-        auto chunk = pool.CreateChunk(entitiesPerChunk, &meta);
+        auto chunk = pool.CreateChunk(entitiesPerChunk, pool.GetChunkSize(), &meta);
         if (chunk != nullptr)
         {
             allocations.push_back(std::move(chunk));
@@ -177,7 +177,7 @@ TEST_F(ResourceExhaustionTest, ArchetypeChunkPoolExhaustion)
     allocations.pop_back();
     
     // Should be able to allocate one more
-    auto newChunk = pool.CreateChunk(entitiesPerChunk, &meta);
+    auto newChunk = pool.CreateChunk(entitiesPerChunk, pool.GetChunkSize(), &meta);
     EXPECT_NE(newChunk, nullptr);
     
     // Clean up happens automatically through unique_ptr destructors

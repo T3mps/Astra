@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <bit>
 #include <gtest/gtest.h>
 #include <numeric>
 #include <random>
@@ -71,12 +72,16 @@ TEST_F(ArchetypeTest, BasicCreationAndInitialization)
     EXPECT_FALSE(archetype.HasComponent<Health>());
     
     // Check entities per chunk is reasonable
-    EXPECT_GT(archetype.GetEntitiesPerChunk(), 0u);
-    EXPECT_LE(archetype.GetEntitiesPerChunk(), 16384u); // Max reasonable for 16KB chunks
-    
-    // Should be power of 2 for fast indexing
-    auto epc = archetype.GetEntitiesPerChunk();
-    EXPECT_EQ(epc & (epc - 1), 0u) << "Entities per chunk should be power of 2";
+    ASSERT_FALSE(archetype.GetChunks().empty());
+    const size_t epc = archetype.GetChunks()[0]->GetCapacity();
+    EXPECT_GT(epc, 0u);
+    EXPECT_LE(epc, 16384u); // Max reasonable for 16KB chunks
+
+    // Phase 2 (Task 4): capacity is the EXACT fit for the chunk's byte size --
+    // the power-of-2 bit_floor rounding (and the shift/mask addressing it fed)
+    // is gone, so the only remaining invariant is that the layout fits.
+    EXPECT_LE(epc * (sizeof(Position) + sizeof(Velocity)), archetype.GetChunks()[0]->GetChunkBytes());
+    EXPECT_EQ(archetype.GetTotalCapacity(), epc);
 }
 
 // Test adding single entity
@@ -304,7 +309,9 @@ TEST_F(ArchetypeTest, ChunkAllocationAndCapacity)
     archetype.SetComponentPool(&componentPool);
     archetype.Initialize(GetDescriptors(mask));
     
-    size_t entitiesPerChunk = archetype.GetEntitiesPerChunk();
+    // Chunk capacities are per-chunk now (Phase 2 Task 4); chunk 0's capacity
+    // is the sizing this test's arithmetic is about.
+    size_t entitiesPerChunk = archetype.GetChunks()[0]->GetCapacity();
     EXPECT_GT(entitiesPerChunk, 0u);
     
     // Add enough entities to require multiple chunks
@@ -515,7 +522,7 @@ TEST_F(ArchetypeTest, CalculateRemainingCapacity)
     archetype.SetComponentPool(&componentPool);
     archetype.Initialize(GetDescriptors(mask));
     
-    size_t entitiesPerChunk = archetype.GetEntitiesPerChunk();
+    size_t entitiesPerChunk = archetype.GetChunks()[0]->GetCapacity();
     
     // Initially should have capacity of first chunk
     size_t initialCapacity = archetype.GetRemainingCapacity();
@@ -543,7 +550,7 @@ TEST_F(ArchetypeTest, ChunkCoalescing)
     archetype.SetComponentPool(&componentPool);
     archetype.Initialize(GetDescriptors(mask));
     
-    size_t entitiesPerChunk = archetype.GetEntitiesPerChunk();
+    size_t entitiesPerChunk = archetype.GetChunks()[0]->GetCapacity();
     
     // Fill multiple chunks
     size_t totalEntities = entitiesPerChunk * 3;
@@ -607,7 +614,7 @@ TEST_F(ArchetypeTest, DifferentComponentSizes)
     largeArchetype.Initialize(GetDescriptors(largeMask));
     
     // Small components should fit more entities per chunk
-    EXPECT_GT(smallArchetype.GetEntitiesPerChunk(), largeArchetype.GetEntitiesPerChunk());
+    EXPECT_GT(smallArchetype.GetChunks()[0]->GetCapacity(), largeArchetype.GetChunks()[0]->GetCapacity());
     
     // Add entities to both
     for (int i = 0; i < 100; ++i)
@@ -676,7 +683,7 @@ TEST_F(ArchetypeTest, ChunkBoundaryConditions)
     archetype.SetComponentPool(&componentPool);
     archetype.Initialize(GetDescriptors(mask));
     
-    size_t entitiesPerChunk = archetype.GetEntitiesPerChunk();
+    size_t entitiesPerChunk = archetype.GetChunks()[0]->GetCapacity();
     
     // Fill exactly one chunk
     for (size_t i = 0; i < entitiesPerChunk; ++i)
@@ -761,7 +768,7 @@ TEST_F(ArchetypeTest, MaximumComponents)
     EXPECT_TRUE(archetype.IsInitialized());
     
     // Entities per chunk should be reduced due to many components
-    size_t entitiesPerChunk = archetype.GetEntitiesPerChunk();
+    size_t entitiesPerChunk = archetype.GetChunks()[0]->GetCapacity();
     EXPECT_GT(entitiesPerChunk, 0u);
     
     // Add some entities
@@ -809,7 +816,10 @@ TEST_F(ArchetypeTest, SerializeEmptyArchetype)
         // Verify the deserialized archetype matches
         EXPECT_EQ(deserializedArchetype->GetMask(), mask);
         EXPECT_EQ(deserializedArchetype->GetEntityCount(), 0u);
-        EXPECT_EQ(deserializedArchetype->GetEntitiesPerChunk(), archetype.GetEntitiesPerChunk());
+        // Phase 2 (Task 4): there is no uniform per-chunk capacity to compare.
+        // The round-trip contract is that the chunk layout and population match.
+        EXPECT_EQ(deserializedArchetype->GetChunkCount(), archetype.GetChunkCount());
+        EXPECT_EQ(deserializedArchetype->GetEntityCount(), archetype.GetEntityCount());
         EXPECT_TRUE(deserializedArchetype->IsInitialized());
     }
 }
@@ -936,7 +946,7 @@ TEST_F(ArchetypeTest, SerializeMultipleChunks)
     archetype.Initialize(descriptors);
     
     // Add enough entities to span multiple chunks
-    size_t entitiesPerChunk = archetype.GetEntitiesPerChunk();
+    size_t entitiesPerChunk = archetype.GetChunks()[0]->GetCapacity();
     size_t entityCount = entitiesPerChunk * 3 + entitiesPerChunk / 2; // 3.5 chunks
     
     std::vector<Astra::Entity> entities;
@@ -1258,4 +1268,74 @@ TEST(ArchetypeColumnMeta, ColumnsSortedAscendingRegardlessOfInitializeOrder)
     EXPECT_EQ(m.idToColumn[m.columns[0].id], 0);
     EXPECT_EQ(m.idToColumn[m.columns[1].id], 1);
     EXPECT_EQ(m.idToColumn[m.columns[2].id], 2);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 (dynamic chunk sizing) - Task 4: variable-capacity chunk addressing.
+// ---------------------------------------------------------------------------
+
+// Chunk capacity is the EXACT fit for the chunk's byte size; the old
+// std::bit_floor rounding (which threw away up to ~50% of every chunk) is gone.
+TEST_F(ArchetypeTest, ChunkCapacityIsExactNotPow2)
+{
+    using namespace Astra::Test;
+
+    auto mask = Astra::MakeComponentMask<Position>();
+    Astra::Archetype archetype(mask);
+    archetype.SetComponentPool(&componentPool);
+    archetype.Initialize(GetDescriptors(mask));
+    ASSERT_TRUE(archetype.IsInitialized());
+
+    const auto& chunks = archetype.GetChunks();
+    ASSERT_FALSE(chunks.empty());
+    const size_t chunkBytes = chunks[0]->GetChunkBytes();
+    const size_t cap = chunks[0]->GetCapacity();
+
+    // A single non-empty column means alignmentOverhead == 0, so the exact fit
+    // is a plain division. Deliberately size-agnostic: this still holds after
+    // Task 5 starts the first chunk at 4KB.
+    EXPECT_EQ(cap, chunkBytes / sizeof(Position));
+
+    // Corroboration that the bit_floor rounding really is gone: for ANY
+    // power-of-two chunk byte size >= 4096, floor(chunkBytes / 12) is never
+    // itself a power of two (12 carries a factor of 3), so an exact capacity
+    // must differ from what the retired rounding would have produced.
+    EXPECT_NE(cap, std::bit_floor(cap)) << "capacity " << cap << " looks bit_floor-rounded";
+    EXPECT_GT(cap, std::bit_floor(cap));
+
+    EXPECT_EQ(archetype.GetTotalCapacity(), cap);
+}
+
+// GetTotalCapacity is maintained incrementally as chunks are appended.
+TEST_F(ArchetypeTest, TotalCapacityTracksChunkCreation)
+{
+    using namespace Astra::Test;
+
+    auto mask = Astra::MakeComponentMask<Position>();
+    Astra::Archetype archetype(mask);
+    archetype.SetComponentPool(&componentPool);
+    archetype.Initialize(GetDescriptors(mask));
+    ASSERT_TRUE(archetype.IsInitialized());
+
+    const size_t firstCap = archetype.GetTotalCapacity();
+    ASSERT_GT(firstCap, 0u);
+    EXPECT_EQ(firstCap, archetype.GetChunks()[0]->GetCapacity());
+
+    // Fill past the first chunk; total capacity must grow by whole chunks.
+    for (size_t i = 0; i < firstCap + 1; ++i)
+    {
+        archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(i), 1));
+    }
+
+    EXPECT_GT(archetype.GetTotalCapacity(), firstCap);
+    EXPECT_EQ(archetype.GetEntityCount(), firstCap + 1);
+    EXPECT_EQ(archetype.GetChunks().size(), 2u);
+
+    // The running total is exactly the sum of the live chunks' capacities.
+    size_t summed = 0;
+    for (const auto& chunk : archetype.GetChunks())
+    {
+        summed += chunk->GetCapacity();
+    }
+    EXPECT_EQ(archetype.GetTotalCapacity(), summed);
 }

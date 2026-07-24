@@ -559,11 +559,15 @@ namespace Astra
         ASTRA_NODISCARD size_t GetArchetypeMemoryUsage() const
         {
             size_t total = 0;
-            size_t chunkSize = m_chunkPool.GetChunkSize();
             for (const auto& entry : m_archetypes)
             {
-                size_t chunkCount = entry.archetype->GetChunks().size();
-                total += chunkCount * chunkSize;
+                // Chunks of one archetype no longer share a byte size, so sum
+                // each chunk's own footprint instead of chunkCount * chunkSize.
+                for (const auto& chunk : entry.archetype->GetChunks())
+                {
+                    if (chunk) ASTRA_LIKELY
+                        total += chunk->GetChunkBytes();
+                }
                 total += sizeof(Archetype) + sizeof(size_t) * MAX_COMPONENTS * 2;
             }
             return total;

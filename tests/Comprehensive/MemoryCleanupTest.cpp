@@ -149,7 +149,7 @@ TEST_F(MemoryCleanupTest, ArchetypeChunkPoolMemoryRelease)
 
     for (int i = 0; i < 20; ++i)
     {
-        auto chunk = pool.CreateChunk(entitiesPerChunk, &meta);
+        auto chunk = pool.CreateChunk(entitiesPerChunk, pool.GetChunkSize(), &meta);
         ASSERT_NE(chunk, nullptr);
         chunks.push_back(std::move(chunk));
     }

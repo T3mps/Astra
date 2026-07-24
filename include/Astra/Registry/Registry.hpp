@@ -1058,31 +1058,22 @@ namespace Astra
             if (archetypes.empty())
                 return 0.0f;
 
+            // Fill-based, matching Archetype::GetFragmentationLevel: chunks no
+            // longer share a capacity, so there is no single "optimal chunk
+            // count" to compare against. Unused slots are what defragmentation
+            // actually reclaims, so measure them directly.
             size_t totalEntities = 0;
-            size_t totalChunks = 0;
-            size_t optimalChunks = 0;
+            size_t totalCapacity = 0;
 
             for (const auto* arch : archetypes)
             {
-                size_t entityCount = arch->GetEntityCount();
-                size_t chunkCount = arch->GetChunks().size();
-
-                totalEntities += entityCount;
-                totalChunks += chunkCount;
-
-                // Calculate optimal chunks for this archetype
-                if (entityCount > 0)
-                {
-                    size_t entitiesPerChunk = arch->GetEntitiesPerChunk();
-                    optimalChunks += (entityCount + entitiesPerChunk - 1) / entitiesPerChunk;
-                }
+                totalEntities += arch->GetEntityCount();
+                totalCapacity += arch->GetTotalCapacity();
             }
 
-            if (totalChunks == 0) return 0.0f;
+            if (totalCapacity == 0) return 0.0f;
 
-            // Fragmentation = excess chunks / total chunks
-            size_t excessChunks = totalChunks > optimalChunks ? totalChunks - optimalChunks : 0;
-            return static_cast<float>(excessChunks) / static_cast<float>(totalChunks);
+            return 1.0f - static_cast<float>(totalEntities) / static_cast<float>(totalCapacity);
         }
         
         struct DefragmentationOptions
