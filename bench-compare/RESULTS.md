@@ -473,5 +473,95 @@ regardless of how little data it held — a genuine 4× reduction for small arch
   materialize on this machine. None of this is a regression; the shortfall is against the study's
   optimistic prediction, not against Astra's own pre-Phase-2 baseline.
 
+## Lever 1 — random_get record→direct-chunk-pointer (2026-07-24, branch `perf/random-get-chunk-pointer` @ `f5ea6c3`)
+
+Design: `docs/superpowers/specs/2026-07-24-random-get-chunk-pointer-design.md`. `EntityRecord` now caches
+the `ArchetypeChunk*` for its location (behind a write funnel — all 16 write sites routed through
+`EntityTable::SetRecord`/`ArchetypeManager`'s `SetRecordLocation`/`ClearRecordLocation`), so
+`Archetype::GetComponent` and `Registry`'s ByID/hash `GetComponent` paths read `rec->chunk` directly
+instead of hopping through `archetype->GetChunks()[location.GetChunkIndex()]` + a mask test — shortening
+the dependent-load chain from 8 hops to ~5. The trade-off, called out in the spec up front: `EntityRecord`
+grew from 24B to a hard `alignas(32)` 32B (guaranteeing no record ever straddles a cache line — 1/3 of the
+old 24B records did) at the cost of a fatter per-entity record, i.e. lower record density per cache line
+for the random-order lookups this lever targets.
+
+### 3-config test suite (Step 1)
+
+| Config | Total | Passed | Notes |
+|---|---|---|---|
+| Debug | 732 | 732 | clean, no flake |
+| Release | 730 | 730 | clean, no flake |
+| Dist | 730 | 730 | clean, no flake |
+
+Matches the expected post-branch counts (732/730/730 — the Release/Dist delta from Debug is the 2
+`EXPECT_DEATH`-only tests, same spread pattern as dev's 724/722/722). `CompressionTest.PerformanceBenchmark`
+did not flake this run; no reruns were needed. `bench_astra.exe` was rebuilt clean against this branch's
+headers (Step 2) with no source changes needed this time (the `View::ForEach` leading-`Entity`-param fix
+from the Phase-2 session was already present in the untracked harness).
+
+### Machine load (Step 3 pre-check)
+
+`typeperf "\Processor(_Total)\% Processor Time"`, two windows of 6–8 samples each, taken immediately
+before benching: **avg ~9.9% and ~11.7%** (samples 8–15%, one 14.8%/14.5% pair, otherwise high-single-digits)
+— comfortably under the 15–20% quiet-machine bar (`Get-Process` showed the usual desktop background set —
+Discord, Steam helpers, a Sublime/editor process, browsers, no heavy foreground app — consistent with
+ordinary idle-desktop load, not a spike). Machine judged quiet; results below are **not** noise-flagged.
+
+### 6 interleaved rounds (astra→flecs→entt ×6), N=1,000,000, ns/op, median [min, max]
+
+| Operation | Astra (this branch) | flecs | EnTT |
+|---|---|---|---|
+| create | 50.45 [49.59, 61.73]¹ | 100.93 [98.17, 104.28] | 41.83 [40.00, 48.16] |
+| add | 54.14 [52.04, 56.19] | 57.34 [56.52, 62.04] | 11.90 [11.59, 12.51] |
+| remove | 37.65 [37.22, 38.69] | 34.58 [33.80, 35.34] | 16.47 [16.29, 16.87] |
+| **random_get** | **74.55 [72.42, 88.32]¹** | 67.26 [61.99, 71.45] | 37.51 [32.07, 41.62] |
+| iterate1 | 0.468 [0.401, 0.539] | 0.476 [0.393, 0.553] | 0.754 [0.690, 1.361] |
+| iterate2 | 1.107 [0.958, 1.285] | 1.122 [0.937, 1.511] | 2.608 view / 1.524 group |
+| iterate3 | 1.471 [1.091, 2.087]¹ | 1.507 [1.256, 2.742] | 3.516 view |
+
+¹ Round 3 had a latency blip localized to Astra's turn (create 61.73, random_get 88.32, iterate3 2.09 —
+all well above the other 5 rounds), while flecs's and EnTT's own round-3 numbers were unremarkable that
+round — looks like a scheduler/cache hiccup isolated to Astra's process, not shared background noise.
+Excluding round 3: create median 50.05 [49.59, 51.70], random_get median 72.71 [72.42, 76.46], iterate3
+median 1.40 [1.09, 1.67] — the random_get exclusion narrows the number but does not change the verdict
+below (still well above the ≤63ns target, still robustly slower than flecs every round).
+
+### Before/after vs the 2026-07-23 pre-lever baseline
+
+| Operation | Astra before (dev, `ec1d5ce`) | Astra after (this branch) | Δ% | Target |
+|---|---|---|---|---|
+| create | 48.56 | 50.45 | +3.9% | within noise |
+| add | 52.29 | 54.14 | +3.5% | within noise |
+| remove | 38.25 | 37.65 | -1.6% | within noise |
+| **random_get** | **69.70** | **74.55** | **+7.0%** | **≤63 (missed)** |
+| iterate1 | 0.451 | 0.468 | +3.8% | within noise |
+| iterate2 | 1.237 | 1.107 | -10.5% | within noise |
+
+**Per-round paired comparison, random_get, Astra vs flecs:** flecs faster in **6/6** rounds, no spread
+overlap (Astra min 72.42 > flecs max 71.45) — identical direction and a near-identical relative gap to the
+pre-lever baseline (this session: (74.55−67.26)/67.26 = **10.8%** Astra-slower; pre-lever baseline session:
+(69.70−62.76)/62.76 = **11.1%** Astra-slower). create/add/remove keep their pre-lever win/loss pattern too
+(create 6/6 Astra-faster, add 6/6 Astra-faster, remove 6/6 flecs-faster — all matching the historical 7/7
+patterns), confirming the lever changed nothing structural about any op except the one it targeted.
+
+**Interpretation.** The lever missed its target: random_get's median (74.55ns) is not just short of the
+≤63ns goal, it's numerically *worse* than the 69.70ns pre-lever baseline. Two pieces of evidence say this
+is not primarily a regression introduced by the branch, though: (1) flecs's and EnTT's own random_get
+numbers inflated by similarly large amounts in this same session versus their 2026-07-23 numbers (flecs
+62.76→67.26, +7.2%; EnTT 32.45→37.51, +15.6%) — a session-to-session shift affecting all three libraries in
+the same direction, most plausibly machine/thermal/turbo variance rather than anything in Astra's code path;
+and (2) the *same-session, paired* Astra-vs-flecs gap (10.8%) is essentially unchanged from the pre-lever
+historical gap (11.1%) — the fair, noise-controlled comparison says the gap didn't move, not that it grew.
+Taking both together, the honest read is **no measurable improvement**, not a proven regression: the
+predicted win (dependent-load chain 8→~5) did not show up in the gap to flecs, and the most likely
+structural explanation is the trade-off the spec called out up front — growing `EntityRecord` from 24B to a
+hard-aligned 32B lowers record density for exactly the random-order access pattern this lever targets, and
+that cache-pressure cost plausibly ate the shortened-chain benefit. All other primary ops (create, add,
+remove, iterate1, iterate2) stayed within session-level noise of their pre-lever baselines (−10.5%..+3.9%)
+and kept the same win/loss pattern against flecs — **no regression found anywhere except the missed
+random_get target.** This is a real, decisive, non-noise finding (not an open question) and should inform
+the merge decision as such: the lever is safe to merge (no regressions), but should not be described as
+having closed the random_get gap.
+
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`.
