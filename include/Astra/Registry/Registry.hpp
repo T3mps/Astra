@@ -492,8 +492,7 @@ namespace Astra
                     const auto* desc = m_componentRegistry->GetComponentDescriptor(componentId);
                     if (desc)
                     {
-                        auto& chunks = record->archetype->GetChunks();
-                        if (record->location.GetChunkIndex() < chunks.size())
+                        if (record->chunk)
                         {
                             void* actualPtr = nullptr;
                             if (desc->size == 0)
@@ -502,7 +501,7 @@ namespace Astra
                             }
                             else
                             {
-                                void* compPtr = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
+                                void* compPtr = record->chunk->GetComponentArrayByID(componentId);
                                 actualPtr = compPtr ? static_cast<std::byte*>(compPtr) + record->location.GetEntityIndex() * desc->size : nullptr;
                             }
                             if (actualPtr)
@@ -553,8 +552,7 @@ namespace Astra
                     const auto* desc = m_componentRegistry->GetComponentDescriptor(componentId);
                     if (desc)
                     {
-                        auto& chunks = record->archetype->GetChunks();
-                        if (record->location.GetChunkIndex() < chunks.size())
+                        if (record->chunk)
                         {
                             if (desc->size == 0)
                             {
@@ -562,7 +560,7 @@ namespace Astra
                             }
                             else
                             {
-                                void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
+                                void* compArray = record->chunk->GetComponentArrayByID(componentId);
                                 if (compArray)
                                     componentPtr = static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc->size;
                             }
@@ -631,11 +629,10 @@ namespace Astra
             if (desc->size == 0)
                 return EmptyComponentSentinel();     // present tag: no data
 
-            auto& chunks = record->archetype->GetChunks();
-            if (record->location.GetChunkIndex() >= chunks.size())
+            if (!record->chunk)
                 return nullptr;
 
-            void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(componentId);
+            void* compArray = record->chunk->GetComponentArrayByID(componentId);
             if (!compArray)
                 return nullptr;                      // defensive (should not happen for size > 0)
 
@@ -737,9 +734,8 @@ namespace Astra
                 return result;
 
             const ComponentMask& mask = record->archetype->GetMask();
-            auto& chunks = record->archetype->GetChunks();
 
-            if (record->location.GetChunkIndex() >= chunks.size())
+            if (!record->chunk)
                 return result;
 
             // Iterate through all registered components and collect info
@@ -753,7 +749,7 @@ namespace Astra
                 info.meta = desc.meta;  // May be nullptr if type is not reflected
 
                 // Get component data pointer
-                void* compArray = chunks[record->location.GetChunkIndex()]->GetComponentArrayByID(id);
+                void* compArray = record->chunk->GetComponentArrayByID(id);
                 if (compArray && desc.size > 0)
                 {
                     info.data = static_cast<std::byte*>(compArray) + record->location.GetEntityIndex() * desc.size;
