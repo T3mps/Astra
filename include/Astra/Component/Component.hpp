@@ -61,7 +61,7 @@ namespace Astra
         bool is_nothrow_move_constructible;
         bool is_nothrow_default_constructible;
         bool is_trivially_default_constructible;
-        bool is_trivially_destructible = false;   // default false = always-call-fn-ptr (safe for hand-built descriptors)
+        bool is_trivially_destructible = false;   // ONLY trait bool with a default: false = always-call-fn-ptr, so a descriptor built outside the registry factory stays safe; siblings are factory-assigned only
         bool is_empty;
         ConstructFn* defaultConstruct;
         DestructFn* destruct;
