@@ -724,5 +724,24 @@ than the Lever-1 rider (see above).
 scratch csvs already `git status`-untracked in `bench-compare/`); the per-round raw data lives in
 `.superpowers/sdd/task-1-report.md` and `.superpowers/sdd/task-3-report.md`.
 
+### growDivisor=4 re-look — VERDICT: KEEP 2 (2026-07-24, dev @ `24fa402`, post-Lever-2)
+
+The Phase 2 divisor sweep left "growDivisor=4 worth a future look (2-10% on some ops)" open; that data
+was noisy, pre-full-opt-flags, and pre-Levers-1/2. Re-ran `bench_sweep2.cpp` (divisors {1,2,4} x caps
+{256,512}KB x N {1K,100K,1M} x 7 ops, MIN-of-3 per cell) rebuilt with the full-opt flags against current
+dev, on the quietest machine conditions of the program (~3-6% typeperf), 3 full passes, min-across-passes
+per cell (raw: `divisor_pass1-3.csv`, untracked scratch).
+
+**Result: no coherent win for divisor 4.** At the shipped 512KB cap, divisor-4 deltas vs 2 are small and
+sign-inconsistent across N (create -0.6/-1.1/-2.6%, add +1.8/+0.4/+0.4%, remove -2.2/+1.1/+0.7%,
+random_get +1.6/-1.9/-3.8%, iterate2 0/+0.3/-3.7%). The LARGEST-magnitude cells are losses, and they
+cluster where the mechanism predicts them: mid-size archetypes iterate worse under divisor 4's slower
+chunk ramp (iterate1 +12.2% @512KB/100K; iterate3 +33.4% @256KB/100K — more, smaller chunks at mid-N).
+The divisor-1 reference column shows the same mixed-noise character. The Phase-2 "2-10% on some ops"
+signal does not reproduce as a consistent direction under honest flags on quiet hardware.
+
+**Decision: `growDivisor = 2` NSDMI stands. Item closed** — reopen only with a workload argument
+(e.g. a memory-pressure profile favoring slower ramps), not a throughput one.
+
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`. **Build with the full-opt flag set above (2026-07-24 baseline), not bare `/O2`.**
