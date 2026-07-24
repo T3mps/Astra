@@ -81,8 +81,7 @@ namespace Astra
             }
 
             EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
-            rec->archetype = archetype;
-            rec->location  = location;   // NEVER assign rec->version
+            SetRecordLocation(rec, archetype, location);   // NEVER assign rec->version
         }
 
         template<Component... Components>
@@ -102,8 +101,7 @@ namespace Astra
             }
 
             EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
-            rec->archetype = archetype;
-            rec->location  = location;   // NEVER assign rec->version
+            SetRecordLocation(rec, archetype, location);   // NEVER assign rec->version
         }
 
         template<Component... Components>
@@ -166,8 +164,7 @@ namespace Astra
             for (size_t i = 0; i < locations.size(); ++i)
             {
                 EntityRecord* rec = m_records->GetOrCreateRecord(entities[i].GetID());
-                rec->archetype = archetype;
-                rec->location  = locations[i];   // NEVER assign rec->version
+                SetRecordLocation(rec, archetype, locations[i]);   // NEVER assign rec->version
             }
         }
 
@@ -185,8 +182,7 @@ namespace Astra
             for (size_t i = 0; i < locations.size(); ++i)
             {
                 EntityRecord* rec = m_records->GetOrCreateRecord(entities[i].GetID());
-                rec->archetype = archetype;
-                rec->location  = locations[i];   // NEVER assign rec->version
+                SetRecordLocation(rec, archetype, locations[i]);   // NEVER assign rec->version
             }
         }
 
@@ -204,12 +200,11 @@ namespace Astra
                 // The swapped-in entity is guaranteed live and located.
                 EntityRecord* movedRec = m_records->GetRecord(movedEntity->GetID());
                 ASTRA_ASSERT(movedRec, "swap-moved entity must be live and located");
-                movedRec->location = oldLocation;
+                SetRecordLocation(movedRec, archetype, oldLocation);
             }
 
             // Erase clears LOCATION ONLY -- EntityManager::Destroy owns the version.
-            rec->archetype = nullptr;
-            rec->location  = EntityLocation{};
+            ClearRecordLocation(rec);
         }
 
         void RemoveEntities(std::span<Entity> entities)
@@ -242,7 +237,7 @@ namespace Astra
                 {
                     if (EntityRecord* rec = m_records->GetRecord(movedEntity.GetID())) ASTRA_LIKELY
                     {
-                        rec->location = newEntityLocation;
+                        SetRecordLocation(rec, archetype, newEntityLocation);
                     }
                 }
 
@@ -251,8 +246,7 @@ namespace Astra
                     // Erase clears LOCATION ONLY -- versions belong to EntityManager.
                     if (EntityRecord* rec = m_records->GetRecord(entity.GetID())) ASTRA_LIKELY
                     {
-                        rec->archetype = nullptr;
-                        rec->location  = EntityLocation{};
+                        ClearRecordLocation(rec);
                     }
                 }
             }
@@ -266,7 +260,14 @@ namespace Astra
 
         void SetEntityLocation(Entity entity, Archetype* archetype, EntityLocation location)
         {
-            m_records->SetRecord(entity.GetID(), archetype, location);   // archetype/location only
+            // Any caller may pass a null archetype / invalid location (a clear);
+            // only resolve the cached chunk when the location is fully valid.
+            ArchetypeChunk* chunk =
+                (archetype && location.IsValid() &&
+                 location.GetChunkIndex() < archetype->GetChunks().size())
+                    ? archetype->GetChunks()[location.GetChunkIndex()].get()
+                    : nullptr;
+            m_records->SetRecord(entity.GetID(), archetype, chunk, location);   // archetype/chunk/location only
         }
 
         template<Component T, typename... Args>
@@ -979,8 +980,7 @@ namespace Astra
                 // Segments already exist (EntityManager restored versions first).
                 // Write archetype/location only; never touch rec->version.
                 EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
-                rec->archetype = arch;
-                rec->location  = EntityLocation(chunkIndex, entityIndex);
+                SetRecordLocation(rec, arch, EntityLocation::Create(chunkIndex, entityIndex));
             }
             
             return !reader.HasError();
@@ -1146,17 +1146,20 @@ namespace Astra
                 moveFunc(newEntityLocation, newArchetype);
             }
             
-            if (auto movedEntity = oldLoc.archetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
+            // Capture the OLD archetype before oldLoc is reassigned: the swap-moved
+            // entity stays in it, so its chunk must resolve against srcArchetype.
+            Archetype* srcArchetype = oldLoc.archetype;
+            if (auto movedEntity = srcArchetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
             {
                 EntityRecord* movedRec = m_records->GetRecord(movedEntity->GetID());
                 ASTRA_ASSERT(movedRec, "swap-moved entity must be live and located");
-                movedRec->location = oldLoc.location;
+                SetRecordLocation(movedRec, srcArchetype, oldLoc.location);
             }
 
             // oldLoc aliases the shared record for `entity`; writing it here IS the
-            // record update (archetype/location only -- never version).
-            oldLoc.archetype = newArchetype;
-            oldLoc.location = newEntityLocation;
+            // record update (archetype/chunk/location only -- never version). Runs
+            // AFTER the movedRec fixup, which resolves against the OLD archetype.
+            SetRecordLocation(&oldLoc, newArchetype, newEntityLocation);
 
             return newEntityLocation;
         }
@@ -1240,8 +1243,7 @@ namespace Astra
                 
                 MoveAndAdd<T>(dstLocation, dstArchetype, srcLocation, srcArchetype, args...);
                 EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
-                rec->archetype = dstArchetype;
-                rec->location  = dstLocation;   // NEVER assign rec->version
+                SetRecordLocation(rec, dstArchetype, dstLocation);   // NEVER assign rec->version
                 ++processedCount;
             }
             
@@ -1268,7 +1270,7 @@ namespace Astra
                 {
                     EntityRecord* movedRec = m_records->GetRecord(movedEntity->GetID());
                     ASTRA_ASSERT(movedRec, "swap-moved entity must be live and located");
-                    movedRec->location = location;
+                    SetRecordLocation(movedRec, srcArchetype, location);
                 }
             }
 
@@ -1354,8 +1356,7 @@ namespace Astra
             for (size_t i = 0; i < newLocations.size(); ++i)
             {
                 EntityRecord* rec = m_records->GetOrCreateRecord(entityBatch[i].first.GetID());
-                rec->archetype = dstArchetype;
-                rec->location  = newLocations[i];
+                SetRecordLocation(rec, dstArchetype, newLocations[i]);
             }
             
             // Normally every entity is placed (dst chunks are pre-allocated to fit
@@ -1379,7 +1380,7 @@ namespace Astra
             {
                 if (EntityRecord* rec = m_records->GetRecord(movedEntity.GetID())) ASTRA_LIKELY
                 {
-                    rec->location = newLocation;
+                    SetRecordLocation(rec, srcArchetype, newLocation);
                 }
             }
 
@@ -1415,18 +1416,20 @@ namespace Astra
             if (oldLoc.archetype->IsInitialized() && newArchetype->IsInitialized()) ASTRA_LIKELY
                 MoveAndAddByID(newEntityLocation, newArchetype, oldLoc.location, oldLoc.archetype, componentId, data, desc);
 
-            // Remove from old archetype
-            if (auto movedEntity = oldLoc.archetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
+            // Remove from old archetype. Capture the OLD archetype before oldLoc is
+            // reassigned: the swap-moved entity stays in it.
+            Archetype* srcArchetype = oldLoc.archetype;
+            if (auto movedEntity = srcArchetype->RemoveEntity(oldLoc.location)) ASTRA_LIKELY
             {
                 EntityRecord* movedRec = m_records->GetRecord(movedEntity->GetID());
                 ASTRA_ASSERT(movedRec, "swap-moved entity must be live and located");
-                movedRec->location = oldLoc.location;
+                SetRecordLocation(movedRec, srcArchetype, oldLoc.location);
             }
 
             // Update entity record (oldLoc aliases the shared record for `entity`;
-            // archetype/location only -- never version).
-            oldLoc.archetype = newArchetype;
-            oldLoc.location = newEntityLocation;
+            // archetype/chunk/location only -- never version). Runs AFTER the movedRec
+            // fixup, which resolves against the OLD archetype.
+            SetRecordLocation(&oldLoc, newArchetype, newEntityLocation);
 
             return newEntityLocation;
         }
@@ -1522,6 +1525,33 @@ namespace Astra
                         desc.ConstructWith(dstPtr, data);
                     }
                 });
+        }
+
+        // The ONLY sanctioned writers of a record's storage fields (archetype/chunk/
+        // location). NEVER touch rec->version (EntityManager owns it). Spec 4.3.
+        static void SetRecordLocation(EntityRecord* rec, Archetype* arch,
+                                      ArchetypeChunk* chunk, EntityLocation loc) noexcept
+        {
+            ASTRA_ASSERT(arch && chunk && loc.IsValid(), "SetRecordLocation: incomplete location");
+            rec->archetype = arch;
+            rec->chunk     = chunk;
+            rec->location  = loc;
+        }
+
+        // Resolving overload: the chunk is L1-hot at every call site (the move that
+        // produced `loc` just wrote it), so this lookup is effectively free.
+        static void SetRecordLocation(EntityRecord* rec, Archetype* arch, EntityLocation loc)
+        {
+            ASTRA_ASSERT(loc.IsValid() && loc.GetChunkIndex() < arch->GetChunks().size(),
+                         "SetRecordLocation: location out of range");
+            SetRecordLocation(rec, arch, arch->GetChunks()[loc.GetChunkIndex()].get(), loc);
+        }
+
+        static void ClearRecordLocation(EntityRecord* rec) noexcept
+        {
+            rec->archetype = nullptr;
+            rec->chunk     = nullptr;
+            rec->location  = EntityLocation{};
         }
 
         ArchetypeChunkPool m_chunkPool;

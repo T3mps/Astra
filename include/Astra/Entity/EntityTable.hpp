@@ -29,7 +29,7 @@ namespace Astra
             static constexpr IDType DEFAULT_ENTITIES_PER_SEGMENT =
                 static_cast<IDType>(std::min<uint64_t>(65536ull, static_cast<uint64_t>(Entity::ID_MASK) + 1ull));
 
-            IDType entitiesPerSegment = DEFAULT_ENTITIES_PER_SEGMENT;      // 64K entities = 64KB per segment (must be power of 2)
+            IDType entitiesPerSegment = DEFAULT_ENTITIES_PER_SEGMENT;      // 64K entities × sizeof(EntityRecord) per segment (must be power of 2)
             IDType entitiesPerSegmentShift = static_cast<IDType>(std::countr_zero(DEFAULT_ENTITIES_PER_SEGMENT));    // log2(entitiesPerSegment) for fast division
             IDType entitiesPerSegmentMask = static_cast<IDType>(DEFAULT_ENTITIES_PER_SEGMENT - 1);  // entitiesPerSegment - 1 for fast modulo
             float releaseThreshold = 0.1f;          // Release when <10% used
@@ -171,10 +171,11 @@ namespace Astra
             return &segment->records[segment->ToLocal(id)];
         }
 
-        void SetRecord(IDType id, Archetype* archetype, EntityLocation location)
+        void SetRecord(IDType id, Archetype* archetype, ArchetypeChunk* chunk, EntityLocation location)
         {
             EntityRecord* r = GetOrCreateRecord(id);   // does NOT change version
             r->archetype = archetype;
+            r->chunk     = chunk;
             r->location  = location;
         }
 

@@ -58,6 +58,139 @@ protected:
     }
 };
 
+// Task 2 (record->chunk cache): the chunk-pointer invariant every located record
+// must satisfy (spec 4.1). Whenever a record is located, its cached `chunk` must be
+// EXACTLY archetype->GetChunks()[location.GetChunkIndex()].get(); a stale pointer
+// here is a use-after-free on the get hot path.
+static void ExpectChunkInvariant(Astra::ArchetypeManager* m, Astra::Entity e)
+{
+    const Astra::EntityRecord* rec = m->GetEntityRecord(e);
+    ASSERT_NE(rec, nullptr);
+    ASSERT_NE(rec->archetype, nullptr);
+    ASSERT_TRUE(rec->location.IsValid());
+    ASSERT_LT(rec->location.GetChunkIndex(), rec->archetype->GetChunks().size());
+    EXPECT_EQ(rec->chunk,
+              rec->archetype->GetChunks()[rec->location.GetChunkIndex()].get());
+}
+
+TEST_F(ArchetypeManagerTest, RecordChunkInvariant_CreateTransitionRemove)
+{
+    using namespace Astra::Test;
+    Astra::Entity e = testEntities[0];
+    manager->AddEntity(e);                       // create (root archetype)
+    ExpectChunkInvariant(manager.get(), e);
+    manager->AddComponent<Position>(e, 1.f, 2.f, 3.f);   // transition add
+    ExpectChunkInvariant(manager.get(), e);
+    manager->AddComponent<Velocity>(e);          // second transition
+    ExpectChunkInvariant(manager.get(), e);
+    manager->RemoveComponent<Velocity>(e);       // transition remove
+    ExpectChunkInvariant(manager.get(), e);
+    manager->RemoveEntity(e);                    // clear: all storage fields null
+    const Astra::EntityRecord* rec = manager->GetEntityRecord(e);
+    // GetEntityRecord version-guards on archetype != null, so a fully cleared record
+    // reads back as nullptr -- fetch the raw slot to inspect the storage fields.
+    rec = m_table.GetRecord(e.GetID());
+    ASSERT_NE(rec, nullptr);
+    EXPECT_EQ(rec->archetype, nullptr);
+    EXPECT_EQ(rec->chunk, nullptr);
+    EXPECT_FALSE(rec->location.IsValid());
+}
+
+TEST_F(ArchetypeManagerTest, RecordChunkInvariant_SwapRemoveFixup)
+{
+    using namespace Astra::Test;
+    // Fill one archetype so removing a middle entity swap-moves the last one.
+    for (int i = 0; i < 50; ++i)
+    {
+        manager->AddEntity(testEntities[i]);
+        manager->AddComponent<Position>(testEntities[i], float(i), 0.f, 0.f);
+    }
+    manager->RemoveEntity(testEntities[10]);     // last entity swaps into slot 10
+    for (int i = 0; i < 50; ++i)
+    {
+        if (i == 10) continue;
+        ExpectChunkInvariant(manager.get(), testEntities[i]);
+    }
+}
+
+TEST_F(ArchetypeManagerTest, RecordChunkInvariant_Defragment)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    // Enough Position entities to span multiple chunks: a fresh chunk is floored at
+    // 4KB (~170 Position entities) and CompactChunks only acts on >1 chunk. This
+    // reuses only Position (no new component types) and builds handles directly (the
+    // fixture seeds versions for ids 0..10000).
+    constexpr int N = 600;
+    std::vector<Entity> ents;
+    ents.reserve(N);
+    for (int i = 0; i < N; ++i)
+    {
+        Entity e(static_cast<uint32_t>(i), 1);
+        manager->AddEntity(e);
+        manager->AddComponent<Position>(e, float(i), 0.f, 0.f);
+        ents.push_back(e);
+    }
+
+    Archetype* arch = manager->GetEntityRecord(ents[0])->archetype;
+    ASSERT_NE(arch, nullptr);
+    ASSERT_GT(arch->GetChunks().size(), 1u);   // precondition: multi-chunk archetype
+
+    // Drive the exact record-rewrite path Registry::Defragment uses: CompactChunks
+    // repacks every live entity into FRESH chunks (freeing the old ones) and reports
+    // every one's new location. Those must flow back through SetEntityLocation (funnel
+    // site d) to re-cache each record's chunk -- otherwise the cached pointer dangles
+    // at a just-freed old chunk (UAF). Same locations, different chunk objects, so
+    // this specifically catches a chunk pointer that was NOT refreshed.
+    auto [chunksFreed, movedEntities] = arch->CompactChunks();
+    (void)chunksFreed;
+    ASSERT_FALSE(movedEntities.empty());
+    for (const auto& [entity, newLocation] : movedEntities)
+        manager->SetEntityLocation(entity, arch, newLocation);
+
+    for (int i = 0; i < N; ++i)
+        ExpectChunkInvariant(manager.get(), ents[i]);
+}
+
+TEST_F(ArchetypeManagerTest, RecordChunkInvariant_Deserialize)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+    for (int i = 0; i < 30; ++i)
+    {
+        manager->AddEntity(testEntities[i]);
+        manager->AddComponent<Position>(testEntities[i], float(i), 0.f, 0.f);
+    }
+
+    // Serialize the populated manager into an in-memory archive (header + payload).
+    std::vector<std::byte> buffer;
+    {
+        BinaryWriter writer(buffer);
+        BinaryHeader header;                     // stamps magic/current version/endianness
+        writer.WriteHeader(header);
+        manager->Serialize(writer);
+        writer.FinalizeHeader();
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    // Deserialize into a fresh manager over its own record table. In production
+    // EntityManager restores versions before ArchetypeManager::Deserialize; mirror
+    // that by seeding versions for the reloaded ids (same as the fixture does).
+    EntityTable table2;
+    for (Entity::StorageType id = 0; id < 200; ++id)
+        table2.SetVersion(id, 1);
+    ArchetypeManager manager2(componentRegistry, ArchetypeChunkPool::Config{}, &table2);
+
+    BinaryReader reader{std::span<const std::byte>(buffer)};
+    ASSERT_TRUE(reader.ReadHeader().IsOk());
+    ASSERT_TRUE(manager2.Deserialize(reader));
+
+    // Every reloaded record must have its chunk pointer re-derived (funnel site e).
+    for (int i = 0; i < 30; ++i)
+        ExpectChunkInvariant(&manager2, testEntities[i]);
+}
+
 // Test basic entity addition and removal
 TEST_F(ArchetypeManagerTest, BasicEntityOperations)
 {
