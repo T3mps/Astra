@@ -518,7 +518,28 @@ namespace Astra
             if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
                 return nullptr;
 
-            return rec->archetype->GetComponent<T>(rec->location);
+            if constexpr (std::is_empty_v<T>)
+            {
+                // Tags have no storage column (idToColumn == -1 whether present or not),
+                // so presence MUST come from the archetype mask.
+                return rec->archetype->GetComponent<T>(rec->location);
+            }
+            else
+            {
+                // Load-bearing guard, not decoration: the old path's safety for
+                // over-ceiling/collision-refused ids (INVALID_COMPONENT, Theme E) came
+                // from Bitmap::Test's internal range check, which this fast path skips.
+                // Without it, idToColumn[id] is an OOB read in Release. Register-only
+                // compare -- zero memory traffic. Spec sec 4.4/4.5.
+                const ComponentID id = TypeID<T>::Value();
+                if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                    return nullptr;
+
+                ASTRA_ASSERT(rec->chunk ==
+                             rec->archetype->GetChunks()[rec->location.GetChunkIndex()].get(),
+                             "EntityRecord chunk/location desync");
+                return rec->chunk->GetComponent<T>(rec->location.GetEntityIndex());
+            }
         }
 
         template<Component T>
