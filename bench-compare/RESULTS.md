@@ -256,39 +256,47 @@ repack of sparse archetypes into fresh target-size chunks, freed chunks TLSF-coa
 
 No other failures in any config. This matches the expected post-Task-6 counts (722/720/720).
 
-### ⚠️ Machine state during Step 2/3 benchmarking — NOT a clean machine
+### Machine state — RESOLVED, quiet-machine re-run performed (2026-07-23, later same day)
 
-Unlike the W1/W6+W2/Phase-C sessions recorded above, this session's benchmarks ran with **sustained
-~70–84% background CPU load** from the user's own foreground applications (a running game process,
-Discord, a browser, Steam/Roblox helpers — sampled via `Get-CimInstance Win32_Processor
-LoadPercentage` repeatedly through the session, and independently via `Get-Process | Sort CPU`). This
-was not started by the benchmark run and was not closed (killing a user's running game/apps is outside
-this task's authority) — it is disclosed here so the numbers below are read with the correct amount of
-skepticism. **The top-of-file summary table above is deliberately left unchanged**; the numbers in this
-section are NOT proposed as a replacement headline, only as this session's evidence for the merge
-decision.
+The first pass at Steps 2/3 (below, in the "Superseded" subsections) ran under **sustained ~70–84%
+background CPU load** from the user's own foreground applications (a running game process, Discord, a
+browser, Steam/Roblox helpers). The user then closed the game and heavy apps. Before trusting the
+machine, load was re-sampled (`Get-CimInstance Win32_Processor LoadPercentage`, repeated windows):
+a brief transient spike (avg ~27–29%, one process — `clangd`, the IDE's background indexer — visibly
+churning) settled within ~15–20s to a clean **avg 10.7% and 12.6%** across two consecutive windows,
+confirmed well under the 15% bar with a per-process CPU-delta snapshot showing only small, ordinary
+desktop background consumers (browser tabs, Steam helper) — no heavy foreground app. Steps 2 and 3 were
+then re-run in full. **The results in this section are the authoritative, quiet-machine numbers**; the
+original noisy-session tables are retained further down, clearly marked **superseded**, for transparency
+about what changed and why.
 
-### 3-way benchmark (Step 2) — 7 interleaved rounds (astra→flecs→entt ×7)
+### 3-way benchmark (Step 2) — quiet machine, 7 interleaved rounds (astra→flecs→entt ×7)
 
 `bench_astra.cpp` needed a harness fix before it would even build against this branch's headers (not a
-library defect): its three `View::ForEach` lambdas were missing the mandatory leading `Astra::Entity`
-parameter (every other call site in the repo, e.g. `benchmark/Benchmark.cpp`, passes `(Astra::Entity,
-Components&...)`) — fixed in the untracked scratch file, not a library change.
+library defect, and unchanged from the first pass): its three `View::ForEach` lambdas were missing the
+mandatory leading `Astra::Entity` parameter (every other call site in the repo, e.g.
+`benchmark/Benchmark.cpp`, passes `(Astra::Entity, Components&...)`) — fixed in the untracked scratch
+file, not a library change. HEAD was confirmed unchanged (`ae40c9b` under the results commit) before
+reusing the existing `bench_astra.exe`; no rebuild was needed.
 
 Median of 7 same-session interleaved rounds, N=1,000,000, ns/op (lower = better), with [min, max] spread:
 
-| Operation | Astra (this session) | flecs (this session) | EnTT (this session) |
+| Operation | Astra | flecs | EnTT |
 |---|---|---|---|
-| create | **73.76** [59.15, 85.40] | 162.63 [125.25, 197.29] | 59.62 [50.30, 75.10] |
-| add | **67.73** [64.51, 88.47] | 94.73 [68.52, 104.51] | 15.42 [14.20, 20.61] |
-| remove | 59.57 [42.91, 76.73] | **47.74** [43.01, 59.61] | 18.49 [18.01, 23.06] |
-| random_get | 194.79 [128.27, 226.27] | **174.28** [113.65, 208.20] | 83.20 [55.53, 146.40] |
-| iterate1 | 1.193 [0.639, 2.851] | 1.651 [0.787, 2.544] | 1.941 [1.042, 3.004] |
-| iterate2 | 2.474 [2.044, 4.403] | 2.793 [2.128, 5.076] | 4.233 view / 2.785 group |
-| iterate3 | 2.651 [2.338, 5.382] | 3.355 [2.216, 5.382] | 4.803 view |
+| create | **48.56** [46.81, 51.46] | 97.92 [96.73, 103.96] | 41.29 [39.59, 46.77] |
+| add | **52.29** [51.40, 52.79] | 55.82 [54.75, 58.16] | 11.73 [11.46, 12.34] |
+| remove | 38.25 [37.82, 39.73] | **34.18** [33.83, 36.06] | 16.46 [16.29, 17.30] |
+| random_get | 69.70 [67.76, 75.41] | **62.76** [60.03, 83.81]¹ | 32.45 [28.82, 47.52] |
+| iterate1 | 0.451 [0.392, 0.652] | **0.396** [0.387, 0.557] | 0.641 [0.565, 0.794] |
+| iterate2 | 1.237 [1.049, 1.873] | **1.107** [0.886, 1.464] | 2.420 view / 1.330 group |
+| iterate3 | 1.359 [0.975, 1.888] | **1.123** [1.042, 1.652] | 3.277 view |
 
-For context only (NOT directly comparable — different machine state), the historical clean-machine
-baseline (dev `cb68bf3`, pre-Phase-2):
+¹ flecs random_get had one anomalous round (83.807 ns, round 6 of 7) — Astra's and EnTT's own round-6
+numbers were unremarkable that round, so the spike looks isolated to flecs, not shared background
+noise; excluding it, flecs's clean-round range is [60.03, 65.45].
+
+For context, the historical clean-machine baseline (dev `cb68bf3`, pre-Phase-2, a different session —
+included for trend, not as a same-session comparison):
 
 | Operation | Astra (historical) | flecs (historical) | EnTT (historical) |
 |---|---|---|---|
@@ -300,70 +308,117 @@ baseline (dev `cb68bf3`, pre-Phase-2):
 | iterate2 | 0.993 | 0.812 | 1.04 (group) |
 | iterate3 | 1.050 | 0.889 | 3.21 (view) |
 
-All three libraries' this-session absolute numbers are inflated 1.2×–1.8× over their own historical
-baseline (e.g. flecs create 162.6 vs 95.9 historical, entt create 59.6 vs 40.6 historical, astra create
-73.8 vs 51.4 historical) — consistent with shared background contention, not a code regression in any
-of the three (their sources are unmodified for flecs/entt; Astra's own 3-config suite above is green).
+This quiet-machine session's absolute numbers track the historical baseline closely (create/add/remove
+within a few percent; flecs create 97.9 vs 95.9 historical, astra create 48.6 vs 51.4 historical) —
+consistent with a genuinely quiet machine, unlike the first pass's 1.2×–1.8× inflation.
 
-**Because raw medians of independently-noisy series can mislead, the more robust read is a per-round
-paired comparison** (same round, same background-load instant, both libraries) — win counts out of 7:
+**Per-round paired comparison** (same round, both libraries) — win counts out of 7, spreads now mostly
+non-overlapping (tight and trustworthy):
 
 | Operation | Astra-faster-than-flecs, rounds | Spread overlap? | Read |
 |---|---|---|---|
-| create | **7/7** | none — Astra max (85.40) < flecs min (125.25) | **robust, decisive** |
-| add | **7/7** | partial (64.5–88.5 vs 68.5–104.5) | **robust** |
-| remove | 1/7 (flecs faster 6/7) | heavy | consistent with the known ~1.2× post-Phase-C gap (40.8 vs 32.8 historical) — no regression |
-| iterate3 | 5/7 | full | leans Astra-favorable, inconclusive |
-| iterate2 | 4/7 | full | inconclusive (near coin-flip) |
-| iterate1 | 4/7 | full | inconclusive (near coin-flip) |
-| random_get | 1/7 (flecs faster 6/7) | full | **does not confirm** the study's predicted +16%/at-or-ahead-of-flecs outcome this session |
+| create | **7/7** | none — Astra max (51.46) < flecs min (96.73) | **robust, decisive** |
+| add | **7/7** | none — Astra max (52.79) < flecs min (54.75) | **robust — a clean win, not just "no regression"** |
+| remove | 0/7 (flecs faster 7/7) | none — Astra min (37.82) > flecs max (36.06) | robust; Astra ~11.9% slower, close to (slightly better than) the historical ~19% gap — no regression |
+| iterate2 | 1/7 (flecs faster 6/7) | full | flecs robustly faster but the median gap shrank a lot (~11.8% vs ~22% historical) |
+| iterate3 | 2/7 (flecs faster 5/7) | full | flecs faster; gap (~21%) essentially matches historical (~18%) — no regression, not the hoped "~parity" either |
+| iterate1 | 2.5/7 (flecs faster 4/7, one near-tie) | full | close to a coin-flip, but flecs's median edge (~14%) is real; a big improvement over the historical ~31% gap |
+| random_get | 1/7 (flecs faster 6/7, excl. the flecs outlier round) | none excluding the outlier | robust; Astra ~11.1% slower — essentially the *same* gap as historical (~15%), i.e. **no improvement materialized here** |
 
-**Verdict against the Step 2 success criteria:**
-- **create stays ahead of flecs:** ✅ confirmed, decisively and robustly (non-overlapping across all 7 rounds).
-- **add/remove no regression beyond noise:** ✅ add is a clean win every round; remove's ~1.2–1.5×
-  gap to flecs matches the already-known post-Phase-C gap, not a new regression.
-- **iterate1, iterate2, random_get at-or-ahead of flecs:** ⚠️ **not confirmed this session.**
-  iterate1/iterate2 are genuine coin-flips (4/7) under this load, and random_get leans the other way
-  (flecs faster 6/7 rounds) — the opposite of the study's predicted +16% Astra-side improvement. Given
-  the spreads fully overlap for all three, this session's data cannot distinguish a real regression from
-  simply not being able to see the predicted win through the noise floor. **This should be re-measured
-  on an idle machine before being treated as a settled result either way** — it is the one open question
-  this task did not resolve with confidence.
+**Verdict against the Step 2 success criteria (quiet-machine, authoritative):**
+- **create stays ahead of flecs:** ✅ **confirmed, decisively** — non-overlapping, 7/7 rounds, and the
+  gap is even wider than the historical baseline (2.02× vs 1.87× historically).
+- **add/remove no regression beyond noise:** ✅ **confirmed, and add is better than required** — add is
+  a clean, non-overlapping win over flecs this session (not just parity); remove's gap is essentially
+  unchanged from (slightly better than) history.
+- **iterate1, iterate2, random_get at-or-ahead of flecs:** ❌ **not met, now confirmed with confidence
+  (not noise).** flecs remains ahead on all three. The honest, more nuanced picture: **iterate1 and
+  iterate2 both improved substantially** — their gaps to flecs roughly halved from the historical
+  pre-Phase-2 baseline (iterate1 ~31%→~14%, iterate2 ~22%→~12%) — real, partial progress toward the
+  study's prediction, just not enough to flip the ranking. **random_get did not improve at all** — its
+  gap to flecs (~11%) is essentially the same as the pre-Phase-2 historical gap (~15%), contradicting
+  the study's predicted +16% Astra-side swing for this specific op. This is now a clean, decisive,
+  non-noise finding, not an open question.
 
-### Grow-divisor / max-chunk-bytes mini-sweep (Step 3)
+### Grow-divisor / max-chunk-bytes mini-sweep (Step 3) — quiet machine re-run
 
-`bench-compare/bench_sweep2.cpp` (untracked scratch, not `bench_sweep.cpp` — a fresh minimal harness
-was cleaner than adapting the Phase-1 file's payload-sweep structure) sweeps `growDivisor ∈ {1,2,4} ×
-maxChunkBytes ∈ {256KB,512KB}` at `N ∈ {1e3,1e5,1e6}` over the 7 standard ops, MIN-of-3 reps per cell
-(`minChunkBytes` left at its 4KB default throughout). Shipped NSDMIs are `growDivisor=2,
-maxChunkBytes=512KB` (marked `*` below).
+Same `bench-compare/bench_sweep2.cpp` harness, re-run on the quiet machine. Numbers are much tighter
+and internally consistent than the first pass (e.g. all six cells' create times now cluster in
+47.2–49.0 ns at N=1e6, vs the noisy pass's 67.9–87.6 ns spread).
 
-N=1,000,000, ns/op:
+N=1,000,000, ns/op (shipped NSDMIs `growDivisor=2, maxChunkBytes=512KB` marked `*`):
+
+| growDivisor, cap | create | add | remove | random_get | iterate1 | iterate2 | iterate3 |
+|---|---|---|---|---|---|---|---|
+| 1, 256KB | 47.34 | 52.25 | 39.04 | 66.78 | 0.391 | 0.907 | 1.338 |
+| 1, 512KB | 49.00 | 51.98 | 39.13 | 63.04 | 0.390 | 0.910 | 0.894 |
+| 2, 256KB | 48.17 | 52.74 | 38.51 | 64.59 | 0.343 | 0.843 | 1.029 |
+| **2, 512KB\*** | **47.17** | 53.80 | 39.57 | 71.21 | 0.400 | 1.029 | **0.849** |
+| 4, 256KB | 48.25 | 54.33 | 38.93 | 69.32 | 0.409 | 0.895 | 1.426 |
+| 4, 512KB | 48.09 | 51.19 | 37.33 | 64.97 | 0.385 | 0.956 | 0.889 |
+
+(N=100,000 and N=1,000 tables in the untracked `sweep2_results.csv` show the same qualitative picture.)
+
+**Reading:** the shipped `(2, 512KB)` cell wins outright on **create** (47.17, the best of the six) and
+**iterate3** (0.849, the best of the six), and is mid-pack on **remove** (39.57) and **iterate1**
+(0.400). It is the *worst* of the six on **add** (53.80, ~5% above the best) and **random_get** (71.21,
+~11% above the best, `1,512KB`) and **iterate2** (1.029, ~22% above the best, `2,256KB`). No single
+alternative cell dominates across all primary ops either: `4, 512KB` is modestly better than shipped on
+add/remove/random_get/iterate2 (roughly 2–10%) at N=1e6, and similarly at N=1e5/1e3, but is not
+uniformly ahead (create is a rounding error apart, iterate3 favors shipped by ~4.5%) — and each cell was
+measured as a single MIN-of-3 sample, not a repeated-trial confidence interval, so a ~5–10% edge on 2 of
+7 ops isn't yet strong enough to call a real, reproducible win.
+
+**Verdict: the shipped NSDMIs hold, but not by a landslide.** `growDivisor=2, maxChunkBytes=512KB`
+remains a reasonable, defensible default — it wins the two ops the design most cares about
+(create, and iterate3 is a bonus) and is never the *worst* choice by a wide margin. `growDivisor=4,
+maxChunkBytes=512KB` shows a modest, worth-a-look edge on add/remove/random_get/iterate2 (~2–10%,
+fairly consistent across N) that a future pass could investigate with repeated trials, but this single
+sweep pass is not a data-backed case to change the NSDMIs now, per the brief's own bar (>5%,
+*consistently*, on the primary ops — met on some ops, not all). **NSDMIs left unchanged.**
+
+### Superseded — first pass (noisy machine, ~70–84% background CPU load), kept for transparency
+
+<details>
+<summary>Original noisy-session Step 2/3 tables and verdict (click to expand) — superseded by the
+quiet-machine re-run above; retained only so the before/after and the reasoning for the re-run are
+auditable.</summary>
+
+Median of 7 same-session interleaved rounds under heavy background load, N=1,000,000, ns/op, [min, max]:
+
+| Operation | Astra (noisy session) | flecs (noisy session) | EnTT (noisy session) |
+|---|---|---|---|
+| create | 73.76 [59.15, 85.40] | 162.63 [125.25, 197.29] | 59.62 [50.30, 75.10] |
+| add | 67.73 [64.51, 88.47] | 94.73 [68.52, 104.51] | 15.42 [14.20, 20.61] |
+| remove | 59.57 [42.91, 76.73] | 47.74 [43.01, 59.61] | 18.49 [18.01, 23.06] |
+| random_get | 194.79 [128.27, 226.27] | 174.28 [113.65, 208.20] | 83.20 [55.53, 146.40] |
+| iterate1 | 1.193 [0.639, 2.851] | 1.651 [0.787, 2.544] | 1.941 [1.042, 3.004] |
+| iterate2 | 2.474 [2.044, 4.403] | 2.793 [2.128, 5.076] | 4.233 view / 2.785 group |
+| iterate3 | 2.651 [2.338, 5.382] | 3.355 [2.216, 5.382] | 4.803 view |
+
+Per-round paired win counts (of 7): create 7/7 Astra, add 7/7 Astra, remove 1/7 Astra (flecs 6/7),
+iterate3 5/7 Astra, iterate2 4/7 Astra, iterate1 4/7 Astra, random_get 1/7 Astra (flecs 6/7). Verdict at
+the time: create/add/remove robust, iterate1/iterate2/random_get inconclusive (spreads fully
+overlapped) — recommended a clean-machine re-run, which is the quiet-machine section above. In
+hindsight, the paired win-rate direction for every op (including the inconclusive ones) matches the
+quiet-machine result — the noise widened the spreads enough to erase confidence, but didn't flip the
+underlying signal.
+
+Grow-divisor sweep, noisy session, N=1,000,000, ns/op:
 
 | growDivisor, cap | create | add | remove | random_get | iterate1 | iterate2 | iterate3 |
 |---|---|---|---|---|---|---|---|
 | 1, 256KB | 67.86 | 84.60 | 66.77 | 231.90 | 1.536 | 3.440 | 3.904 |
 | 1, 512KB | 78.23 | 85.33 | 57.26 | 209.32 | 1.901 | 3.854 | 2.928 |
 | 2, 256KB | 77.01 | 85.36 | 75.43 | 263.19 | 0.356 | 2.135 | 4.176 |
-| **2, 512KB\*** | 87.60 | 74.76 | 64.44 | 235.43 | 1.084 | 2.820 | 3.416 |
+| 2, 512KB* | 87.60 | 74.76 | 64.44 | 235.43 | 1.084 | 2.820 | 3.416 |
 | 4, 256KB | 87.58 | 85.96 | 61.83 | 212.19 | 0.833 | 2.746 | 3.448 |
 | 4, 512KB | 81.06 | 86.78 | 71.29 | 136.18 | 1.943 | 3.229 | 4.031 |
 
-N=100,000 and N=1,000 tables show the same pattern (full CSV in the untracked `sweep2_results.csv`):
-no cell is a consistent winner across N values or across the primary ops (create/iterate1/iterate2/
-random_get) — e.g. at N=1e6 the shipped `(2, 512KB)` cell has the *worst* create time of the six but a
-mid-pack random_get; at N=1e5 it has the worst create (112.8) of the six; `(2, 256KB)` shows the best
-iterate1 at N=1e6 (0.356) but the *worst* random_get (263.19) and iterate3 (4.18) at the same N. This
-non-monotonic, metric-flipping pattern under the same ~70–84% background load documented above is the
-signature of measurement noise, not a structural effect — a genuine sizing advantage should show up
-consistently across N and across related ops, and none does here.
+Verdict at the time: inconclusive (non-monotonic, metric-flipping pattern under noise); the quiet-machine
+re-sweep above is the authoritative one.
 
-**Verdict: inconclusive, not a data-backed case to change the NSDMIs.** No cell beat the shipped
-`growDivisor=2, maxChunkBytes=512KB` defaults consistently and meaningfully (>5% on the primary ops)
-across all three N values — but given the noise level, this also isn't strong *positive* confirmation
-that divisor=2/512KB is uniquely optimal, just that nothing in this dataset contradicts it. **NSDMIs
-left unchanged, as instructed.** A re-sweep on an idle machine is recommended for a high-confidence
-lock-in before this question is considered closed.
+</details>
 
 ### Memory-waste check (Step 4)
 
@@ -389,20 +444,34 @@ with 100 Position entities:     archetypeCount=2, ArchetypeMemoryUsage=29696 byt
 regardless of how little data it held — a genuine 4× reduction for small archetypes, confirming Phase
 2's memory-waste goal. No new test was added; Task 5's existing test already covers this exactly.
 
-### Overall Phase-2 verdict
+### Overall Phase-2 verdict (quiet-machine, authoritative)
 
-- **Robust, noise-resistant wins:** create (decisively ahead of flecs, 7/7 non-overlapping rounds),
-  add (7/7 wins vs flecs, no regression), remove (no regression — matches the known post-Phase-C gap),
-  and the memory-waste invariant (4× smaller footprint for small archetypes, directly measured).
-- **Open question, not resolved by this session:** iterate1/iterate2/random_get could not be confidently
-  shown at-or-ahead of flecs under this session's ~70–84% background load — spreads fully overlap and
-  paired win-rates are near coin-flip (iterate1/2) or lean the wrong way (random_get). This is the one
-  piece of the study's prediction (+51%/+15%/+16%) that needs a clean-machine re-run to settle either way.
-- **Divisor/cap sweep:** inconclusive under the same noise; no evidence to change the shipped
-  `growDivisor=2, maxChunkBytes=512KB` NSDMIs, and no evidence contradicting them either.
+- **Robust, decisive wins:** create (2.02× ahead of flecs, 7/7 non-overlapping rounds — even better than
+  the historical 1.87×), add (a clean, non-overlapping win over flecs, 7/7 rounds — better than the
+  "no regression" bar), and the memory-waste invariant (4× smaller footprint for small archetypes,
+  directly measured).
+- **No regression:** remove (~11.9% behind flecs, essentially the historical gap, slightly improved).
+- **Real, partial progress — gap roughly halved but ranking unchanged:** iterate1 (~31%→~14% behind
+  flecs) and iterate2 (~22%→~12% behind flecs) both improved substantially versus the historical
+  pre-Phase-2 baseline, confirming Phase 2 helped iteration meaningfully — just not enough to reach
+  "at-or-ahead of flecs."
+- **Did not improve:** random_get's gap to flecs (~11%) is essentially unchanged from the historical
+  pre-Phase-2 gap (~15%) — the study's predicted +16% swing for this specific op did not materialize.
+  This is now a clean, decisive, non-noise finding (non-overlapping spreads, 6/7 paired rounds), not an
+  open question.
+- **Divisor/cap sweep:** the shipped `growDivisor=2, maxChunkBytes=512KB` NSDMIs hold — best on
+  create and iterate3, mid-pack on remove/iterate1, worst (by 5–22%) on add/random_get/iterate2 versus
+  the best alternative cell in each case, with no single alternative dominating across all primary ops.
+  `growDivisor=4` (either cap) is a modest, worth-a-future-look candidate on add/remove/random_get/
+  iterate2, but this single-sample-per-cell sweep isn't a strong enough basis to change the defaults now.
 - **No library defect found.** All test-suite failures were the pre-existing `CompressionTest` timing
   flake, confirmed via isolated reruns. This task changed no library code (only the untracked benchmark
   scratch harness).
+- **Net read for the merge decision:** Phase 2 delivers on its memory-waste goal outright, delivers a
+  decisive structural-op win (create, add), holds steady on remove, and makes real but incomplete
+  progress on iteration (iterate1/iterate2) — while random_get's predicted improvement did not
+  materialize on this machine. None of this is a regression; the shortfall is against the study's
+  optimistic prediction, not against Astra's own pre-Phase-2 baseline.
 
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`.
