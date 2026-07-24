@@ -563,5 +563,45 @@ random_get target.** This is a real, decisive, non-noise finding (not an open qu
 the merge decision as such: the lever is safe to merge (no regressions), but should not be described as
 having closed the random_get gap.
 
+### Full-opt flag re-run — NEW BENCH FLAG BASELINE (2026-07-24, dev @ `5590ca8`, post-Lever-1 merge)
+
+**Why.** Every bench run above built with minimal flags (`/O2 /DNDEBUG /EHsc`). The solution's own Dist
+config compiles with substantially more: `/arch:AVX`, manual `__SSE2__`/`__SSE4_2__` defines (MSVC never
+auto-defines these — without them Mosaic's `Platform.hpp:172-191` compiles OUT the hardware-CRC32 and AVX
+SIMD tiers, so every prior bench ran Astra at its SSE2 floor), `/fp:fast`, `/GL`+`/LTCG`.
+(`ASTRA_BUILD_DIST` was checked and is cosmetic — a build-type string; `NDEBUG` governs asserts.)
+All THREE benches were rebuilt with the identical full flag set for fairness:
+`/std:c++20 /O2 /GL /DNDEBUG /D__SSE2__ /D__SSE4_2__ /arch:AVX /fp:fast /Zc:__cplusplus /EHsc /link /LTCG`
+(+ `/DASTRA_BUILD_DIST` for Astra; flecs.c compiled `/c /O2 /GL /W0 /DNDEBUG /arch:AVX /fp:fast`).
+**These flags are the bench recipe from now on** — they match what a real optimized consumer ships with.
+
+**Setup.** Quiet machine (typeperf ~3-11% before the run). 6 interleaved rounds (astra→flecs→entt), N=1M,
+medians [min,max]. Raw: `ab2_rounds.csv` (untracked).
+
+| Operation | Astra | flecs | EnTT | Astra vs flecs |
+|---|---|---|---|---|
+| create | 49.90 [48.69, 51.17] | 89.54 [88.35, 92.52] | 38.91 [37.29, 44.71] | **1.79× ahead** |
+| add | 48.63 [47.34, 50.11] | 50.99 [49.18, 52.84] | 11.65 [11.21, 12.93] | **~5% ahead** |
+| remove | 37.36 [36.95, 38.24] | 33.84 [31.51, 35.98] | 16.59 [16.44, 17.05] | ~10% behind |
+| random_get | 60.03 [54.09, 70.05] | 56.21 [54.77, 67.93] | 24.40 [22.26, 45.98] | ~4% behind (paired median; **2/6 rounds ahead**) |
+| iterate1 | 0.484 [0.385, 0.602] | 0.434 [0.382, 0.741] | 0.576 [0.515, 0.732] | ~11% behind (spreads overlap heavily) |
+| iterate2 | 1.046 [0.836, 1.148] | 0.885 [0.846, 1.036] | 2.80 view / 1.34 group | ~18% behind — now the biggest gap |
+| iterate3 | 0.997 [0.915, 1.216] | 1.010 [0.892, 1.129] | 3.23 view | **~parity (slightly ahead)** |
+
+Per-round paired random_get gaps (Astra vs flecs): −1.1%, +4.4%, −1.3%, +17.8%, +3.1%, +8.1%.
+
+**Interpretation.** Under Dist-parity flags the random_get gap to flecs narrows from ~11% (both prior
+sessions) to **~4% median, with Astra winning 2 of 6 rounds — effectively near-parity**. IMPORTANT CAVEAT:
+this run changes BOTH the flags and (vs the 07-23 baseline) includes the Lever-1 merge, and no pre-lever
+build was measured under the new flags — so the narrowing CANNOT be attributed to the lever vs the SIMD
+tiers (hardware CRC32, AVX) vs LTCG; they are confounded. What can be said cleanly: **on the flags a real
+user would ship with, current dev is 1.79× ahead of flecs on create, ahead on add, near-parity on
+random_get and iterate3, ~10% behind on remove, and ~18% behind on iterate2** — iterate2 replaces
+random_get as the biggest flecs gap (flecs's 2-component loop benefits strongly from AVX+`/fp:fast`
+auto-vectorization: its iterate2 dropped 1.11→0.885 across the two same-day sessions while Astra's dropped
+only 1.107→1.046). EnTT's sparse-set random_get also leaps ahead under full opts (37.5→24.4) — model-inherent,
+not a target. Net for the lever program: lever 2 (per-chunk iteration-setup flattening, iterate1/2) is now
+clearly the highest-value target; remove (~10%) second; random_get is no longer the headline gap.
+
 ## Reproduce
-`bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`.
+`bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`. **Build with the full-opt flag set above (2026-07-24 baseline), not bare `/O2`.**
