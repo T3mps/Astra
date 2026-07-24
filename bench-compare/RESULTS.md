@@ -743,5 +743,193 @@ signal does not reproduce as a consistent direction under honest flags on quiet 
 **Decision: `growDivisor = 2` NSDMI stands. Item closed** — reopen only with a workload argument
 (e.g. a memory-pressure profile favoring slower ramps), not a throughput one.
 
+## Definitive 3-way scoreboard (2026-07-24)
+
+Full-surface follow-up to the 7-op head-to-head above: `bench-compare/` was extended
+(`docs/superpowers/specs/2026-07-24-definitive-3way-benchmark-design.md`, user-approved) to
+mirror Astra's shipped `benchmark/Benchmark.cpp` wherever a fair cross-library idiom exists —
+15 Tier-A 3-way ops and 5 Tier-B 2-way (Astra/flecs) ops, at 1M (iteration family also at 10M,
+relations at 100K nodes) — and run as one interleaved campaign at scale. This section
+supersedes the 7-op scoreboard above as the record for every op it covers; the 7-op section is
+left in place for its own historical checkpoints (Lever 1/2, Phase 2, growDivisor).
+
+### Campaign conditions
+
+- **Build:** the full-opt Dist-parity recipe, identical across all three libraries —
+  `/std:c++20 /O2 /GL /DNDEBUG /D__SSE2__ /D__SSE4_2__ /arch:AVX /fp:fast /Zc:__cplusplus /EHsc
+  /nologo ... /link /LTCG`, `+/DASTRA_BUILD_DIST` for Astra, plus Astra-only
+  `/I..\include /I..\vendor\Mosaic\include /I..\tests` (the `/tests` include is a scheduler-op
+  dependency — Astra's `ParallelForEach`/`SystemScheduler` benches reuse the shipped test
+  suite's reference `IWorkScheduler`, `Astra::Testing::TestWorkerPool`, same as
+  `benchmark/Benchmark.cpp`'s own `BenchPool()`). flecs linked against the pre-built
+  `flecs.obj` (not rebuilt); EnTT header-only. All three exes rebuilt fresh immediately before
+  the campaign (2026-07-24 18:35-18:36 local) against dev `f0734cb` (the two commits on top of
+  the `8878112` perf baseline are docs-only — spec + plan — no library code changed; verified
+  `git diff --stat 8878112 HEAD -- include/` empty).
+- **Cross-lib validation (Step 1):** all three exes run once (`definitive_smoke.csv`,
+  `round0,` prefix) and fed through `analyze_definitive.py`'s items-processed check —
+  **PASS, zero mismatches** across every 3-way op (create/create_batch/add_component/
+  remove_component/add_batch/remove_batch/destroy/iterate1/iterate5/iterate2_half/
+  iterate2_one/random_get/get_multi) and every 2-way op (iterate2/iterate3 astra-vs-flecs;
+  relations_children/descendants/ancestors, system_tick_seq, parallel_iterate2). No fix-up
+  needed before the campaign.
+- **Campaign:** 6 interleaved rounds, `astra → flecs → entt` per round, each exe's full stdout
+  captured and prefixed `roundN,` into `definitive_campaign.csv` (432 rows total, 18 exe
+  invocations, each its own foreground pass, exit code 0 every time).
+- **Machine load evidence (`typeperf "\Processor(_Total)\% Processor Time"`, 8 samples/2s):**
+  - Pre-campaign: 13.6, 11.9, 9.8, 10.0, 9.8, 7.0, 8.5, 9.8 — avg **≈10.1%**, quiet.
+  - Mid-campaign (immediately after round 3): 41.0, 8.6, 12.8, 8.5, 10.4, 8.9, 7.8, 9.4 — avg
+    ≈13.4%, driven by one transient first-sample spike; 7-of-8 samples avg ≈9.5%.
+  - Post-campaign (immediately after round 6): 61.5, 55.9, 25.4, 23.1, 37.0, 33.9, 47.8, 29.5 —
+    avg ≈39.1%, clearly elevated; a re-check ~40s later showed it settling (36.6→17.0, avg
+    ≈18.6%). This spike happened **after** round 6's last measurement completed, not during it.
+  - **Round-3 entt outlier, attributed to the mid-campaign spike:** cross-checking individual
+    ops across all 6 rounds shows round 3's **entt** invocation specifically elevated on
+    `create` (83.08 vs ~48 the other 5 rounds), `create_batch` (64.40, though round 5 also ran
+    high at 59.81 — see below), `add_component` (22.48 vs ~15-16), `add_batch` (20.95 vs
+    ~14-15), `remove_component` (20.01 vs ~16), `iterate1` (1.726 vs ~0.5), `iterate2_half`
+    (3.934 vs ~1.2), `random_get` (82.93 vs ~30), `get_multi` (150.43 vs ~65) — the mid-campaign
+    typeperf check was taken immediately after round 3's entt run finished, and its first
+    sample (41.0%) is consistent with a spike landing inside that exe invocation. **Astra and
+    flecs's round-3 numbers, and every lib's round 4-6 numbers, are unaffected** (spot-checked
+    across `create`, `iterate1`, `random_get`, `destroy`, `remove_batch` — round 6 in
+    particular tracks rounds 1/2/4/5 tightly, confirming the post-campaign spike began only
+    after the campaign's last measurement). Net effect: entt's reported **bands** (not medians)
+    are honestly widened by this one round on the affected ops — the median-of-6 stays a robust
+    central estimate, and the non-overlapping-band rule (spec Sec.6) correctly withholds a gap
+    claim wherever this widening bridges the astra/entt gap (see random_get, get_multi below).
+    `create_batch`'s additional round-5 elevation (59.81 vs round-3's 64.40, both above the
+    ~42-46 baseline of rounds 1/2/4/6) is unexplained by the load evidence and is disclosed as
+    ordinary run-to-run variance on that op specifically.
+- **Items validation (Step 3):** re-run across the full 432-row campaign CSV, all 6 rounds —
+  **PASS, zero mismatches**, same op set as the Step-1 smoke check.
+- **Op-name note:** entt reports `iterate2`/`iterate3` under `iterate2_view`/`iterate3_view`
+  (plus a bonus owning-group entry `iterate2_group`, kept from the pre-existing file), so the
+  analysis script's data-driven op→libs grouping correctly treats those two ops as **2-way**
+  (astra vs flecs) with entt's numbers reported alongside as informational 1-way context, never
+  fabricated into a false 3-way band.
+
+### Tier-A table (median [min,max] ns/op, 6 rounds; N=1,000,000 unless noted)
+
+| op | N | Astra | flecs | EnTT | verdict |
+|---|---|---|---|---|---|
+| create | 1M | 53.49 [51.99, 55.96] | 90.00 [88.94, 92.17] | 48.38 [47.55, 83.08]* | **astra beats flecs 1.68×** (non-overlap); vs entt: noise (band widened by round-3 spike*) |
+| create_batch | 1M | 34.06 [33.42, 36.85] | 17.17 [16.52, 20.71] | 44.85 [42.60, 64.40]* | **astra behind flecs** (0.50×, non-overlap, tuning target); **astra beats entt 1.32×** (non-overlap) |
+| add_component | 1M | 38.77 [38.36, 40.25] | 50.24 [49.30, 53.28] | 15.90 [14.95, 22.48]* | **astra beats flecs 1.30×** (non-overlap); **astra behind entt** (0.41×, non-overlap, tuning target) |
+| remove_component | 1M | 26.29 [25.49, 27.38] | 32.89 [32.18, 34.35] | 16.22 [16.00, 20.01]* | **astra beats flecs 1.25×** (non-overlap); **astra behind entt** (0.62×, non-overlap, tuning target) |
+| add_batch | 1M | 80.26 [79.30, 81.51] | 93.43 [88.18, 99.22] | 14.56 [13.76, 20.95]* | **astra beats flecs 1.16×** (non-overlap); **astra behind entt** (0.18×, non-overlap, tuning target — deferred-batch idiom, see caveat) |
+| remove_batch | 1M | 62.45 [59.49, 64.43] | 63.63 [61.22, 69.01] | 14.78 [14.48, 17.32] | vs flecs: noise (parity, 1.02×); **astra behind entt** (0.24×, non-overlap, tuning target — deferred-batch idiom, see caveat) |
+| destroy | 1M | 26.14 [25.84, 27.23] | 14.58 [14.06, 15.36] | 47.34 [46.40, 55.47] | **astra behind flecs** (0.56×, non-overlap, tuning target); **astra beats entt 1.81×** (non-overlap) |
+| iterate1 | 1M | 0.461 [0.373, 0.539] | 0.392 [0.368, 0.406] | 0.533 [0.492, 1.726]* | noise vs both (overlap) |
+| iterate1 | 10M | 0.765 [0.698, 0.843] | 0.701 [0.688, 0.892] | 0.990 [0.844, 1.824]* | vs flecs: noise; **astra beats entt 1.29×** (non-overlap) |
+| iterate2 | 1M | 0.980 [0.821, 1.437] | 0.904 [0.794, 1.215] | 2.231 [2.133, 4.272]† (`iterate2_view`) | vs flecs: noise (2-way op); entt informational only (†, different op name) |
+| iterate2 | 10M | 1.171 [1.130, 1.281] | 1.209 [1.156, 1.351] | 2.327 [2.239, 4.302]† | vs flecs: noise; entt informational only (†) |
+| iterate3 | 1M | 1.123 [0.926, 1.404] | 0.933 [0.898, 1.493] | 2.958 [2.838, 5.476]† (`iterate3_view`) | vs flecs: noise (2-way op); entt informational only (†) |
+| iterate3 | 10M | 1.292 [1.271, 1.380] | 1.333 [1.238, 1.615] | 3.114 [2.953, 5.531]† | vs flecs: noise; entt informational only (†) |
+| iterate5 | 1M | 1.450 [1.357, 1.632] | 1.286 [1.033, 1.762] | 5.115 [4.918, 8.489] | vs flecs: noise; **astra beats entt 3.53×** (non-overlap) |
+| iterate5 | 10M | 1.542 [1.488, 1.902] | 1.667 [1.492, 1.960] | 5.148 [4.986, 8.152] | vs flecs: noise; **astra beats entt 3.34×** (non-overlap) |
+| iterate2_half | 1M (items=500K) | 0.273 [0.250, 0.316] | 0.260 [0.242, 0.346] | 1.214 [1.161, 3.934]* | vs flecs: noise; **astra beats entt 4.45×** (non-overlap — the archetype-skip-vs-pool-intersect asymmetry the op was designed to expose) |
+| iterate2_one | 1M (items=1) | 0.000 | 0.000 | 0.000 | all three at/near the timer's resolution floor — not a meaningful differentiator at this scale |
+| random_get | 1M | 56.95 [53.85, 59.33] | 56.76 [52.45, 63.60] | 31.48 [29.27, 82.93]* | **vs flecs: PARITY** (0.997×, overlap) — confirms the 2026-07-24 Lever-1 program closed the historical ~10% gap; vs entt: noise (band widened by round-3 spike*; 5-of-6 rounds show entt ~29-34ns, a real but not campaign-certified advantage) |
+| get_multi | 1M (items=2M) | 114.31 [109.12, 142.79] | 99.90 [95.37, 105.26] | 67.71 [62.81, 150.43]* | **astra behind flecs** (0.87×, non-overlap, tuning target); vs entt: noise (band widened by round-3 spike*; median gap is large — directional signal, not certified) |
+
+\* = round-3-spike-widened band (see Load evidence). † = entt reports this op under a
+different CSV name (`iterate2_view`/`iterate3_view`); the analysis script correctly scores
+this as a 2-way astra/flecs op, entt shown for context only, never forced into a false 3-way
+band.
+
+### Tier-B table (Astra vs flecs only; median [min,max] ns/op, 6 rounds)
+
+| op | N | Astra | flecs | verdict | caveat |
+|---|---|---|---|---|---|
+| relations_children | 100K nodes (items=100) | 0.0160 [0.0150, 0.0160] | 0.0090 [0.0090, 0.0130] | **astra behind** (0.56×, non-overlap, tuning target — weak signal, see caveat) | absolute measured region is ~100 children total per rep (≈900-1600ns); signal is thin relative to typical timer/loop overhead — treat as a directional flag, not a confident regression |
+| relations_descendants | 100K nodes (items=99,999) | 7.325 [6.981, 7.489] | 48.94 [42.20, 70.01] | **astra beats flecs 6.68×** (non-overlap) | disclosed traversal-strategy difference (spec caveat): Astra's cached `ForEachDescendant` vs flecs's recursive `children()` walk — both visit the identical 99,999-node set, the strategies genuinely differ and Astra's caching wins decisively here |
+| relations_ancestors | 100K nodes (items=448,889) | 122.33 [115.81, 125.35] | 76.96 [75.30, 84.07] | **astra behind** (0.63×, non-overlap, tuning target) | both first-class per-leaf walk-ups; a real gap |
+| system_tick_seq | 1M entities × 3 systems (items=3M) | 1.533 [1.504, 1.689] | 1.579 [1.388, 1.964] | noise (parity, 1.03×) | one full tick, 3 lambda systems (movement/damage/heal) vs flecs's 3-system pipeline `progress()` |
+| parallel_iterate2 | 1M | 0.288 [0.239, 0.391] | 0.270 [0.254, 0.361] | noise (overlap) | `hardware_concurrency()` lanes both libs, one unmeasured warm-up |
+| parallel_iterate2 | 10M | 0.850 [0.840, 0.854] | 0.893 [0.876, 0.987] | **astra beats flecs 1.05×** (non-overlap, tight bands) | — |
+| parallel_iterate2_handrolled (entt, informational) | 1M / 10M | — | — | 1.611 [1.298, 2.316] / 1.616 [1.566, 2.138] | EnTT ships no parallel-for; hand-rolled `hw`-way chunked `view.get<T>()` per element (strictly more per-element work than the other two libs' columnar walk — disclosed, never compared as a 3-way op) |
+
+### Per-family verdicts
+
+- **Creation/structural** (create, create_batch, add_component, remove_component, add_batch,
+  remove_batch, destroy): no library wins every op. Astra's strongest lane is per-entity
+  single create/add/remove against **flecs** (1.16-1.68× ahead, all non-overlapping). Astra's
+  weakest lane is **batch/bulk paths against both competitors**: create_batch and destroy both
+  flip — Astra beats entt on these two (1.32×/1.81×) but loses to flecs (0.50×/0.56×); add_batch
+  and remove_batch lose to entt decisively (entt's uniform-value bulk-insert idiom is close to a
+  raw memmove — a hard bar for any archetype-based ECS, disclosed by Tasks 2/3 as the honest
+  "what a user would write" idiom, not a simplified shortcut) while sitting at parity-to-ahead
+  vs flecs's deferred-loop idiom. Net: 4 real tuning targets here (create_batch, destroy,
+  add_component, remove_component, remove_batch — see the explicit list below), each isolated
+  to a specific competitor, not a blanket structural weakness.
+- **Iteration** (iterate1/2/3/5, iterate2_half/one): vs flecs, **every op is within noise**
+  (overlapping bands) except parallel_iterate2@10M — this is a direct, larger-scale
+  confirmation of the perf-optimization program's standing conclusion ("both candidate
+  iteration-lever mechanisms disproven... iterate2/3 measuring at parity-to-noise"), not a new
+  finding. vs entt, Astra is decisively ahead on iterate5 (3.3-3.5×) and iterate2_half (4.45×,
+  the archetype-vs-pool-intersection asymmetry the op exists to expose) and iterate1@10M
+  (1.29×); iterate2_one sits at/below the chrono timer's resolution floor for all three
+  libraries and isn't a meaningful signal at any scale tested.
+- **Random-access** (random_get, get_multi): **random_get vs flecs is now essential parity**
+  (56.95 vs 56.76ns, 0.997×, overlapping) — the strongest confirmation yet that the 2026-07-24
+  Lever-1 (random_get record→chunk-pointer) program closed the historical ~10% Astra-behind-
+  flecs gap at full campaign scale. get_multi vs flecs is a genuine tuning target (0.87×,
+  non-overlapping, ~14% behind). Both ops vs entt show noise (overlapping bands, inflated by
+  the round-3 spike) despite large median gaps in entt's favor — honestly withheld per the
+  non-overlapping-band rule rather than asserted from medians alone.
+- **Relations (Tier B)**: mixed. relations_descendants is Astra's clearest win in the entire
+  campaign (6.68×) — direct evidence the cached-traversal design decision pays off against
+  flecs's recursive walk. relations_ancestors is a real, non-overlapping loss (0.63×).
+  relations_children is also flagged non-overlapping but at a magnitude thin enough (sub-2μs
+  total measured region) that it's reported as a weak/directional signal, not a confident
+  regression.
+- **Scheduler/parallel (Tier B)**: system_tick_seq and parallel_iterate2@1M are both
+  within-noise parity vs flecs; parallel_iterate2@10M is a small but non-overlapping Astra win
+  (1.05×). No tuning targets in this family.
+
+### Remaining comparative tuning targets (non-overlapping bands, Astra behind)
+
+```
+create_batch        @ N=1,000,000   vs flecs  astra 34.06 [33.42,36.85]  flecs 17.17 [16.52,20.71]   (astra +98.4%)
+destroy              @ N=1,000,000   vs flecs  astra 26.14 [25.84,27.23]  flecs 14.58 [14.06,15.36]   (astra +79.3%)
+get_multi            @ N=1,000,000   vs flecs  astra 114.31[109.12,142.79] flecs 99.90[95.37,105.26]  (astra +14.4%)
+relations_ancestors  @ N=100,000     vs flecs  astra 122.33[115.81,125.35] flecs 76.96[75.30,84.07]   (astra +59.0%)
+relations_children   @ N=100,000     vs flecs  astra 0.0160[0.0150,0.0160] flecs 0.0090[0.0090,0.0130] (astra +77.8%, thin-magnitude signal)
+add_batch            @ N=1,000,000   vs entt   astra 80.26 [79.30,81.51]  entt 14.56 [13.76,20.95]    (astra +451.2%, entt bulk-uniform idiom)
+add_component        @ N=1,000,000   vs entt   astra 38.77 [38.36,40.25]  entt 15.90 [14.95,22.48]    (astra +143.8%)
+remove_batch         @ N=1,000,000   vs entt   astra 62.45 [59.49,64.43]  entt 14.78 [14.48,17.32]    (astra +322.6%, entt bulk-uniform idiom)
+remove_component     @ N=1,000,000   vs entt   astra 26.29 [25.49,27.38]  entt 16.22 [16.00,20.01]    (astra +62.1%)
+```
+
+No iteration op, no random-access op, and no scheduler/parallel op appears in this list — every
+non-overlapping loss is confined to the structural (create_batch/destroy/add/remove) and
+relations families. `random_get` — the prior program's single largest open item — is fully
+resolved (parity vs flecs, noise vs entt).
+
+### 19-of-36 shipped-suite mapping
+
+19 of Astra's 36 shipped `benchmark/Benchmark.cpp` cases are mirrored here (6 creation/
+structural + 6 iteration shapes + 1 of 6 parallel + 2 gets + 3 of 5 relations + 1 of 6
+scheduler), **plus 1 new op (`destroy`)** the shipped suite itself lacks — all 20 measured
+successfully across the full 6-round campaign with clean items-parity throughout. 17 cases
+remain excluded as Astra-internal or unpairable:
+
+- **range-for family** — Astra-internal API comparison; its cross-lib equivalents are already
+  the `iterate*` ops.
+- **ForEachLink** — no flecs analog chosen; custom relation pairs exist but a fair shape needs
+  its own design.
+- **SystemScheduler Parallel/ManyIndependent/WithDependencies/CustomExecutor variants** —
+  scheduler-internal shapes with no flecs mapping beyond `system_tick_seq` + `parallel_iterate2`.
+- **ParallelForEachDescendant** — a compound of two already-disclosed Tier-B caveats
+  (traversal-strategy difference + parallel-dispatch difference); no single fair pairing.
+
+### Reproduce (this section)
+
+`bench-compare/bench_{astra,flecs,entt}.cpp` + `bench_common.hpp` (untracked scratch, per
+spec Sec.5.3) implement the full op matrix; `bench-compare/analyze_definitive.py` (untracked)
+performs the items cross-check + median/band computation + ratio tables + tuning-target list
+consumed above. Raw campaign data: `bench-compare/definitive_campaign.csv` (432 rows, untracked).
+
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`. **Build with the full-opt flag set above (2026-07-24 baseline), not bare `/O2`.**
