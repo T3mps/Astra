@@ -109,6 +109,15 @@ namespace Astra
         static constexpr size_t MIN_ARENA_BYTES = kMinArenaBytes;
         static constexpr size_t MAX_ARENA_BYTES = kMaxArenaBytes;
 
+        // Largest single request Allocate can service (see kMaxRequest's
+        // comment above the class for why it is half of MAX_ARENA_BYTES, not
+        // equal to it). Exposed so an owner sizing a request against "the
+        // biggest thing TLSF can hand back" checks against the real ceiling
+        // instead of MAX_ARENA_BYTES -- a request in (MAX_REQUEST_BYTES,
+        // MAX_ARENA_BYTES] would pass an arena-size check yet still be
+        // refused by Allocate.
+        static constexpr size_t MAX_REQUEST_BYTES = kMaxRequest;
+
         Tlsf() = default;
         Tlsf(const Tlsf&) = delete;
         Tlsf& operator=(const Tlsf&) = delete;

@@ -650,7 +650,17 @@ namespace Astra
             m_tlsf.Free(memory);
 
             ASTRA_ASSERT(m_totalChunks.load(std::memory_order_relaxed) > 0, "ReturnChunk without a matching CreateChunk");
-            m_totalChunks.fetch_sub(1, std::memory_order_relaxed);
+            // Saturating decrement in ALL builds, not just Debug: ReturnChunk is
+            // public, and the assert above compiles out in Release/Dist. An
+            // unpaired or foreign call must not underflow m_totalChunks to
+            // SIZE_MAX -- that would make AllocateChunkBytes's `m_totalChunks >=
+            // m_config.maxChunks` gate permanently true, silently bricking the
+            // pool (every future CreateChunk returns nullptr) for good.
+            const size_t liveBefore = m_totalChunks.load(std::memory_order_relaxed);
+            if (liveBefore > 0) ASTRA_LIKELY
+            {
+                m_totalChunks.fetch_sub(1, std::memory_order_relaxed);
+            }
             m_releaseCount.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -664,8 +674,17 @@ namespace Astra
             // could serve" keeps the old reading of totalChunks as pool capacity,
             // which callers use to see that a returned chunk is retained, not
             // released to the OS.
+            //
+            // freeEquivalent is an UPPER BOUND on additional chunks servable
+            // without growing, NOT an achievable count: free bytes can be
+            // scattered as sub-chunk-sized tails across several arenas (TLSF's
+            // boundary tags + good-fit search), so some of this "capacity" may
+            // not be contiguous enough to actually serve a chunk. Do not change
+            // this formula -- MemoryCleanupTest's
+            // `stats2.totalChunks == stats1.totalChunks` assertion depends on
+            // its exact arithmetic.
             const size_t live = m_totalChunks.load(std::memory_order_relaxed);
-            const size_t freeEquivalent = m_tlsf.GetFreeBytes() / m_config.chunkSize;
+            const size_t freeEquivalent = m_tlsf.GetFreeBytes() / m_config.chunkSize;  // upper bound, see above
             snapshot.totalChunks = live + freeEquivalent;
             snapshot.freeChunks = freeEquivalent;
             snapshot.acquireCount = m_acquireCount.load(std::memory_order_relaxed);
@@ -692,34 +711,42 @@ namespace Astra
             SmallVector<void*, 8> releasable;
             m_tlsf.ForEachFullyFreeArena([&releasable](void* base, size_t) { releasable.push_back(base); });
 
-            // Mirror the old block policy: when EVERY arena is free keep one as
-            // reserve to avoid allocation thrashing; otherwise every fully-free
-            // arena can go, because live chunks still hold the others open.
-            const size_t startIndex = (releasable.size() == m_arenas.size() && !releasable.empty()) ? 1 : 0;
+            // Old block-pool policy, restored: always keep ONE fully-free arena
+            // in reserve (anti-thrash) whenever at least one exists -- even
+            // while other arenas are still in use serving live chunks. Only the
+            // remaining fully-free arenas are released.
+            const size_t startIndex = releasable.empty() ? 0 : 1;
             for (size_t i = startIndex; i < releasable.size(); ++i)
             {
                 void* base = releasable[i];
+
+                // Find this pool's own record for the arena BEFORE detaching it
+                // from Tlsf. Tlsf only ever reports arenas this pool registered,
+                // so a miss here would mean the two records have diverged; by
+                // checking first (rather than removing from Tlsf then failing to
+                // find the record) a divergence leaves the arena registered and
+                // owned by Tlsf instead of detaching-and-leaking it with no way
+                // back. Unreachable by construction today.
+                size_t j = 0;
+                for (; j < m_arenas.size(); ++j)
+                {
+                    if (m_arenas[j].memory == base)
+                        break;
+                }
+                if (j >= m_arenas.size()) ASTRA_UNLIKELY
+                {
+                    ASTRA_ASSERT(false, "TLSF reported an arena the pool has no record of");
+                    continue;   // leave it registered in Tlsf: no detach, no leak
+                }
+
                 if (!m_tlsf.RemoveArena(base)) ASTRA_UNLIKELY
                     continue;   // became carved up again: leave it registered
 
-                bool found = false;
-                for (size_t j = 0; j < m_arenas.size(); ++j)
-                {
-                    if (m_arenas[j].memory != base)
-                        continue;
-
-                    result.bytesFreed += m_arenas[j].size;
-                    FreeMemory(m_arenas[j].memory, m_arenas[j].size, m_arenas[j].usedHugePages);
-                    m_arenas[j] = m_arenas.back();
-                    m_arenas.pop_back();
-                    ++result.blocksReleased;
-                    found = true;
-                    break;
-                }
-                // Tlsf only ever reports arenas this pool registered, so a miss
-                // would mean the two records have diverged (and leak the region).
-                ASTRA_ASSERT(found, "Detached a TLSF arena the pool does not own");
-                (void)found;
+                result.bytesFreed += m_arenas[j].size;
+                FreeMemory(m_arenas[j].memory, m_arenas[j].size, m_arenas[j].usedHugePages);
+                m_arenas[j] = m_arenas.back();
+                m_arenas.pop_back();
+                ++result.blocksReleased;
             }
 
             result.blocksKept = m_arenas.size();
@@ -747,7 +774,14 @@ namespace Astra
             // sentinel 16 + rounding; 256 is comfortably safe), and always inside
             // the range AddArena accepts.
             constexpr size_t kArenaOverhead = 256;
-            ASTRA_ASSERT(minBytes + kArenaOverhead <= Tlsf::MAX_ARENA_BYTES, "Chunk request larger than the biggest registerable arena");
+            // Checked against MAX_REQUEST_BYTES (32MB), not MAX_ARENA_BYTES
+            // (64MB): Allocate refuses any request whose internally-rounded
+            // size exceeds MAX_REQUEST_BYTES, so a minBytes in
+            // (MAX_REQUEST_BYTES, MAX_ARENA_BYTES] would pass an assert against
+            // the arena ceiling, register an arena successfully, and then fail
+            // the retry Allocate anyway -- silently, in Release. Harmless at
+            // today's <=1MB chunk sizes; becomes reachable once chunk sizes vary.
+            ASTRA_ASSERT(minBytes + kArenaOverhead <= Tlsf::MAX_REQUEST_BYTES, "Chunk request larger than the largest request TLSF can service");
             size_t want = std::max(m_config.chunksPerBlock * m_config.chunkSize, minBytes + kArenaOverhead);
             want = std::clamp(want, Tlsf::MIN_ARENA_BYTES, Tlsf::MAX_ARENA_BYTES);
 
