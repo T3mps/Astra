@@ -281,25 +281,21 @@ namespace Astra
         template<Component T>
         void AddComponent(Entity entity, const T& component)
         {
-            if (!m_entityManager.IsValid(entity))
-                return;
-                
+            // ArchetypeManager validates the handle (version + archetype); an invalid
+            // entity yields nullptr, so no pre-check is needed here.
             T* newComponent = m_archetypeManager->AddComponent<T>(entity, component);
-            
+
             if (newComponent)
             {
                 m_signalManager.Emit<Events::ComponentAdded>(entity, TypeID<T>::Value(), newComponent);
             }
         }
-        
+
         template<Component T, typename... Args>
         void EmplaceComponent(Entity entity, Args&&... args)
         {
-            if (!m_entityManager.IsValid(entity))
-                return;
-                
             T* component = m_archetypeManager->AddComponent<T>(entity, std::forward<Args>(args)...);
-            
+
             if (component)
             {
                 m_signalManager.Emit<Events::ComponentAdded>(entity, TypeID<T>::Value(), component);
@@ -309,17 +305,23 @@ namespace Astra
         template<Component T>
         bool RemoveComponent(Entity entity)
         {
-            if (!m_entityManager.IsValid(entity))
-                return false;
+            if (m_signalManager.IsSignalEnabled(Signal::ComponentRemoved)) ASTRA_UNLIKELY
+            {
+                // Cold arm: the signal needs the PRE-removal pointer. The validated
+                // GetComponent doubles as the liveness + presence guard (nullptr for
+                // stale handles and absent components alike).
+                T* component = m_archetypeManager->GetComponent<T>(entity);
+                if (!component)
+                    return false;
 
-            T* component = m_archetypeManager->GetComponent<T>(entity);
-            if (!component)
-                return false;
+                // Emit BEFORE removal: the pointer is only valid until the entity
+                // migrates. Handlers must not retain it past their invocation.
+                m_signalManager.Emit<Events::ComponentRemoved>(entity, TypeID<T>::Value(), component);
 
-            // Emit BEFORE removal: the pointer is only valid until the entity
-            // migrates. Handlers must not retain it past their invocation.
-            m_signalManager.Emit<Events::ComponentRemoved>(entity, TypeID<T>::Value(), component);
+                return m_archetypeManager->RemoveComponent<T>(entity);
+            }
 
+            // Hot arm: ArchetypeManager validates once (version + archetype + mask).
             return m_archetypeManager->RemoveComponent<T>(entity);
         }
         
@@ -477,9 +479,6 @@ namespace Astra
          */
         bool AddComponentByID(Entity entity, ComponentID componentId, const void* data, size_t dataSize)
         {
-            if (!m_entityManager.IsValid(entity))
-                return false;
-
             bool result = m_archetypeManager->AddComponentByID(entity, componentId, data, dataSize);
 
             if (result && m_signalManager.IsSignalEnabled(Signal::ComponentAdded))
@@ -539,9 +538,6 @@ namespace Astra
          */
         bool RemoveComponentByID(Entity entity, ComponentID componentId)
         {
-            if (!m_entityManager.IsValid(entity))
-                return false;
-
             // Get component pointer before removal for signal emission
             void* componentPtr = nullptr;
             if (m_signalManager.IsSignalEnabled(Signal::ComponentRemoved))
@@ -569,7 +565,7 @@ namespace Astra
                 }
             }
 
-            if (componentPtr && m_signalManager.IsSignalEnabled(Signal::ComponentRemoved))
+            if (componentPtr)
             {
                 // Emit BEFORE removal so the pointer is still valid.
                 m_signalManager.Emit<Events::ComponentRemoved>(entity, componentId, componentPtr);

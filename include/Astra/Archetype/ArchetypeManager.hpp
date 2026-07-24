@@ -535,6 +535,13 @@ namespace Astra
                 if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
                     return nullptr;
 
+                // Defense-in-depth (Lever 1 final-review Minor #1): a record can hold
+                // archetype != nullptr with chunk == nullptr only via SetEntityLocation
+                // fed a degenerate location -- unreachable today, but the ByID sites
+                // all guard, so the typed path matches them rather than null-deref.
+                if (!rec->chunk) ASTRA_UNLIKELY
+                    return nullptr;
+
                 ASTRA_ASSERT(rec->chunk ==
                              rec->archetype->GetChunks()[rec->location.GetChunkIndex()].get(),
                              "EntityRecord chunk/location desync");
