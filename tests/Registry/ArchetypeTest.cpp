@@ -1396,3 +1396,59 @@ TEST_F(ArchetypeTest, SmallArchetypeStaysAtMinimumChunk)
     EXPECT_EQ(archetype.GetChunks().size(), 1u);
     EXPECT_EQ(archetype.GetChunks()[0]->GetChunkBytes(), 4096u);
 }
+
+// m_totalCapacity after a trailing-chunk drop (final-review coverage gap).
+// RemoveEntity() already auto-drops the LAST chunk when it becomes empty (see
+// the m_chunks.size() - 1 check in RemoveEntity) -- this pins that the running
+// m_totalCapacity total the drop keeps (via PopBackChunk) actually decreases
+// and stays exactly the sum of the surviving chunks' capacities, rather than
+// silently drifting above the real total.
+TEST_F(ArchetypeTest, TotalCapacityDecreasesWhenTrailingChunkDrops)
+{
+    using namespace Astra::Test;
+
+    auto mask = Astra::MakeComponentMask<Position>();
+    Astra::Archetype archetype(mask);
+    archetype.SetComponentPool(&componentPool);
+    archetype.Initialize(GetDescriptors(mask));
+    ASSERT_TRUE(archetype.IsInitialized());
+
+    const size_t firstCap = archetype.GetChunks()[0]->GetCapacity();
+
+    // Fill the first chunk exactly, then add a few more so a second (trailing)
+    // chunk exists.
+    constexpr size_t kExtra = 5;
+    const size_t totalToAdd = firstCap + kExtra;
+    for (size_t i = 0; i < totalToAdd; ++i)
+    {
+        archetype.AddEntity(Astra::Entity(static_cast<Astra::Entity::StorageType>(i), 1));
+    }
+    ASSERT_EQ(archetype.GetChunks().size(), 2u);
+    ASSERT_EQ(archetype.GetChunks()[1]->GetCount(), kExtra);
+
+    const size_t secondCap = archetype.GetChunks()[1]->GetCapacity();
+    const size_t capacityBeforeRemoval = archetype.GetTotalCapacity();
+    EXPECT_EQ(capacityBeforeRemoval, firstCap + secondCap);
+
+    // Drain the trailing chunk: RemoveEntity does an in-chunk swap-and-pop, so
+    // repeatedly removing slot 0 empties it entity-by-entity. The final
+    // removal empties the chunk while it is still the tail
+    // (chunkIndex == m_chunks.size() - 1), which triggers RemoveEntity's
+    // auto-drop (PopBackChunk).
+    const size_t lastChunkIndex = archetype.GetChunks().size() - 1;
+    for (size_t i = 0; i < kExtra; ++i)
+    {
+        archetype.RemoveEntity(Astra::EntityLocation::Create(lastChunkIndex, 0));
+    }
+
+    EXPECT_EQ(archetype.GetChunks().size(), 1u);
+    EXPECT_LT(archetype.GetTotalCapacity(), capacityBeforeRemoval);
+    EXPECT_EQ(archetype.GetTotalCapacity(), firstCap);
+
+    size_t summed = 0;
+    for (const auto& chunk : archetype.GetChunks())
+    {
+        summed += chunk->GetCapacity();
+    }
+    EXPECT_EQ(archetype.GetTotalCapacity(), summed);
+}

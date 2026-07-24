@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <vector>
 #include <Astra/Astra.hpp>
 
 // Large-payload variant used by LoadHonorsChunkPoolConfig and
@@ -91,4 +92,67 @@ TEST(ConfigPreservation, DefaultConfigStoresComponentAboveMinChunk)
     EXPECT_FLOAT_EQ(stored->x, 111.0f);
     EXPECT_FLOAT_EQ(stored->y, 222.0f);
     EXPECT_FLOAT_EQ(stored->z, 333.0f);
+}
+
+// Regression coverage for CompactChunks' fit-one-entity floor (final-review
+// minor fix). ConfigBigPos (6000 bytes, alignmentOverhead == 0 since it is the
+// archetype's only component) ramps its chunk capacities SLOWLY under the
+// default pool (divisor 2, 4KB min, 512KB max): capacity is 1 for the first
+// several chunks (raw = totalCapacity*6000/2 stays below 6000 until
+// totalCapacity > 4), so 64 entities added in sequence naturally spread across
+// ~12 small, mostly-single-occupant chunks before the last one starts holding
+// more than one entity.
+//
+// Destroying every entity but the first (in ascending order) empties every
+// chunk except chunk 0 (the survivor's) and the true trailing chunk (whose
+// single occupant is destroyed last, auto-popping it via RemoveEntity's
+// trailing-empty-chunk check) -- but every OTHER now-empty chunk is a middle
+// chunk, so it is retained rather than dropped. That leaves a fragmented
+// archetype: 1 live entity spread across a double-digit chunk count, i.e.
+// GetChunks().size() > 1 and GetFragmentationLevel() far above the default
+// 0.5 Defragment() threshold, so the Registry hands this straight to
+// Archetype::CompactChunks().
+//
+// Pre-fix, CompactChunks' targetBytes for this state is
+// clamp(1*6000/2, 4096, 524288) = clamp(3000, 4096, 524288) = 4096 -- which is
+// LESS than the 6000-byte entity, so ComputeCapacityForBytes(4096) == 0 and
+// compaction silently aborts every time (entitiesMoved == 0): this archetype
+// could never be compacted. Post-fix, flooring at oneEntityBytes (6000) before
+// the clamp yields targetBytes == 6000, capacity == 1, and compaction
+// succeeds (entitiesMoved == 1), preserving the survivor's data.
+TEST(ConfigPreservation, CompactChunksFitsOneEntityAcrossFragmentedBigComponentChunks)
+{
+    Astra::Registry reg;
+
+    constexpr int kCount = 64;
+    std::vector<Astra::Entity> entities;
+    entities.reserve(kCount);
+    for (int i = 0; i < kCount; ++i)
+    {
+        entities.push_back(reg.CreateEntityWith(ConfigBigPos{float(i), float(i) * 2.0f, float(i) * 3.0f}));
+        ASSERT_TRUE(entities.back().IsValid());
+    }
+
+    // Destroy every entity except the first, ascending order: this leaves the
+    // survivor alone in chunk 0 and empties every other chunk (the true
+    // trailing chunk auto-pops when its lone occupant is destroyed last;
+    // every earlier chunk was a middle chunk when emptied and is retained).
+    constexpr int survivorIndex = 0;
+    for (int i = 0; i < kCount; ++i)
+    {
+        if (i != survivorIndex)
+        {
+            reg.DestroyEntity(entities[static_cast<size_t>(i)]);
+        }
+    }
+    ASSERT_EQ(reg.Size(), 1u);
+
+    auto result = reg.Defragment();
+    EXPECT_EQ(result.entitiesMoved, 1u) << "CompactChunks aborted -- fit-one-entity floor regressed";
+
+    auto* pos = reg.GetComponent<ConfigBigPos>(entities[static_cast<size_t>(survivorIndex)]);
+    ASSERT_NE(pos, nullptr);
+    EXPECT_FLOAT_EQ(pos->x, float(survivorIndex));
+    EXPECT_FLOAT_EQ(pos->y, float(survivorIndex) * 2.0f);
+    EXPECT_FLOAT_EQ(pos->z, float(survivorIndex) * 3.0f);
 }

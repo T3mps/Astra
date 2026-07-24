@@ -168,19 +168,6 @@ namespace Astra
             m_chunks.pop_back();
         }
 
-        // Recomputes the running capacity sum from scratch. Used by the paths that
-        // remove chunks in bulk (defragmentation) instead of one at a time.
-        void RecomputeTotalCapacity() noexcept
-        {
-            size_t total = 0;
-            for (const auto& chunk : m_chunks)
-            {
-                if (chunk) ASTRA_LIKELY
-                    total += chunk->GetCapacity();
-            }
-            m_totalCapacity = total;
-        }
-
     public:
         void Initialize(const std::vector<ComponentDescriptor>& componentDescriptors)
         {
@@ -1126,13 +1113,26 @@ namespace Astra
                 return {0, std::move(newLocations)};
 
             const size_t oldChunkCount = m_chunks.size();
+            // Fit-one-entity floor (mirrors NextChunkBytes): without it, a fragmented
+            // low-live-count archetype whose per-entity footprint exceeds the raw
+            // liveBytes/divisor value would compute a targetBytes too small to hold
+            // even one entity, so ComputeCapacityForBytes(targetBytes) == 0 below and
+            // compaction aborts every time it is tried -- a silent permanent no-op for
+            // that archetype. Flooring the pre-clamp value at oneEntityBytes (then
+            // clamping min/max, same order NextChunkBytes uses -- clamping oneEntityBytes
+            // directly could otherwise present std::clamp with lo > hi when
+            // oneEntityBytes exceeds maxChunkBytes) guarantees a chunk sized to fit
+            // >= 1 entity is always attempted; components bigger than the pool's cap
+            // still legitimately hit capacity == 0 below and abort.
             const size_t targetBytes = [this]
             {
                 if (!m_chunkPool || m_perEntitySize == 0)
                     return m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
                 const size_t liveBytes = m_entityCount * m_perEntitySize;
-                return std::clamp(liveBytes / m_chunkPool->GetGrowDivisor(),
-                                  m_chunkPool->GetMinChunkBytes(), m_chunkPool->GetMaxChunkBytes());
+                const size_t raw = liveBytes / m_chunkPool->GetGrowDivisor();
+                const size_t oneEntityBytes = m_perEntitySize + m_alignmentOverhead;
+                const size_t target = std::max(raw, oneEntityBytes);
+                return std::clamp(target, m_chunkPool->GetMinChunkBytes(), m_chunkPool->GetMaxChunkBytes());
             }();
 
             // Build the new chunk list on the side; on ANY allocation failure,
