@@ -61,6 +61,7 @@ namespace Astra
         bool is_nothrow_move_constructible;
         bool is_nothrow_default_constructible;
         bool is_trivially_default_constructible;
+        bool is_trivially_destructible = false;   // default false = always-call-fn-ptr (safe for hand-built descriptors)
         bool is_empty;
         ConstructFn* defaultConstruct;
         DestructFn* destruct;
@@ -155,6 +156,10 @@ namespace Astra
         inline void Destruct(void* ptr) const
         {
             if (size == 0) return;  // empty (tag) component: nothing to destruct (mirrors DefaultConstruct)
+            if (is_trivially_destructible)
+            {
+                return;  // trivial destructor is a no-op: skip the indirect call entirely
+            }
             destruct(ptr);
         }
     };

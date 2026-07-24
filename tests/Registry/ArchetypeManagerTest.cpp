@@ -1037,3 +1037,26 @@ TEST_F(ArchetypeManagerTest, RemovePathTrivialMovePreservesValues)
     EXPECT_FLOAT_EQ(p->z, 7.0f);
     EXPECT_EQ(manager->GetComponent<Velocity>(e), nullptr);  // Velocity removed
 }
+
+// B1: ComponentDescriptor::is_trivially_destructible mirrors is_trivially_copyable /
+// is_trivially_default_constructible -- the trait-driven factory in ComponentRegistry
+// must populate it per-type so Destruct() can skip the indirect fn-ptr call for
+// trivially-destructible components (Position) while still routing non-trivial ones
+// (Tracked, which has a user-defined destructor doing s_live bookkeeping) through
+// the real destructor.
+TEST_F(ArchetypeManagerTest, DescriptorTrivialDestructibilityFlags)
+{
+    using namespace Astra::Test;
+    // Position: plain aggregate -> trivially destructible.
+    // Tracked: user-defined destructor (s_live bookkeeping) -> NOT trivially destructible.
+    componentRegistry->RegisterComponent<Position>();
+    componentRegistry->RegisterComponent<Tracked>();
+    const auto* posDesc = componentRegistry->GetComponentDescriptor(Astra::TypeID<Position>::Value());
+    const auto* trkDesc = componentRegistry->GetComponentDescriptor(Astra::TypeID<Tracked>::Value());
+    ASSERT_NE(posDesc, nullptr);
+    ASSERT_NE(trkDesc, nullptr);
+    EXPECT_TRUE(posDesc->is_trivially_destructible);
+    EXPECT_FALSE(trkDesc->is_trivially_destructible);
+    static_assert(std::is_trivially_destructible_v<Position>);
+    static_assert(!std::is_trivially_destructible_v<Tracked>);
+}
