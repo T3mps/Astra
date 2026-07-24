@@ -61,6 +61,13 @@ namespace Astra
             size_t maxChunks = 4096;
             size_t initialBlocks = 0;
             bool useHugePages = true;
+
+            // Grow-as-populate sizing policy (Phase 2 Unit C part 2): each NEW
+            // chunk an archetype appends is sized from its current data footprint,
+            // clamped to [minChunkBytes, maxChunkBytes]. See Archetype::NextChunkBytes.
+            size_t minChunkBytes = MIN_CHUNK_SIZE;    // 4KB - first/smallest chunk
+            size_t maxChunkBytes = 512 * 1024;        // sizing cap (study: 512KB, not 1MB)
+            size_t growDivisor = 2;                   // chunk ~ archetypeBytes / growDivisor
         };
         
         struct Stats
@@ -563,6 +570,10 @@ namespace Astra
         {
             ASTRA_ASSERT(m_config.chunkSize >= MIN_CHUNK_SIZE && m_config.chunkSize <= MAX_CHUNK_SIZE, "Chunk size must be between 4KB and 1MB");
             ASTRA_ASSERT((m_config.chunkSize & (m_config.chunkSize - 1)) == 0, "Chunk size must be a power of 2");
+            ASTRA_ASSERT(m_config.minChunkBytes >= MIN_CHUNK_SIZE, "minChunkBytes below the pool's absolute floor");
+            ASTRA_ASSERT(m_config.maxChunkBytes <= MAX_CHUNK_SIZE, "maxChunkBytes above the pool's absolute ceiling");
+            ASTRA_ASSERT(m_config.minChunkBytes <= m_config.maxChunkBytes, "minChunkBytes must not exceed maxChunkBytes");
+            ASTRA_ASSERT(m_config.growDivisor >= 1, "growDivisor must be at least 1");
 
             if (m_config.chunksPerBlock == 0)
             {
@@ -674,6 +685,9 @@ namespace Astra
         }
 
         ASTRA_NODISCARD size_t GetChunkSize() const { return m_config.chunkSize; }
+        ASTRA_NODISCARD size_t GetMinChunkBytes() const noexcept { return m_config.minChunkBytes; }
+        ASTRA_NODISCARD size_t GetMaxChunkBytes() const noexcept { return m_config.maxChunkBytes; }
+        ASTRA_NODISCARD size_t GetGrowDivisor() const noexcept { return m_config.growDivisor; }
 
         ASTRA_NODISCARD Stats GetStats() const
         {

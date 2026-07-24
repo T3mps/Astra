@@ -1339,3 +1339,58 @@ TEST_F(ArchetypeTest, TotalCapacityTracksChunkCreation)
     }
     EXPECT_EQ(archetype.GetTotalCapacity(), summed);
 }
+
+// Grow-as-populate (Phase 2 Unit C part 2): each new chunk is sized from the
+// archetype's current data footprint, clamped to [minChunkBytes, maxChunkBytes].
+// The first chunk of any non-zero-size archetype is always empty (m_totalCapacity
+// == 0), so it clamps to the minimum; later chunks ramp geometrically as the
+// archetype accumulates entities.
+TEST_F(ArchetypeTest, GrowAsPopulateRampsChunkBytes)
+{
+    using namespace Astra::Test;
+
+    auto mask = Astra::MakeComponentMask<Position>();
+    Astra::Archetype archetype(mask);
+    archetype.SetComponentPool(&componentPool);
+    archetype.Initialize(GetDescriptors(mask));
+    ASSERT_TRUE(archetype.IsInitialized());
+
+    // First chunk: archetype empty -> clamps to minChunkBytes (4KB).
+    const auto& chunks = archetype.GetChunks();
+    ASSERT_FALSE(chunks.empty());
+    EXPECT_EQ(chunks[0]->GetChunkBytes(), 4096u);
+
+    // Populate enough to force several chunks; sizes must be non-decreasing
+    // and eventually exceed the first chunk's size (the geometric ramp).
+    for (uint32_t i = 0; i < 20000; ++i)
+    {
+        archetype.AddEntity(Astra::Entity(i, 1));
+    }
+    ASSERT_GE(chunks.size(), 3u);
+    for (size_t c = 1; c < chunks.size(); ++c)
+    {
+        EXPECT_GE(chunks[c]->GetChunkBytes(), chunks[c - 1]->GetChunkBytes())
+            << "chunk " << c << " shrank";
+    }
+    EXPECT_GT(chunks.back()->GetChunkBytes(), chunks[0]->GetChunkBytes());
+}
+
+// A small archetype that never exceeds the first chunk's capacity must stay
+// pinned at the minimum chunk size -- ramping only kicks in once a chunk fills.
+TEST_F(ArchetypeTest, SmallArchetypeStaysAtMinimumChunk)
+{
+    using namespace Astra::Test;
+
+    auto mask = Astra::MakeComponentMask<Position>();
+    Astra::Archetype archetype(mask);
+    archetype.SetComponentPool(&componentPool);
+    archetype.Initialize(GetDescriptors(mask));
+    ASSERT_TRUE(archetype.IsInitialized());
+
+    for (uint32_t i = 0; i < 100; ++i)   // 100 x 12B ~ 1.2KB: fits chunk 0
+    {
+        archetype.AddEntity(Astra::Entity(i, 1));
+    }
+    EXPECT_EQ(archetype.GetChunks().size(), 1u);
+    EXPECT_EQ(archetype.GetChunks()[0]->GetChunkBytes(), 4096u);
+}

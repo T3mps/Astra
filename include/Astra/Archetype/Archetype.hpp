@@ -102,6 +102,22 @@ namespace Astra
             return usable / m_perEntitySize;
         }
 
+        // Grow-as-populate (Phase 2 Unit C part 2): size each NEW chunk from the
+        // archetype's current data footprint. Empty archetype -> minChunkBytes;
+        // geometric ramp (~1.5x total per chunk at divisor 2) toward maxChunkBytes.
+        // Zero-size archetypes keep the legacy fixed chunk size (entities live in
+        // the side vector; there is nothing to ramp).
+        ASTRA_NODISCARD size_t NextChunkBytes() const noexcept
+        {
+            if (!m_chunkPool)
+                return ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+            if (m_perEntitySize == 0)
+                return m_chunkPool->GetChunkSize();
+            const size_t dataBytes = m_totalCapacity * m_perEntitySize;
+            const size_t raw = dataBytes / m_chunkPool->GetGrowDivisor();
+            return std::clamp(raw, m_chunkPool->GetMinChunkBytes(), m_chunkPool->GetMaxChunkBytes());
+        }
+
         // THE single chunk-creation path: computes the chunk's exact capacity from
         // its byte size, allocates it, and keeps m_totalCapacity in step. Returns
         // nullptr (never throws) when no layout is possible or the pool is out.
@@ -185,7 +201,9 @@ namespace Astra
             m_perEntitySize = perEntitySize;
             m_alignmentOverhead = alignmentOverhead;
 
-            const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+            // Grow-as-populate: the archetype is empty (m_totalCapacity == 0), so
+            // this always clamps to minChunkBytes for non-zero-size archetypes.
+            const size_t chunkBytes = NextChunkBytes();
 
             // A single entity's footprint must fit in the usable chunk space. The old
             // code clamped the per-chunk count to 1 and proceeded even when
@@ -252,10 +270,12 @@ namespace Astra
                     return locations;
                 }
 
-                const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                // Recompute NextChunkBytes() every iteration (not hoisted): each
+                // appended chunk grows m_totalCapacity, so sizes must ramp within
+                // this one batch, not just across separate AddEntities calls.
                 while (remainingCapacity < count)
                 {
-                    ArchetypeChunk* chunk = AppendChunk(chunkBytes);
+                    ArchetypeChunk* chunk = AppendChunk(NextChunkBytes());
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         return locations;
@@ -319,10 +339,10 @@ namespace Astra
                     return locations;
                 }
 
-                const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                // Recompute NextChunkBytes() every iteration -- see AddEntities.
                 while (remainingCapacity < count)
                 {
-                    ArchetypeChunk* chunk = AppendChunk(chunkBytes);
+                    ArchetypeChunk* chunk = AppendChunk(NextChunkBytes());
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         return locations;
@@ -659,11 +679,11 @@ namespace Astra
 
             if (required > m_totalCapacity) ASTRA_UNLIKELY
             {
-                // Vector-reserve estimate only: chunk capacities may differ, so
-                // size the estimate off a freshly grown chunk's capacity and let
-                // the actual growth paths append however many are really needed.
-                const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
-                const size_t perChunk = std::max<size_t>(1, ComputeCapacityForBytes(chunkBytes));
+                // Vector-reserve estimate only: chunk capacities may differ under
+                // grow-as-populate ramping, so this sizes off the NEXT chunk's
+                // projected capacity and lets the actual growth paths append
+                // however many are really needed.
+                const size_t perChunk = std::max<size_t>(1, ComputeCapacityForBytes(NextChunkBytes()));
                 const size_t neededChunks = (required - m_totalCapacity + perChunk - 1) / perChunk;
                 m_chunks.reserve(m_chunks.size() + neededChunks);
             }
@@ -881,8 +901,13 @@ namespace Astra
             }
 
             // Validate that the saved per-chunk layout fits the pool we will
-            // allocate from — a save produced with a larger chunkSize must
-            // fail cleanly instead of overflowing chunk memory.
+            // allocate from — a save produced with a larger chunk than this pool
+            // can ever produce must fail cleanly instead of overflowing chunk
+            // memory. Bound against the pool's grow-as-populate CEILING
+            // (maxChunkBytes), not its legacy fixed chunkSize: chunks are written
+            // at whatever size the archetype had ramped to at save time (up to
+            // maxChunkBytes), so a save with large ramped chunks must still load;
+            // old 16KB-era saves still pass, since 16KB < the 512KB default cap.
             {
                 size_t perEntitySize = 0;
                 size_t nonEmptyComponents = 0;
@@ -895,8 +920,8 @@ namespace Astra
                 size_t alignmentOverhead = nonEmptyComponents > 1
                     ? (nonEmptyComponents - 1) * CACHE_LINE_SIZE
                     : 0;
-                size_t poolChunkSize = componentPool ? componentPool->GetChunkSize()
-                                                     : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                size_t poolChunkSize = componentPool ? componentPool->GetMaxChunkBytes()
+                                                     : 512 * 1024;
                 if (static_cast<size_t>(entitiesPerChunk) * perEntitySize + alignmentOverhead > poolChunkSize)
                 {
                     return ResultType::Err(SerializationError::SizeMismatch);
@@ -1275,13 +1300,13 @@ namespace Astra
 
                 // All-or-nothing growth, as before: if any chunk in the run cannot
                 // be allocated, unwind the ones already appended so a failed batch
-                // move leaves the archetype exactly as it found it.
-                const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
+                // move leaves the archetype exactly as it found it. NextChunkBytes()
+                // is recomputed every iteration so sizes ramp within this batch.
                 const size_t chunksBefore = m_chunks.size();
 
                 while (remainingCapacity < count)
                 {
-                    ArchetypeChunk* chunk = AppendChunk(chunkBytes);
+                    ArchetypeChunk* chunk = AppendChunk(NextChunkBytes());
                     if (!chunk) ASTRA_UNLIKELY
                     {
                         // Failed to allocate all required chunks - return empty to indicate failure
@@ -1472,8 +1497,7 @@ namespace Astra
                 }
             }
             
-            const size_t chunkBytes = m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
-            if (!AppendChunk(chunkBytes)) ASTRA_UNLIKELY
+            if (!AppendChunk(NextChunkBytes())) ASTRA_UNLIKELY
             {
                 return {INVALID_CHUNK_INDEX, false};
             }
