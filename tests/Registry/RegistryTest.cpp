@@ -752,3 +752,61 @@ TEST_F(RegistryTest, DefragmentBalancesMoveOnlyLifetimes)
         EXPECT_EQ(t->value, int(i));
     }
 }
+
+// Characterization tests for GetComponent, pinning per-entity VALUE correctness
+// (not just non-null) across swap-remove, defragment/compaction, in-range-absent,
+// and stale-handle paths. These lock current behavior ahead of the hot-path rewrite
+// that reads rec->chunk directly: a wrong cached chunk pointer would surface here as
+// an entity reading a NEIGHBOR's value, which the per-entity x-value asserts catch.
+TEST_F(RegistryTest, GetComponentAfterSwapRemove)
+{
+    using namespace Astra::Test;
+    std::vector<Astra::Entity> es;
+    for (int i = 0; i < 50; ++i)
+    {
+        auto e = registry->CreateEntity();
+        registry->EmplaceComponent<Position>(e, float(i), 0.f, 0.f);
+        es.push_back(e);
+    }
+    registry->DestroyEntity(es[10]);              // former last entity swaps into slot 10
+    for (int i = 0; i < 50; ++i)
+    {
+        if (i == 10) continue;
+        auto* p = registry->GetComponent<Position>(es[i]);
+        ASSERT_NE(p, nullptr) << "i=" << i;
+        EXPECT_FLOAT_EQ(p->x, float(i));          // each entity still reads ITS OWN value
+    }
+}
+
+TEST_F(RegistryTest, GetComponentAfterDefragment)
+{
+    using namespace Astra::Test;
+    std::vector<Astra::Entity> es;
+    for (int i = 0; i < 60; ++i)
+    {
+        auto e = registry->CreateEntity();
+        registry->EmplaceComponent<Position>(e, float(i), 0.f, 0.f);
+        es.push_back(e);
+    }
+    for (int i = 0; i < 60; i += 2)
+        registry->DestroyEntity(es[i]);
+    registry->Defragment();                       // CompactChunks moves survivors
+    for (int i = 1; i < 60; i += 2)
+    {
+        auto* p = registry->GetComponent<Position>(es[i]);
+        ASSERT_NE(p, nullptr) << "i=" << i;
+        EXPECT_FLOAT_EQ(p->x, float(i));
+    }
+}
+
+TEST_F(RegistryTest, GetComponentAbsentAndStale)
+{
+    using namespace Astra::Test;
+    auto e = registry->CreateEntity();
+    registry->EmplaceComponent<Position>(e, 1.f, 2.f, 3.f);
+    EXPECT_EQ(registry->GetComponent<Velocity>(e), nullptr);   // in-range absent (idToColumn < 0 path)
+    auto dead = registry->CreateEntity();
+    registry->EmplaceComponent<Position>(dead, 9.f, 9.f, 9.f);
+    registry->DestroyEntity(dead);
+    EXPECT_EQ(registry->GetComponent<Position>(dead), nullptr); // stale handle (version guard)
+}

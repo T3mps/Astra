@@ -36,6 +36,17 @@ TEST(EmptyTag, MigrationAndRemovalPathsAreSafe)
     ASSERT_NE(p, nullptr);
 }
 
+TEST(EmptyTag, GetTagPresentAndAbsent)
+{
+    Astra::Registry reg;
+    auto a = reg.CreateEntity();
+    reg.AddComponent<Tag>(a, Tag{});
+    EXPECT_NE(reg.GetComponent<Tag>(a), nullptr);   // present tag: shared static instance
+    auto b = reg.CreateEntity();
+    reg.AddComponent<TPos>(b, TPos{1.f, 2.f, 3.f});
+    EXPECT_EQ(reg.GetComponent<Tag>(b), nullptr);   // absent tag: mask-tested path says no
+}
+
 TEST(EmptyTag, BatchAddTagComponentIsSafe)
 {
     Astra::Registry reg;
