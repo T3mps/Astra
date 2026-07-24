@@ -280,3 +280,49 @@ edge-invalidation flatten; consuming `ArchetypeColumnMeta::isComplex` in a whole
 **Tuning knobs exposed as named constants (not magic numbers):** `GROW_DIVISOR` (2),
 `COMPACT_THRESHOLD` (0.5), `MIN_CHUNK` (4KB), `MAX_CHUNK` (512KB), TLSF `FL_INDEX_MAX` /
 `SL_INDEX_COUNT_LOG2`, arena base size.
+
+---
+
+## Results (2026-07-23, Task 7 validation, branch `perf/phase-2-dynamic-chunk-sizing` @ `ae40c9b`)
+
+Full data, tables, and the machine-state caveat are in `bench-compare/RESULTS.md` ("Phase 2 — dynamic
+chunk sizing"). Summary against this spec's predictions:
+
+- **3-config suite:** Debug 722/722, Release 720 (1 pre-existing `CompressionTest` timing flake,
+  confirmed via isolated reruns), Dist 720 (same flake, same confirmation). No regressions.
+- **Memory-waste goal (§2.7, §6.5): CONFIRMED directly.** 100 `Position` entities occupy exactly one
+  4096-byte chunk (`ArchetypeTest.SmallArchetypeStaysAtMinimumChunk`, corroborated by a
+  `GetArchetypeMemoryUsage` scratch probe) vs the pre-Phase-2 fixed 16KB first chunk — a 4× reduction,
+  exactly the grow-as-populate goal.
+- **create/add/remove (§6.4): met or exceeded, robustly.** create is decisively ahead of flecs (7/7
+  interleaved rounds, non-overlapping spreads); add beats flecs 7/7 rounds (no regression, better than
+  the "no regression" bar); remove shows no regression (its ~1.2–1.5× gap to flecs matches the
+  already-known post-Phase-C state, not something Phase 2 made worse).
+- **iterate1/iterate2/random_get vs flecs (§6.4, the study's headline prediction of +51%/+15%/+16%):
+  NOT confirmed by this session's data** — the benchmark ran under sustained ~70–84% background CPU
+  load from unrelated foreground applications (not started or stopped by this task). Under that load,
+  iterate1/iterate2 paired win-rates against flecs were near coin-flips (4/7 rounds) and random_get
+  leaned the other way (flecs faster 6/7 rounds), with fully-overlapping [min,max] spreads across all
+  three. This is reported as **inconclusive, not as a negative result** — the noise floor was too high
+  this session to see the predicted win (or rule it out). A clean-machine re-run is the recommended next
+  step before treating this part of the study's prediction as settled.
+- **Grow-divisor/max-chunk-bytes re-sweep (§6.3): inconclusive under the same noise**, no cell beat the
+  shipped `growDivisor=2, maxChunkBytes=512KB` NSDMIs consistently and meaningfully (>5%) across the
+  swept N values, so they were left unchanged — but the noise level means this isn't strong positive
+  confirmation either, just an absence of contrary evidence.
+
+| Operation | Astra (this session, median of 7) | flecs (this session, median of 7) | Historical Astra (clean machine) | Historical flecs (clean machine) |
+|---|---|---|---|---|
+| create | 73.76 | 162.63 | 51.4 | 95.9 |
+| add | 67.73 | 94.73 | 57.1 | 54.4 |
+| remove | 59.57 | 47.74 | 40.6 | 34.1 |
+| random_get | 194.79 | 174.28 | 65.4 | 57.0 |
+| iterate1 | 1.193 | 1.651 | 0.509 | 0.390 |
+| iterate2 | 2.474 | 2.793 | 0.993 | 0.812 |
+| iterate3 | 2.651 | 3.355 | 1.050 | 0.889 |
+
+**Net assessment:** the mechanism (TLSF + grow-as-populate + per-chunk addressing + compaction) is
+implemented, tested, and demonstrably delivers its memory-waste and structural-op goals under real
+measurement. The iteration/random_get speed goals — the study's original headline motivation — remain
+plausible but unproven pending a quiet-machine re-run; nothing in this session's data suggests they
+regressed, only that this session couldn't isolate the signal from the noise.
