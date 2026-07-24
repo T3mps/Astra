@@ -4,11 +4,16 @@
 
 namespace
 {
-    // ArchetypeChunkPool::DEFAULT_CHUNK_SIZE is 16 KiB (see ArchetypeChunkPool.hpp).
-    // 32 KiB is twice that, so a single entity's footprint can never fit in the
-    // usable chunk space no matter how alignment overhead is estimated - this
-    // must fail gracefully, never overflow into a neighboring chunk.
-    struct HugeComp { std::array<std::byte, 32 * 1024> bytes{}; };
+    // Post Phase-2 Task 5 (grow-as-populate chunk sizing), the supported
+    // per-entity footprint ceiling is ArchetypeChunkPool::Config::maxChunkBytes
+    // (512 KiB default), not the legacy fixed chunkSize: NextChunkBytes() floors
+    // its ramp target at one entity's footprint, so a component fits as long as
+    // perEntitySize + alignmentOverhead <= maxChunkBytes, however big that is
+    // relative to chunkSize. 600 KiB is comfortably past that 512 KiB ceiling,
+    // so a single entity's footprint can never fit in the usable chunk space no
+    // matter how alignment overhead is estimated - this must fail gracefully,
+    // never overflow into a neighboring chunk.
+    struct HugeComp { std::array<std::byte, 600 * 1024> bytes{}; };
 }
 
 TEST(LargeComponent, OversizedComponentFailsGracefullyNoOverflow)

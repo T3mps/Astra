@@ -52,7 +52,13 @@ namespace Astra
         static constexpr size_t DEFAULT_CHUNK_SIZE = 16 * 1024;  // 16KB default (fits in L1 cache)
         static constexpr size_t MIN_CHUNK_SIZE = 4 * 1024;       // 4KB minimum
         static constexpr size_t MAX_CHUNK_SIZE = 1024 * 1024;    // 1MB maximum
-        
+
+        // Grow-as-populate sizing CEILING default (study: 512KB, not the 1MB
+        // MAX_CHUNK_SIZE absolute ceiling). Named so Config's NSDMI below and
+        // Archetype::Deserialize's no-pool fallback (which cannot see a live
+        // Config instance) share one literal instead of two that could diverge.
+        static constexpr size_t DEFAULT_MAX_CHUNK_BYTES = 512 * 1024;
+
         // Configuration for pool behavior
         struct Config
         {
@@ -65,9 +71,9 @@ namespace Astra
             // Grow-as-populate sizing policy (Phase 2 Unit C part 2): each NEW
             // chunk an archetype appends is sized from its current data footprint,
             // clamped to [minChunkBytes, maxChunkBytes]. See Archetype::NextChunkBytes.
-            size_t minChunkBytes = MIN_CHUNK_SIZE;    // 4KB - first/smallest chunk
-            size_t maxChunkBytes = 512 * 1024;        // sizing cap (study: 512KB, not 1MB)
-            size_t growDivisor = 2;                   // chunk ~ archetypeBytes / growDivisor
+            size_t minChunkBytes = MIN_CHUNK_SIZE;           // 4KB - first/smallest chunk
+            size_t maxChunkBytes = DEFAULT_MAX_CHUNK_BYTES;  // sizing cap
+            size_t growDivisor = 2;                          // chunk ~ archetypeBytes / growDivisor
         };
         
         struct Stats

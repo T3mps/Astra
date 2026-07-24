@@ -107,6 +107,20 @@ namespace Astra
         // geometric ramp (~1.5x total per chunk at divisor 2) toward maxChunkBytes.
         // Zero-size archetypes keep the legacy fixed chunk size (entities live in
         // the side vector; there is nothing to ramp).
+        //
+        // Fit-one-entity floor: the ramp target computed from the data footprint
+        // (raw) is never allowed to fall below oneEntityBytes, one entity's own
+        // footprint under the same conservative alignment estimate
+        // ComputeCapacityForBytes subtracts. Without this floor, the FIRST chunk
+        // of any archetype is always sized from raw == 0 (m_totalCapacity == 0),
+        // which clamps straight to minChunkBytes (4KB) regardless of how big a
+        // single entity actually is -- so any component whose footprint exceeded
+        // ~4KB usable made Initialize's refusal path below trip, even though a
+        // 512KB-capable pool could easily have fit that one entity. Flooring at
+        // oneEntityBytes guarantees a chunk sized to fit >= 1 entity is always
+        // attempted first; the min/max clamp still applies around it, so small
+        // components keep their 4KB first chunk and big components get a first
+        // chunk just big enough (up to maxChunkBytes).
         ASTRA_NODISCARD size_t NextChunkBytes() const noexcept
         {
             if (!m_chunkPool)
@@ -115,7 +129,9 @@ namespace Astra
                 return m_chunkPool->GetChunkSize();
             const size_t dataBytes = m_totalCapacity * m_perEntitySize;
             const size_t raw = dataBytes / m_chunkPool->GetGrowDivisor();
-            return std::clamp(raw, m_chunkPool->GetMinChunkBytes(), m_chunkPool->GetMaxChunkBytes());
+            const size_t oneEntityBytes = m_perEntitySize + m_alignmentOverhead;
+            const size_t target = std::max(raw, oneEntityBytes);
+            return std::clamp(target, m_chunkPool->GetMinChunkBytes(), m_chunkPool->GetMaxChunkBytes());
         }
 
         // THE single chunk-creation path: computes the chunk's exact capacity from
@@ -209,13 +225,20 @@ namespace Astra
             // code clamped the per-chunk count to 1 and proceeded even when
             // perEntitySize exceeded that space, so writing that one entity's
             // components later overflowed past the chunk's actual allocation into
-            // neighboring memory. There is no valid per-chunk layout for this
-            // component set at this chunk size: refuse to initialize instead of
-            // clamping-and-overflowing. Leave m_initialized == false and create no
-            // chunk; GetOrCreateChunk() and the batch-add paths check m_initialized
-            // and refuse to create a chunk that could never legally hold even one
-            // entity, so callers degrade gracefully (entity creation succeeds but the
-            // entity never gets this component) instead of overflowing.
+            // neighboring memory. NextChunkBytes() floors its ramp target at one
+            // entity's footprint (perEntitySize + alignmentOverhead), so the first
+            // chunk it proposes is always big enough to hold one entity UNLESS that
+            // footprint itself exceeds the pool's maxChunkBytes ceiling (the clamp's
+            // upper bound wins over the floor). This check therefore no longer fires
+            // merely because a component is bigger than some particular chunk size
+            // in the ramp -- it fires only when there is no chunk size this pool
+            // could ever produce, at any point in the ramp, that could hold even one
+            // entity. Refuse to initialize instead of clamping-and-overflowing.
+            // Leave m_initialized == false and create no chunk; GetOrCreateChunk()
+            // and the batch-add paths check m_initialized and refuse to create a
+            // chunk that could never legally hold even one entity, so callers
+            // degrade gracefully (entity creation succeeds but the entity never
+            // gets this component) instead of overflowing.
             if (perEntitySize > 0 && ComputeCapacityForBytes(chunkBytes) == 0) ASTRA_UNLIKELY
             {
                 m_initialized = false;
@@ -921,7 +944,7 @@ namespace Astra
                     ? (nonEmptyComponents - 1) * CACHE_LINE_SIZE
                     : 0;
                 size_t poolChunkSize = componentPool ? componentPool->GetMaxChunkBytes()
-                                                     : 512 * 1024;
+                                                     : ArchetypeChunkPool::DEFAULT_MAX_CHUNK_BYTES;
                 if (static_cast<size_t>(entitiesPerChunk) * perEntitySize + alignmentOverhead > poolChunkSize)
                 {
                     return ResultType::Err(SerializationError::SizeMismatch);
