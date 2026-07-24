@@ -455,7 +455,18 @@ namespace Astra
 
             return static_cast<std::byte*>(m_columns[col].base) + index * m_columns[col].stride;
         }
-        
+
+        // Ordinal-direct column addressing for merge-join callers that already
+        // hold the column index (chunk columns are packed in m_meta's
+        // ascending-id order -- Phase C invariant, single creation path).
+        // Skips the idToColumn resolution GetComponentPointer performs.
+        ASTRA_NODISCARD ASTRA_FORCEINLINE void* GetColumnPointer(uint16_t column, size_t index)
+        {
+            ASTRA_ASSERT(column < m_meta->columnCount, "Column ordinal out of bounds");
+            ASTRA_ASSERT(index < m_count, "Entity index out of bounds");
+            return static_cast<std::byte*>(m_columns[column].base) + index * m_columns[column].stride;
+        }
+
     private:
         friend class ArchetypeManager;
         

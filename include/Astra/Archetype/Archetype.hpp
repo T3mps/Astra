@@ -544,15 +544,15 @@ namespace Astra
                 const ComponentID dId = dm.columns[a].id;
                 // dstEntityIndex is < the dst chunk's count here: AllocateEntitySlot (invoked by
                 // MoveEntityInternal before this runs) already bumped the destination slot's
-                // count, so the count-asserting GetComponentPointer is safe on the destination.
-                void* dstPtr = dstChunk->GetComponentPointer(dId, dstEntityIndex);
+                // count, so the count-asserting GetColumnPointer is safe on the destination.
+                void* dstPtr = dstChunk->GetColumnPointer(a, dstEntityIndex);
 
                 // Advance src past any ids strictly less than dId (src-only columns: dropped).
                 while (b < sm.columnCount && sm.columns[b].id < dId) ++b;
 
                 if (b < sm.columnCount && sm.columns[b].id == dId) ASTRA_LIKELY   // matched: move src -> dst
                 {
-                    void* srcPtr = srcChunk->GetComponentPointer(dId, srcEntityIndex);
+                    void* srcPtr = srcChunk->GetColumnPointer(b, srcEntityIndex);
                     const ComponentDescriptor& desc = *dm.columns[a].descriptor;
                     if (desc.is_trivially_copyable) std::memcpy(dstPtr, srcPtr, dm.columns[a].stride);
                     else                            desc.MoveConstruct(dstPtr, srcPtr);
@@ -1537,14 +1537,12 @@ namespace Astra
             }
 
             auto* chunk = m_chunks[chunkIndex].get();
-            
+
             ASTRA_ASSERT(chunk->GetCount() < chunk->GetCapacity(), "Chunk is full");
-            chunk->GetEntities().resize(chunk->GetCount() + 1);
             size_t entityIndex = chunk->GetCount();
-            chunk->SetCount(chunk->GetCount() + 1);
-            
-            chunk->GetEntities()[entityIndex] = entity;
-            
+            chunk->GetEntities().push_back(entity);   // capacity pre-reserved at chunk creation: never reallocates
+            chunk->SetCount(entityIndex + 1);
+
             ++m_entityCount;
             
             if (chunk->IsFull()) ASTRA_UNLIKELY
