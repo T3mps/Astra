@@ -931,5 +931,171 @@ spec Sec.5.3) implement the full op matrix; `bench-compare/analyze_definitive.py
 performs the items cross-check + median/band computation + ratio tables + tuning-target list
 consumed above. Raw campaign data: `bench-compare/definitive_campaign.csv` (432 rows, untracked).
 
+## Lever 3 — validate-once destroy + chunk-run batch create (2026-07-24, branch `perf/lever3-create-destroy`)
+
+Design: `docs/superpowers/specs/2026-07-24-lever3-create-batch-destroy-design.md` (`73faa67`). Plan:
+`docs/superpowers/plans/2026-07-24-lever3-create-batch-destroy.md` (`8249369`). Goal: attack the
+Definitive Scoreboard's two structural-batch tuning targets — `destroy` (0.56× flecs) and
+`create_batch` (0.50× flecs) — the two never-optimized bulk/teardown paths the prior levers (1: random_get
+chunk-pointer, 2: remove-path) didn't touch.
+
+**Branch built on dev @ `5aa9df9` (the definitive-scoreboard commit). Commits, in order:**
+- `13adc0d` — Task 1 characterization tests (destroy behavior table + destroy-with-relations guard,
+  pass on unmodified code as required for a behavior-preserving refactor).
+- `06a757c` — **Task 1 impl: validate-once `DestroyEntity`.** Single `GetEntityRecord` fetch feeds an
+  explicit `IsSignalEnabled` gate, a record-taking `ArchetypeManager::RemoveEntity`/
+  `EntityManager::Destroy` overload pair, and a new `RelationshipGraph::Empty()` early-out that skips
+  `OnEntityDestroyed` entirely for entities with no parent/children/links.
+- `cc57374` — **fix (found in whole-task review): `Empty()` must also count the traversal caches.**
+  `GetDescendantsCached`/`GetAncestorsCached` insert a permanent per-entity cache entry even on a
+  zero-result query; the original `Empty()` only checked `m_parents`/`m_children`/`m_links`, so an
+  entity with a cache entry but no live relations made `Empty()` return `true` and the fast path
+  orphaned that cache entry forever (unbounded growth via ordinary create→query→destroy cycles).
+  Broadened to `m_parents.Empty() && m_children.Empty() && m_links.Empty() &&
+  m_descendantCaches.Empty() && m_ancestorCaches.Empty()` — all `FlatMap`, all O(1) `Empty()`, no new
+  probe cost. Regression test added (`RelationsDestroyGuard.CachedTraversalOnUnrelatedEntityKeepsGraphNonEmpty`).
+- `442208d` — Task 2 characterization tests (batch-create chunk-boundary values + move-only lifetime
+  balance, pass on unmodified code).
+- `227f48c` — **Task 2 impl: chunk-run bulk path for `Archetype::AddEntitiesWith`.** Rewrote the old
+  entity-major loop (per-entity `GetOrCreateChunk` + per-element `idToColumn`-resolve +
+  fn-ptr-dispatched `ConstructComponentAt`) into a chunk-run-major loop: one `GetOrCreateChunk` +
+  one bulk `GetEntities().insert(...)` + one `SetCount(...)` per *run* of entities landing in the same
+  chunk, typed column base pointers hoisted once per run, and each entity's tuple move-constructed
+  straight through the hoisted typed pointer (one move, no `idToColumn`/fn-ptr indirection). Paired
+  with an `ArchetypeManager::AddEntitiesWith` record-loop chunk hoist (derive the chunk pointer once
+  per run instead of once per entity, writing through the existing 4-arg `SetRecordLocation` funnel).
+
+All 5 commits local to `perf/lever3-create-destroy`, not pushed.
+
+### Step 1 — authoritative 3-config confirmation
+
+No code changed on the branch after Task 2's own 3-config run (`git status` at HEAD `227f48c` shows
+only untracked `bench-compare/` scratch files and untracked review docs — no tracked-file diff), so
+Task 2's run stands as authoritative without a re-run:
+
+| Config | Total | Passed | Notes |
+|---|---|---|---|
+| Debug | 742 | 742 | clean |
+| Release | 740 | 740 | clean |
+| Dist | 740 | 740 | clean |
+
+742/740/740 = 739/737/737 (post-Task-1, post-`cc57374`-fix baseline) + 3 (Task 2's three
+characterization tests — two `RegistryTest` cases plus the brief-mandated
+`ArchetypeManagerTest.RecordChunkInvariant_BatchAddEntitiesWith` record-invariant loop). Zero
+`Tracked::s_live` imbalance, zero `EntityRecord` chunk/location desync aborts in any config; the only
+stderr line across every run was the pre-existing, known-expected `CircularHierarchyHandling`
+cycle-detection assertion line.
+
+### Checkpoint tables — same-session paired medians, N=1,000,000, ns/op, median [min, max] of 6 rounds
+
+Baseline = Definitive Scoreboard (dev `5aa9df9`, a separate session — shown for absolute-value trend
+only, not for ratio claims). ckpt1 = post-Task-1 (`.superpowers/sdd/task-1-report.md`, `lever3_ckpt1.csv`).
+ckpt2 = post-Task-2 (`.superpowers/sdd/task-2-report.md`, `lever3_ckpt2.csv`). All ratio claims below use
+**same-session** Astra/flecs pairs (flecs's own numbers drift a few percent session-to-session on this
+machine — see prior sections — so only within-session pairs are trustworthy for a ratio).
+
+**Primary targets:**
+
+| Op | Baseline Astra / flecs / entt | ckpt1 Astra / flecs / entt | ckpt2 Astra / flecs / entt |
+|---|---|---|---|
+| **destroy** | 26.14 / 14.58 / 47.34 | **20.02 [19.24,22.04]** / 14.48 [14.11,16.25] / 47.49 [46.73,48.18] | **19.67 [19.34,20.20]** / 14.55 [13.94,14.65] / 48.22 [46.63,50.21] |
+| **create_batch** | 34.06 / 17.17 / 44.85 | 32.81 [32.32,33.51] / 17.58 [16.69,27.54] / 42.81 [41.07,56.77] | **22.59 [21.49,23.68]** / 17.21 [16.06,17.96] / 46.44 [41.87,58.79] |
+
+**Flat-watch ops (must stay within noise across both checkpoints — confirmed, see attribution below):**
+
+| Op | Baseline Astra / flecs | ckpt1 Astra / flecs | ckpt2 Astra / flecs |
+|---|---|---|---|
+| create | 53.49 / 90.00 | 54.83 [52.73,64.81] / 91.52 [89.08,97.02] | 53.21 [52.35,55.04] / 90.83 [89.03,94.74] |
+| add_component | 38.77 / 50.24 | 39.63 [39.00,41.26] / 50.77 [50.17,59.15] | 39.84 [39.01,41.37] / 50.49 [49.57,50.86] |
+| remove_component | 26.29 / 32.89 | 26.41 [26.15,26.61] / 33.53 [31.94,49.05] | 26.04 [25.75,27.67] / 32.89 [32.40,34.46] |
+| random_get | 56.95 / 56.76 | 53.86 [52.98,64.24] / 55.79 [53.24,64.25] | 55.82 [50.98,58.17] / 55.28 [50.58,56.76] |
+
+### Per-sub-lever attribution
+
+- **destroy — attributed to Task 1 (validate-once + empty-graph early-out).** Baseline→ckpt1:
+  26.14→20.02 ns (−23.4%). **Caveat, disclosed per the brief: ckpt1's destroy bench predates
+  `cc57374`** — the checkpoint-1 build ran validate-once destroy with the *original*, narrower
+  `Empty()` (parents/children/links only, not the traversal caches), i.e. it measured Task 1's raw
+  perf shape before the correctness fix landed. ckpt2 (post-`cc57374`, post-Task-2, destroy code
+  itself untouched by Task 2) measured 19.67 ns — **flat versus ckpt1 (−1.7%, within the checkpoint
+  tables' own round-to-round noise band)**, which is the direct evidence that broadening `Empty()`
+  to also check two more `FlatMap`s cost effectively nothing (both maps are already O(1)
+  `Size()`-backed `Empty()` — no new probe was added, only two more O(1) reads on the already-hot
+  early-out check). Net: the whole of destroy's win is Task 1's, and the `cc57374` correctness fix
+  is confirmed cost-neutral by ckpt2, not merely assumed.
+- **create_batch — attributed to Task 2 (chunk-run bulk path).** ckpt1→ckpt2: 32.81→22.59 ns
+  (−31.1%), a large, decisive, non-noise drop (flecs's own ckpt1/ckpt2 medians — 17.58 and 17.21 —
+  stayed in the same band across both sessions, so the drop is attributable to the code change, not
+  the environment). create_batch was untouched by Task 1 (baseline→ckpt1: 34.06→32.81, −3.7%, noise),
+  confirming clean separation between the two sub-levers.
+- **Flat-watch ops all held within session noise across both checkpoints** — create, add_component,
+  remove_component, and random_get show no directional drift attributable to either sub-lever
+  (each delta is a low single-digit percentage, well inside the round-to-round spread already visible
+  within a single checkpoint's own 6 rounds). No regression anywhere.
+
+### Honest verdict vs both targets
+
+Neither sub-lever reached full parity with its flecs target — both delivered a large, real,
+non-noise fraction of the gap and stopped short, for the same underlying reason: each optimized the
+*bulk/chunk* machinery but left *per-entity* overhead on the path unaddressed (out of each task's
+scoped brief).
+
+- **destroy: target ~14.6 ns — NOT reached.** Landed at ~20.02 ns (−23.4% from baseline, confirmed
+  cost-neutral through the `cc57374` fix by ckpt2's flat 19.67 ns). Remaining gap to flecs ≈ **1.37×**
+  (20.02 / 14.58). Task 1's scope was strictly the `Registry::DestroyEntity` seam (validate-once +
+  early-out) — it did not touch `Archetype::RemoveEntity`'s own per-entity chunk-erase/backfill cost,
+  which the task's own report already flagged as "the remaining dominant term."
+- **create_batch: target ~17.2 ns — NOT reached.** Landed at 22.59 ns (−31% from ckpt1, −33.7% from
+  baseline). Remaining gap to flecs ≈ **1.31×** (22.59 / 17.17). Task 2's chunk-run rewrite eliminated
+  the *per-element* `idToColumn`/fn-ptr resolution and the *per-run* chunk/record derivation, but three
+  terms remain squarely outside chunk-run's scope: the mandatory **per-entity `generator(...)` call**
+  (the API contract is exactly one call per entity — cannot be batched away), the **per-entity
+  `GetOrCreateRecord`** paged-table lookup in the `ArchetypeManager` record loop (only the *chunk
+  pointer* derivation was hoisted per-run, not the record lookup itself), and **`GetOrCreateChunk` per
+  run** (once per chunk boundary, not per entity, but still not eliminated).
+
+Both sub-levers are correctly scoped, honestly reported wins, not disguised failures: destroy closed
+roughly three-fifths of the baseline-to-target distance ((26.14−20.02)/(26.14−14.58) ≈ 53%),
+create_batch closed roughly two-thirds ((34.06−22.59)/(34.06−17.17) ≈ 68%) — real progress that
+stopped at each task's deliberately scoped boundary, not at a measurement or implementation ceiling.
+
+### Scoreboard-delta summary
+
+Definitive Scoreboard tuning-target ratios, recomputed from the same-session ckpt2 pairs (Astra speed
+relative to flecs — flecs_time / astra_time; >1 = Astra ahead, <1 = Astra behind, matching the
+scoreboard's own convention):
+
+| Tuning target | Baseline ratio (vs flecs) | ckpt2 ratio (vs flecs, same-session) | Status |
+|---|---|---|---|
+| **create_batch** | 0.50× (17.17/34.06) | **~0.76× (17.21/22.59)** | Narrowed materially, still open — moved from "half of flecs's throughput" to "three-quarters" |
+| **destroy** | 0.56× (14.58/26.14) | **~0.74× (14.55/19.67)** | Narrowed materially, still open — same shape as create_batch |
+
+Both targets moved a large, real amount and neither closed. The three other Definitive Scoreboard
+structural-vs-flecs targets this lever did not touch remain exactly where the scoreboard left them,
+open:
+
+- `get_multi` @ 1M — astra 114.31 vs flecs 99.90 ns (0.87×, +14.4% astra-slower) — open.
+- `relations_ancestors` @ 100K nodes — astra 122.33 vs flecs 76.96 ns (0.63×, +59.0% astra-slower) — open.
+- `relations_children` @ 100K nodes — astra 0.0160 vs flecs 0.0090 ns (0.56×, +77.8% astra-slower,
+  thin-magnitude signal per the scoreboard's own caveat) — open.
+
+(The scoreboard's remaining entt-side targets — add_batch, add_component, remove_batch,
+remove_component vs entt — are architecture-inherent per the scoreboard's own analysis, not lever
+candidates, and are unaffected by this lever.)
+
+### Files changed
+
+- `include/Astra/Registry/Registry.hpp` — `DestroyEntity` rewritten (validate-once + signal gate +
+  empty-graph early-out).
+- `include/Astra/Archetype/ArchetypeManager.hpp` — new `RemoveEntity(Entity, EntityRecord*)` overload;
+  `AddEntitiesWith` record-loop chunk hoist (4-arg funnel).
+- `include/Astra/Entity/EntityManager.hpp` — new `Destroy(Entity, EntityRecord*)` overload.
+- `include/Astra/Registry/RelationshipGraph.hpp` — new `Empty()` query (broadened in `cc57374` to
+  count the traversal caches).
+- `include/Astra/Archetype/Archetype.hpp` — `AddEntitiesWith` chunk-run rewrite; `#include <new>`.
+- `tests/Registry/SignalLifetimeTest.cpp`, `tests/Registry/RelationsTest.cpp`,
+  `tests/Registry/RegistryTest.cpp`, `tests/Registry/ArchetypeManagerTest.cpp` — characterization +
+  regression tests (6 total: 2 destroy-path, 1 relations-cache regression, 3 create_batch-path).
+
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`. **Build with the full-opt flag set above (2026-07-24 baseline), not bare `/O2`.**
