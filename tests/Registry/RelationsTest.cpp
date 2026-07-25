@@ -579,3 +579,35 @@ TEST(RelationsDestroyGuard, DestroyParentStillOrphansChildrenWithFastPathPresent
     EXPECT_EQ(reg.GetParent(c1), Astra::Entity::Invalid());
     EXPECT_EQ(reg.GetParent(c2), Astra::Entity::Invalid());
 }
+
+// Guards RelationshipGraph::Empty() against ignoring the traversal caches.
+// GetAncestorsCached/GetDescendantsCached (reached here via
+// Relations::ForEachAncestor) insert a permanent TraversalCache entry even for
+// an entity with zero relations. OnEntityDestroyed is the only erase site for
+// that entry, so if Empty() only looked at m_parents/m_children/m_links, the
+// destroy fast path in Registry::DestroyEntity would skip OnEntityDestroyed
+// for such an entity and orphan its cache entry forever.
+TEST(RelationsDestroyGuard, CachedTraversalOnUnrelatedEntityKeepsGraphNonEmpty)
+{
+    Astra::Registry reg;
+    auto e = reg.CreateEntity();
+
+    // No parent, no children, no links yet: the graph is genuinely empty.
+    EXPECT_TRUE(reg.GetRelationshipGraph().Empty());
+
+    // Trigger the cache-populating query with zero relations to walk: the
+    // callback must not fire, but a cache entry for `e` is still inserted.
+    size_t ancestorVisits = 0;
+    reg.GetRelations(e).ForEachAncestor([&](Astra::Entity, size_t) { ancestorVisits++; });
+    EXPECT_EQ(ancestorVisits, 0u);
+
+    // The cache entry is graph state now: Empty() must report false, or the
+    // destroy fast path would wrongly skip OnEntityDestroyed for `e`.
+    EXPECT_FALSE(reg.GetRelationshipGraph().Empty());
+
+    // OnEntityDestroyed is the cache entry's only erase site; after it runs
+    // (as the non-fast-path DestroyEntity would run it), the graph is empty
+    // again.
+    reg.GetRelationshipGraph().OnEntityDestroyed(e);
+    EXPECT_TRUE(reg.GetRelationshipGraph().Empty());
+}

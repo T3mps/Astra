@@ -367,9 +367,15 @@ namespace Astra
 
         // True when the graph has never held (or no longer holds) any relationship
         // of any kind -- the destroy fast path skips OnEntityDestroyed entirely.
+        // The traversal caches count as per-entity graph state too: a cache-populating
+        // query (e.g. ForEachAncestor/ForEachDescendant) can insert a cache entry for an
+        // entity with zero relations, and OnEntityDestroyed is the only place that erases
+        // it. If Empty() ignored the caches, that entry would be orphaned forever once the
+        // destroy fast path skips OnEntityDestroyed for such an entity.
         ASTRA_NODISCARD bool Empty() const noexcept
         {
-            return m_parents.Empty() && m_children.Empty() && m_links.Empty();
+            return m_parents.Empty() && m_children.Empty() && m_links.Empty() &&
+                m_descendantCaches.Empty() && m_ancestorCaches.Empty();
         }
         
         void Clear()

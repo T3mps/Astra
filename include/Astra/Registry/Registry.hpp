@@ -237,9 +237,10 @@ namespace Astra
 
             m_archetypeManager->RemoveEntity(entity, rec);
 
-            // Empty-graph fast path: three size loads replace three hash probes.
-            // A relation-holding entity makes the graph non-empty by construction,
-            // so cleanup can never be skipped for an entity that needs it.
+            // Empty-graph fast path: a handful of size loads replace several hash probes.
+            // A relation-holding entity (including one with only a cached traversal
+            // entry) makes the graph non-empty by construction, so cleanup can never
+            // be skipped for an entity that needs it.
             if (!m_relationshipGraph->Empty()) ASTRA_UNLIKELY
             {
                 m_relationshipGraph->OnEntityDestroyed(entity);
