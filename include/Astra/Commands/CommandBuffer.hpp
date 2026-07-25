@@ -932,6 +932,12 @@ namespace Astra
         [[nodiscard]] size_t GetLastExecutedCount() const noexcept { return m_lastExecutedCount; }
 
         /**
+         * Per-entity failure count of the most recently applied batch
+         * command (see ExecuteSorted's per-entity error reporting).
+         */
+        [[nodiscard]] size_t GetLastBatchFailureCount() const noexcept { return m_lastBatchFailureCount; }
+
+        /**
          * Get the {SortKey, stable command pointer} descriptor recorded for
          * every command currently in this buffer, in the same order they were
          * recorded (i.e. the same order they appear walking the block chain).
@@ -1286,6 +1292,8 @@ namespace Astra
          */
         bool ExecuteCommand(CommandType type, std::byte* payload)
         {
+            m_lastBatchFailureCount = 0;
+
             switch (type)
             {
                 case CommandType::CreateEntity:
@@ -1437,15 +1445,20 @@ namespace Astra
             const Entity* entities = cmd->GetEntitiesPtr();
             const void* data = cmd->GetDataPtr();
 
-            // Use direct single-entity calls to avoid any span conversion issues
+            // Attempt-all, count failures: matches the single-entity
+            // executor's failure contract, scaled to N (spec §4). An Invalid
+            // slot counts as a failure exactly like the single-entity path.
+            size_t failed = 0;
             for (uint32_t i = 0; i < cmd->entityCount; ++i)
             {
-                if (entities[i] != Entity::Invalid())
+                if (entities[i] == Entity::Invalid() ||
+                    !m_registry->AddComponentByID(entities[i], cmd->componentId, data, cmd->dataSize))
                 {
-                    m_registry->AddComponentByID(entities[i], cmd->componentId, data, cmd->dataSize);
+                    ++failed;
                 }
             }
-            return true;
+            m_lastBatchFailureCount = failed;
+            return failed == 0;
         }
 
         bool ExecuteRemoveComponentBatch(std::byte* payload)
@@ -1453,15 +1466,17 @@ namespace Astra
             auto* cmd = reinterpret_cast<RemoveComponentBatchPayload*>(payload);
             const Entity* entities = cmd->GetEntitiesPtr();
 
-            // Use direct single-entity calls to avoid any span conversion issues
+            size_t failed = 0;
             for (uint32_t i = 0; i < cmd->entityCount; ++i)
             {
-                if (entities[i] != Entity::Invalid())
+                if (entities[i] == Entity::Invalid() ||
+                    !m_registry->RemoveComponentByID(entities[i], cmd->componentId))
                 {
-                    m_registry->RemoveComponentByID(entities[i], cmd->componentId);
+                    ++failed;
                 }
             }
-            return true;
+            m_lastBatchFailureCount = failed;
+            return failed == 0;
         }
 
         bool ExecuteSetParent(std::byte* payload)
@@ -1606,6 +1621,13 @@ namespace Astra
         size_t m_committedCount = 0;
         size_t m_commandCount = 0;
         size_t m_lastExecutedCount = 0;  // For debugging partial execution failures
+
+        // Per-entity failure count from the most recently dispatched BATCH
+        // command executor (0 for non-batch commands -- reset by
+        // ExecuteCommand before every dispatch). Lets ExecuteSorted() report
+        // one DeferredCommandError per failed entity instead of one per
+        // failed batch.
+        size_t m_lastBatchFailureCount = 0;
 
         // Task 5: deferred-creation mode (ParallelCommandBuffer per-worker
         // buffers). When true, CreateEntity/CreateEntities mint placeholders
@@ -1777,8 +1799,16 @@ namespace Astra
                     // comment for why every ApplyCommandAt() false is a
                     // logical (never fatal) failure in this exception-free
                     // build.
-                    m_deferredErrors.push_back(
-                        DeferredCommandError{it.key.insertionOrder, DeferredCommandError::Reason::InvalidTargetEntity});
+                    //
+                    // Task 4 channel, scaled: a failed batch reports one error
+                    // PER failed entity (same Reason the single-entity op
+                    // yields); non-batch failures report exactly one.
+                    const size_t failures = std::max<size_t>(size_t(1), it.buf->GetLastBatchFailureCount());
+                    for (size_t f = 0; f < failures; ++f)
+                    {
+                        m_deferredErrors.push_back(
+                            DeferredCommandError{it.key.insertionOrder, DeferredCommandError::Reason::InvalidTargetEntity});
+                    }
                     continue;
                 }
             }

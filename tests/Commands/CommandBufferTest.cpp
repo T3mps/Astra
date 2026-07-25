@@ -620,3 +620,57 @@ TEST_F(CommandBufferTest, ParallelSortedFlushCarriesNonTrivialComponents)
     });
     EXPECT_EQ(count, size_t(kThreads) * kPerThread);
 }
+
+TEST_F(CommandBufferTest, BatchPartialFailureSurfacesPerEntityErrorsInSortedFlush)
+{
+    Entity e1 = registry->CreateEntity();
+    Entity e2 = registry->CreateEntity();
+    Entity e3 = registry->CreateEntity();
+
+    ParallelCommandBuffer pcb(registry.get());
+    auto& buf = pcb.GetThreadBuffer();
+
+    buf.SetNextSortKey(SortKey{1, 0, 0});
+    buf.DestroyEntity(e2);                       // applies BEFORE the batch (lower key)
+    buf.SetNextSortKey(SortKey{2, 0, 0});
+    Entity batch[] = {e1, e2, e3};
+    buf.AddComponents<Position>(batch, Position{1.0f, 2.0f, 3.0f});
+
+    ASSERT_TRUE(pcb.ExecuteSorted().IsOk());
+
+    // Attempt-all semantics: survivors got the component...
+    EXPECT_NE(registry->GetComponent<Position>(e1), nullptr);
+    EXPECT_NE(registry->GetComponent<Position>(e3), nullptr);
+    // ...and the one dead target produced exactly one attributed error.
+    const auto& errs = pcb.GetDeferredErrors();
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_EQ(errs[0].systemInsertionOrder, 2u);
+
+    // Same contract for the remove batch: e2 is dead, e1/e3 hold Position.
+    auto& buf2 = pcb.GetThreadBuffer();
+    buf2.SetNextSortKey(SortKey{3, 0, 0});
+    buf2.RemoveComponents<Position>(batch);
+    ASSERT_TRUE(pcb.ExecuteSorted().IsOk());
+    const auto& errs2 = pcb.GetDeferredErrors();  // per-flush list, freshly cleared
+    ASSERT_EQ(errs2.size(), 1u);
+    EXPECT_EQ(errs2[0].systemInsertionOrder, 3u);
+    EXPECT_EQ(registry->GetComponent<Position>(e1), nullptr);
+    EXPECT_EQ(registry->GetComponent<Position>(e3), nullptr);
+}
+
+TEST_F(CommandBufferTest, BatchPartialFailureFailsEagerExecute)
+{
+    Entity e1 = registry->CreateEntity();
+    Entity e2 = registry->CreateEntity();
+    Entity e3 = registry->CreateEntity();
+    registry->DestroyEntity(e2);                 // dead before recording
+
+    Entity batch[] = {e1, e2, e3};
+    cmdBuffer->AddComponents<Velocity>(batch, Velocity{1.0f, 2.0f, 3.0f});
+
+    auto result = cmdBuffer->Execute();
+    EXPECT_TRUE(result.IsErr());                 // >=1 entity failed => command failed
+    // Attempt-all: the survivors were still processed before the failure surfaced.
+    EXPECT_NE(registry->GetComponent<Velocity>(e1), nullptr);
+    EXPECT_NE(registry->GetComponent<Velocity>(e3), nullptr);
+}
