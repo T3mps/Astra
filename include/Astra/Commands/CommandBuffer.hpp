@@ -33,19 +33,6 @@ namespace Astra
     };
 
     /**
-     * Result of command buffer execution.
-     */
-    struct ExecutionResult
-    {
-        CommandError error = CommandError::None;
-        size_t executedCount = 0;
-        size_t totalCount = 0;
-
-        [[nodiscard]] bool IsOk() const noexcept { return error == CommandError::None; }
-        [[nodiscard]] bool IsErr() const noexcept { return error != CommandError::None; }
-    };
-
-    /**
      * Internal byte buffer for storing commands contiguously.
      * Commands are stored as [Header][Payload] pairs.
      */
@@ -59,6 +46,8 @@ namespace Astra
         // absolute-address alignment and the writer's command-relative offset
         // computation are guaranteed to agree.
         static constexpr size_t ALIGNMENT = 16;
+        static_assert(__STDCPP_DEFAULT_NEW_ALIGNMENT__ >= ALIGNMENT,
+            "CommandByteBuffer requires operator-new alignment >= 16 (32-bit targets are unsupported)");
 
         explicit CommandByteBuffer(size_t initialCapacity = DEFAULT_INITIAL_CAPACITY)
         {
@@ -72,7 +61,7 @@ namespace Astra
          */
         std::byte* Allocate(size_t size, size_t* outAlignedSize = nullptr)
         {
-            // Align the size to 8 bytes
+            // Align the size to ALIGNMENT (16) bytes
             size_t alignedSize = AlignUp(size, ALIGNMENT);
 
             size_t currentSize = m_data.size();
@@ -415,6 +404,9 @@ namespace Astra
             static_assert(alignof(DecayedT) <= CommandByteBuffer::ALIGNMENT,
                 "CommandBuffer supports component alignment up to 16 bytes; "
                 "add over-aligned components directly via Registry::AddComponent");
+            static_assert(sizeof(DecayedT) <= 0xFFFF,
+                "CommandBuffer encodes payload size as uint16_t; components/resources larger "
+                "than 65535 bytes must go through Registry directly");
 
             // Register component type
             m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
@@ -493,6 +485,9 @@ namespace Astra
             static_assert(alignof(DecayedT) <= CommandByteBuffer::ALIGNMENT,
                 "CommandBuffer supports component alignment up to 16 bytes; "
                 "add over-aligned components directly via Registry::AddComponent");
+            static_assert(sizeof(DecayedT) <= 0xFFFF,
+                "CommandBuffer encodes payload size as uint16_t; components/resources larger "
+                "than 65535 bytes must go through Registry directly");
 
             // Register component type
             m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
@@ -696,6 +691,9 @@ namespace Astra
             static_assert(alignof(DecayedT) <= CommandByteBuffer::ALIGNMENT,
                 "CommandBuffer supports component alignment up to 16 bytes; "
                 "add over-aligned resources directly via Registry::SetResource");
+            static_assert(sizeof(DecayedT) <= 0xFFFF,
+                "CommandBuffer encodes payload size as uint16_t; components/resources larger "
+                "than 65535 bytes must go through Registry directly");
 
             // Register component type
             m_registry->GetComponentRegistry()->RegisterComponent<DecayedT>();
@@ -839,7 +837,7 @@ namespace Astra
                     return Result<void, ExecutionError>::Err(ExecutionError::ExecutionFailed);
                 }
 
-                // Advance by aligned size (buffer allocates with 8-byte alignment)
+                // Advance by aligned size (commands are stored at ALIGNMENT-byte stride)
                 ptr += AlignUp(static_cast<size_t>(header->totalSize), CommandByteBuffer::ALIGNMENT);
                 m_lastExecutedCount++;
             }
@@ -946,46 +944,6 @@ namespace Astra
         void Reserve(size_t bytes)
         {
             m_buffer.Reserve(bytes);
-        }
-
-        /**
-         * Merge commands from another buffer into this one.
-         * The other buffer is left empty after the merge.
-         *
-         * NOTE: this does not carry the other buffer's SortKey descriptors
-         * over into this buffer's CommandKeys() -- MergeFrom predates
-         * ExecuteSorted() and nothing routes a merged-into buffer through it
-         * today (ExecuteSorted reads each worker buffer directly, never via
-         * MergeInto). other's descriptors are dropped below purely so
-         * CommandKeys() on the now-empty `other` doesn't return stale offsets.
-         */
-        void MergeFrom(CommandBuffer&& other)
-        {
-            // Copy buffer data
-            size_t otherSize = other.m_buffer.Size();
-            if (otherSize > 0)
-            {
-                std::byte* dst = m_buffer.Allocate(otherSize);
-                std::memcpy(dst, other.m_buffer.Data(), otherSize);
-            }
-
-            // Merge allocated entities
-            m_allocatedEntities.insert(
-                m_allocatedEntities.end(),
-                other.m_allocatedEntities.begin(),
-                other.m_allocatedEntities.end()
-            );
-
-            m_commandCount += other.m_commandCount;
-
-            // Clear other buffer (don't call CleanupPendingCommands since we copied the data)
-            other.m_buffer.Clear();
-            other.m_allocatedEntities.clear();
-            other.m_committedCount = 0;
-            other.m_commandCount = 0;
-            other.m_commandKeys.clear();
-            other.m_hasCustomSortKey = false;
-            other.m_autoSeq = 0;
         }
 
         /**
@@ -1552,7 +1510,7 @@ namespace Astra
                         break;
                 }
 
-                // Advance by aligned size (buffer allocates with 8-byte alignment)
+                // Advance by aligned size (commands are stored at ALIGNMENT-byte stride)
                 ptr += AlignUp(static_cast<size_t>(header->totalSize), CommandByteBuffer::ALIGNMENT);
             }
         }
@@ -1591,7 +1549,7 @@ namespace Astra
 
     /**
      * Thread-safe command buffer that provides per-thread buffers.
-     * Commands from all threads are executed sequentially when Execute() is called.
+     * Commands from all threads are flushed deterministically via ExecuteSorted().
      */
     class ParallelCommandBuffer
     {
@@ -1643,33 +1601,6 @@ namespace Astra
 
             // Slow path: create new buffer for this thread
             return InitializeThreadBuffer();
-        }
-
-        /**
-         * Execute all commands from all thread buffers.
-         */
-        Result<void, CommandBuffer::ExecutionError> Execute()
-        {
-            for (size_t i = 0; i < m_buffers.size(); ++i)
-            {
-                if (m_buffers[i] && !m_buffers[i]->IsEmpty())
-                {
-                    auto result = m_buffers[i]->Execute();
-                    if (result.IsErr())
-                    {
-                        // Rollback remaining buffers' allocated entities
-                        for (size_t j = i + 1; j < m_buffers.size(); ++j)
-                        {
-                            if (m_buffers[j])
-                            {
-                                m_buffers[j]->RollbackAllocatedEntities();
-                            }
-                        }
-                        return result;
-                    }
-                }
-            }
-            return Result<void, CommandBuffer::ExecutionError>::Ok();
         }
 
         /**
@@ -1818,20 +1749,6 @@ namespace Astra
         [[nodiscard]] const std::vector<DeferredCommandError>& GetDeferredErrors() const noexcept
         {
             return m_deferredErrors;
-        }
-
-        /**
-         * Merge all thread buffers into a single target buffer.
-         */
-        void MergeInto(CommandBuffer& target)
-        {
-            for (auto& buffer : m_buffers)
-            {
-                if (buffer && !buffer->IsEmpty())
-                {
-                    target.MergeFrom(std::move(*buffer));
-                }
-            }
         }
 
         /**

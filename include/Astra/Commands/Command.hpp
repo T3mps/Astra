@@ -364,38 +364,4 @@ namespace Astra
         return (value + alignment - 1) & ~(alignment - 1);
     }
 
-    /**
-     * Calculate total command size for AddComponent.
-     */
-    inline size_t CalculateAddComponentSize(size_t dataSize, size_t dataAlignment)
-    {
-        size_t payloadStart = sizeof(CommandHeader);
-        size_t dataStart = payloadStart + sizeof(AddComponentPayload);
-        dataStart = AlignUp(dataStart, dataAlignment);
-        return dataStart + dataSize;
-    }
-
-    /**
-     * Calculate total command size for AddComponentBatch.
-     */
-    inline size_t CalculateAddComponentBatchSize(size_t entityCount, size_t dataSize, size_t dataAlignment)
-    {
-        size_t payloadStart = sizeof(CommandHeader);
-        size_t entitiesStart = payloadStart + sizeof(AddComponentBatchPayload);
-        size_t dataStart = entitiesStart + entityCount * sizeof(Entity);
-        dataStart = AlignUp(dataStart, dataAlignment);
-        return dataStart + dataSize;
-    }
-
-    /**
-     * Calculate total command size for SetResource.
-     */
-    inline size_t CalculateSetResourceSize(size_t dataSize, size_t dataAlignment)
-    {
-        size_t payloadStart = sizeof(CommandHeader);
-        size_t dataStart = payloadStart + sizeof(SetResourcePayload);
-        dataStart = AlignUp(dataStart, dataAlignment);
-        return dataStart + dataSize;
-    }
-
 } // namespace Astra

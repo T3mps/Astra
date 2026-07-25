@@ -203,7 +203,7 @@ TEST_F(CommandBufferTest, ParallelCommandBuffer)
     buffer2.AddComponent(temp2, Velocity{4.0f, 5.0f, 6.0f});
     
     // Execute all buffers
-    parallelBuffer.Execute();
+    ASSERT_TRUE(parallelBuffer.ExecuteSorted().IsOk());
     
     // Verify entities were created
     EXPECT_EQ(registry->Size(), 2u);
