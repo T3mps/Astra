@@ -485,6 +485,92 @@ namespace Astra
             return m_archetypeManager->HasComponent<T>(entity);
         }
 
+        // ===================== Enableable components (Task 2) =====================
+        // O(1) enable/disable of a component for one entity. SET bit == DISABLED;
+        // components are born enabled. Has/GetComponent IGNORE these bits (existence
+        // never lies) -- only IsEnabled / queries / Size observe them.
+        //
+        // Scheduling contract (spec §9): SetEnabled counts as WRITE access on T
+        // (owner-thread immediate mutation, identical threading rules to other
+        // immediate mutations such as AddComponent); IsEnabled and query-time
+        // filtering count as READ access on T.
+
+        // Sets whether component T is enabled on `entity`. Returns true iff `entity`
+        // currently holds the enableable component T (regardless of whether the state
+        // changed); false for a stale handle or a missing component. Fires the gated
+        // ComponentEnabled/ComponentDisabled signal ONLY on a genuine state change --
+        // an idempotent SetEnabled is silent.
+        template<Component T>
+        bool SetEnabled(Entity entity, bool enable)
+        {
+            static_assert(IsEnableableV<T>,
+                "SetEnabled<T> requires an enableable component (opt in with `static constexpr bool AstraEnableable = true;`)");
+            return SetEnabledByID(entity, TypeID<T>::Value(), enable);
+        }
+
+        // Returns true iff enableable component T is present on `entity` AND currently
+        // enabled; false for stale / missing / disabled. Mirrors SetEnabled's table.
+        template<Component T>
+        ASTRA_NODISCARD bool IsEnabled(Entity entity) const
+        {
+            static_assert(IsEnableableV<T>,
+                "IsEnabled<T> requires an enableable component (opt in with `static constexpr bool AstraEnableable = true;`)");
+            return IsEnabledByID(entity, TypeID<T>::Value());
+        }
+
+        // Type-erased toggle -- the shared body the typed SetEnabled delegates to.
+        bool SetEnabledByID(Entity entity, ComponentID componentId, bool enable)
+        {
+            if (componentId >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return false;
+            // One validated record fetch (version + archetype); stale handle => null.
+            auto* rec = const_cast<EntityRecord*>(m_archetypeManager->GetEntityRecord(entity));
+            if (!rec || !rec->chunk) ASTRA_UNLIKELY
+                return false;
+            if (!rec->archetype->GetMask().Test(componentId)) ASTRA_UNLIKELY
+                return false;   // component absent
+            const int col = rec->archetype->GetColumnMeta().idToColumn[componentId];
+            if (col < 0) ASTRA_UNLIKELY
+                return false;   // present tag: no storage column to carry a bit
+            ArchetypeChunk* chunk = rec->chunk;
+            if (!chunk->GetDisabledWords(col)) ASTRA_UNLIKELY
+                return false;   // present but not enableable: nothing to toggle
+            const size_t idx = rec->location.GetEntityIndex();
+            const bool changed = chunk->SetDisabled(col, idx, !enable);   // SET == DISABLED
+            if (changed)
+            {
+                // Fire only on genuine change, via the IsSignalEnabled-then-Emit idiom
+                // (copy of DestroyEntity at Registry.hpp:233). The component pointer is
+                // computed only when the relevant signal is actually live.
+                const Signal flag = enable ? Signal::ComponentEnabled : Signal::ComponentDisabled;
+                if (m_signalManager.IsSignalEnabled(flag)) ASTRA_UNLIKELY
+                {
+                    void* comp = chunk->GetComponentPointer(componentId, idx);
+                    if (enable) m_signalManager.Emit<Events::ComponentEnabled>(entity, componentId, comp);
+                    else        m_signalManager.Emit<Events::ComponentDisabled>(entity, componentId, comp);
+                }
+            }
+            return true;
+        }
+
+        // Type-erased query -- the shared body the typed IsEnabled delegates to.
+        ASTRA_NODISCARD bool IsEnabledByID(Entity entity, ComponentID componentId) const
+        {
+            if (componentId >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return false;
+            const auto* rec = m_archetypeManager->GetEntityRecord(entity);
+            if (!rec || !rec->chunk) ASTRA_UNLIKELY
+                return false;
+            if (!rec->archetype->GetMask().Test(componentId)) ASTRA_UNLIKELY
+                return false;   // absent => not enabled (behavior table)
+            const int col = rec->archetype->GetColumnMeta().idToColumn[componentId];
+            if (col < 0) ASTRA_UNLIKELY
+                return true;    // present tag (no storage): always enabled
+            if (!rec->chunk->GetDisabledWords(col)) ASTRA_UNLIKELY
+                return true;    // present non-enableable column: always enabled
+            return !rec->chunk->IsDisabled(col, rec->location.GetEntityIndex());
+        }
+
         /**
          * Type-erased component addition for use by CommandBuffer.
          * Adds a component to an entity using the component ID and raw data pointer.

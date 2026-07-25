@@ -297,6 +297,11 @@ namespace Astra
         template<Event E>
         static constexpr size_t IndexOf() noexcept
         {
+            // ComponentEnabled/ComponentDisabled appended at the END so every existing
+            // slot index is unchanged. The order here MUST stay in lockstep with the
+            // m_handlers tuple below (IndexOf<E> indexes it). Task 1 declared the Events
+            // structs + enum bits but did not wire dispatch; Task 2 completes it so the
+            // enableable signal pair can actually Emit (spec §8 / invariant 6).
             return Detail::EventIndex<E,
                 Events::EntityCreated,
                 Events::EntityDestroyed,
@@ -308,7 +313,9 @@ namespace Astra
                 Events::LinkRemoved,
                 Events::ResourceAdded,
                 Events::ResourceRemoved,
-                Events::ResourceUpdated
+                Events::ResourceUpdated,
+                Events::ComponentEnabled,
+                Events::ComponentDisabled
             >;
         }
 
@@ -323,7 +330,9 @@ namespace Astra
             MulticastDelegate<void(const Events::LinkRemoved&)>,
             MulticastDelegate<void(const Events::ResourceAdded&)>,
             MulticastDelegate<void(const Events::ResourceRemoved&)>,
-            MulticastDelegate<void(const Events::ResourceUpdated&)>
+            MulticastDelegate<void(const Events::ResourceUpdated&)>,
+            MulticastDelegate<void(const Events::ComponentEnabled&)>,
+            MulticastDelegate<void(const Events::ComponentDisabled&)>
         > m_handlers;
 
         Signal m_enabledSignals;

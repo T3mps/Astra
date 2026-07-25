@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <bit>
 #include <gtest/gtest.h>
 #include <numeric>
 #include <random>
+#include <span>
 #include <unordered_set>
 #include <vector>
 #include <chrono>
@@ -855,4 +857,202 @@ TEST_F(RegistryTest, GetComponentAbsentAndStale)
     registry->EmplaceComponent<Position>(dead, 9.f, 9.f, 9.f);
     registry->DestroyEntity(dead);
     EXPECT_EQ(registry->GetComponent<Position>(dead), nullptr); // stale handle (version guard)
+}
+
+// ======================= Enableable components (Task 2) =======================
+//
+// EnA / EnB are the suite's two ASTRA_ENABLEABLE components (spec §2). Task 1
+// opted Hierarchy + Timer in; Task 2 stores + toggles + preserves their per-chunk
+// disabled bits. Do NOT introduce new component types -- reuse these.
+using EnA = Astra::Test::Hierarchy;
+using EnB = Astra::Test::Timer;
+
+// Invariant seam (spec §14.2): on every enableable column of a chunk,
+//   disabledCount == popcount(disabledWords)  AND  every bit at a slot >= count is 0.
+// Placed as a free helper (the file has no prior invariant-helper idiom).
+static void ExpectDisabledInvariant(Astra::ArchetypeChunk& chunk, const Astra::ArchetypeColumnMeta& meta)
+{
+    const size_t count = chunk.GetCount();
+    const size_t capacity = chunk.GetCapacity();
+    const size_t wordCount = (capacity + 63) / 64;
+    for (uint16_t e = 0; e < meta.enableableColumnCount; ++e)
+    {
+        const int col = static_cast<int>(meta.enableableColumns[e]);
+        const uint64_t* words = chunk.GetDisabledWords(col);
+        ASSERT_NE(words, nullptr) << "enableable column " << col << " must carry disabled words";
+
+        uint32_t pop = 0;
+        for (size_t w = 0; w < wordCount; ++w)
+            pop += static_cast<uint32_t>(std::popcount(words[w]));
+        EXPECT_EQ(pop, chunk.GetDisabledCount(col))
+            << "disabledCount != popcount on column " << col;
+
+        // No bit may be set at a slot at or beyond the live count.
+        for (size_t i = count; i < wordCount * 64; ++i)
+            EXPECT_FALSE(chunk.IsDisabled(col, i))
+                << "tail bit set at slot " << i << " (count=" << count << ") on column " << col;
+    }
+}
+
+static void ExpectAllChunksInvariant(Astra::Registry& reg)
+{
+    for (Astra::Archetype* arch : reg.GetArchetypeManager()->GetArchetypes())
+    {
+        const Astra::ArchetypeColumnMeta& meta = arch->GetColumnMeta();
+        if (meta.enableableColumnCount == 0)
+            continue;
+        for (const auto& chunkPtr : arch->GetChunks())
+            ExpectDisabledInvariant(*chunkPtr, meta);
+    }
+}
+
+TEST_F(RegistryTest, EnableToggleBehaviorTable)
+{
+    auto e = registry->CreateEntity<EnA>();
+    EXPECT_TRUE(registry->IsEnabled<EnA>(e));                    // born enabled
+    EXPECT_TRUE(registry->SetEnabled<EnA>(e, false));           // disable: applied
+    EXPECT_FALSE(registry->IsEnabled<EnA>(e));
+    EXPECT_TRUE(registry->SetEnabled<EnA>(e, false));           // idempotent: true, no change
+    EXPECT_TRUE(registry->GetComponent<EnA>(e) != nullptr);     // existence never lies
+    EXPECT_TRUE(registry->HasComponent<EnA>(e));
+    auto missing = registry->CreateEntity();                    // no EnA
+    EXPECT_FALSE(registry->SetEnabled<EnA>(missing, false));
+    EXPECT_FALSE(registry->IsEnabled<EnA>(missing));
+    registry->DestroyEntity(e);
+    EXPECT_FALSE(registry->SetEnabled<EnA>(e, true));           // stale: no-op false
+    ExpectAllChunksInvariant(*registry);
+}
+
+TEST_F(RegistryTest, EnableSignalsFireOnlyOnGenuineChange)
+{
+    registry->EnableSignals(Astra::Signal::ComponentEnabled);
+    registry->EnableSignals(Astra::Signal::ComponentDisabled);
+    int enabled = 0, disabled = 0;
+    registry->GetSignalManager()->On<Astra::Events::ComponentDisabled>().Register(
+        [&](const auto&) { ++disabled; });
+    registry->GetSignalManager()->On<Astra::Events::ComponentEnabled>().Register(
+        [&](const auto&) { ++enabled; });
+    auto e = registry->CreateEntity<EnA>();
+    registry->SetEnabled<EnA>(e, false);
+    registry->SetEnabled<EnA>(e, false);      // idempotent: silent
+    registry->SetEnabled<EnA>(e, true);
+    EXPECT_EQ(disabled, 1);
+    EXPECT_EQ(enabled, 1);
+}
+
+TEST_F(RegistryTest, DisabledBitSurvivesSwapRemove)
+{
+    // Disable a NON-last entity, destroy the last one in the same chunk (swap
+    // fills the vacated slot), and verify both entities' states by identity.
+    std::vector<Astra::Entity> es;
+    for (int i = 0; i < 8; ++i) es.push_back(registry->CreateEntity<EnA>());
+    registry->SetEnabled<EnA>(es[2], false);
+    registry->DestroyEntity(es[7]);
+    EXPECT_FALSE(registry->IsEnabled<EnA>(es[2]));
+    for (int i = 0; i < 7; ++i) if (i != 2) EXPECT_TRUE(registry->IsEnabled<EnA>(es[i]));
+    // Now destroy a MIDDLE entity so the swapped-in survivor was the disabled one's neighbor:
+    registry->SetEnabled<EnA>(es[6], false);
+    registry->DestroyEntity(es[2]);           // slot 2 refilled by the (disabled) last entity or a survivor
+    EXPECT_FALSE(registry->IsEnabled<EnA>(es[6]));   // identity-tracked, wherever it now lives
+    ExpectAllChunksInvariant(*registry);
+}
+
+TEST_F(RegistryTest, DisabledBitSurvivesArchetypeTransition)
+{
+    using namespace Astra::Test;
+    auto e = registry->CreateEntity<EnA>();
+    registry->SetEnabled<EnA>(e, false);
+    registry->AddComponent(e, Position{1, 2, 3});     // transition: EnA carries its bit
+    EXPECT_FALSE(registry->IsEnabled<EnA>(e));
+    registry->RemoveComponent<Position>(e);           // transition back
+    EXPECT_FALSE(registry->IsEnabled<EnA>(e));
+    registry->AddComponent(e, EnB{});                 // fresh component: born enabled
+    EXPECT_TRUE(registry->IsEnabled<EnB>(e));
+    EXPECT_FALSE(registry->IsEnabled<EnA>(e));         // untouched by EnB's arrival
+    ExpectAllChunksInvariant(*registry);
+}
+
+TEST_F(RegistryTest, BatchCreateBornEnabled)
+{
+    constexpr size_t kCount = 3000;                   // spans chunks (grow-as-populate)
+    std::vector<Astra::Entity> ents(kCount);
+    size_t created = registry->CreateEntitiesWith<EnA>(kCount, std::span{ents},
+        [](size_t) { return std::tuple{EnA{}}; });
+    ASSERT_EQ(created, kCount);
+    for (auto e : ents) ASSERT_TRUE(registry->IsEnabled<EnA>(e));
+    ExpectAllChunksInvariant(*registry);
+}
+
+// Invariant seam #1: after a 100-toggle random walk, popcount == disabledCount
+// and no tail bit is set, with every entity's state matching the model.
+TEST_F(RegistryTest, DisabledInvariantAfter100ToggleWalk)
+{
+    constexpr size_t N = 64;
+    std::vector<Astra::Entity> es;
+    for (size_t i = 0; i < N; ++i) es.push_back(registry->CreateEntity<EnA>());
+
+    std::mt19937 rng(0xC0FFEEu);
+    std::vector<bool> disabled(N, false);
+    for (int step = 0; step < 100; ++step)
+    {
+        const size_t k = rng() % N;
+        const bool enable = (rng() & 1u) != 0;
+        registry->SetEnabled<EnA>(es[k], enable);
+        disabled[k] = !enable;
+    }
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(registry->IsEnabled<EnA>(es[i]), !disabled[i]) << "model mismatch at " << i;
+    ExpectAllChunksInvariant(*registry);
+}
+
+// Invariant seam #2: after a destroy-half loop, survivors keep their state and
+// the bookkeeping stays consistent (swap-remove carry + count).
+TEST_F(RegistryTest, DisabledInvariantAfterDestroyHalf)
+{
+    constexpr size_t N = 500;
+    std::vector<Astra::Entity> es;
+    for (size_t i = 0; i < N; ++i) es.push_back(registry->CreateEntity<EnA>());
+    for (size_t i = 0; i < N; ++i) if ((i % 2) == 0) registry->SetEnabled<EnA>(es[i], false);
+    // Destroy the odd (enabled) half; the disabled evens survive.
+    for (size_t i = 1; i < N; i += 2) registry->DestroyEntity(es[i]);
+    for (size_t i = 0; i < N; i += 2) EXPECT_FALSE(registry->IsEnabled<EnA>(es[i])) << "survivor " << i;
+    ExpectAllChunksInvariant(*registry);
+}
+
+// Invariant seam #3 (spec §12.5): add/remove-component churn over disabled holders
+// then Registry::Defragment() (which drives Archetype::CompactChunks). Every
+// identity-tracked IsEnabled state must be unchanged across the compaction, and
+// the per-chunk invariant must hold afterward.
+TEST_F(RegistryTest, DisabledInvariantSurvivesChurnAndDefragment)
+{
+    using namespace Astra::Test;
+    constexpr size_t N = 3000;                        // spans chunks
+    std::vector<Astra::Entity> es(N);
+    size_t created = registry->CreateEntitiesWith<EnA>(N, std::span{es},
+        [](size_t) { return std::tuple{EnA{}}; });
+    ASSERT_EQ(created, N);
+
+    std::vector<bool> expectedEnabled(N, true);
+    for (size_t i = 0; i < N; ++i)
+        if ((i % 3) == 0) { registry->SetEnabled<EnA>(es[i], false); expectedEnabled[i] = false; }
+
+    // Two archetype transitions per churned entity (EnA -> EnA+Position -> EnA):
+    // the disabled bit must carry through MoveAndAdd and MoveEntityFrom both ways.
+    for (size_t i = 0; i < N; i += 3)
+    {
+        registry->AddComponent(es[i], Position{1, 2, 3});
+        registry->RemoveComponent<Position>(es[i]);
+    }
+    for (size_t i = 0; i < N; ++i)
+        ASSERT_EQ(registry->IsEnabled<EnA>(es[i]), expectedEnabled[i]) << "churn lost bit at " << i;
+
+    // chunkUtilizationThreshold == 1.0 => fragmentationThreshold 0.0 => CompactChunks
+    // runs on every archetype with more than one chunk, regardless of fill.
+    Astra::Registry::DefragmentationOptions opts;
+    opts.chunkUtilizationThreshold = 1.0f;
+    registry->Defragment(opts);
+
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(registry->IsEnabled<EnA>(es[i]), expectedEnabled[i]) << "defrag lost bit at " << i;
+    ExpectAllChunksInvariant(*registry);
 }

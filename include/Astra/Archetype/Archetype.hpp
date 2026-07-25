@@ -84,6 +84,16 @@ namespace Astra
                       { return a.id < b.id; });
             for (uint16_t c = 0; c < m_columnMeta.columnCount; ++c)
                 m_columnMeta.idToColumn[m_columnMeta.columns[c].id] = static_cast<int16_t>(c);
+
+            // Record which columns opted into ASTRA_ENABLEABLE, in final (post-sort)
+            // ordinal order. enableableColumnCount == 0 is the zero-cost early-out the
+            // chunk carve + every preservation site takes for non-enableable archetypes.
+            m_columnMeta.enableableColumnCount = 0;
+            for (uint16_t c = 0; c < m_columnMeta.columnCount; ++c)
+            {
+                if (m_columnMeta.columns[c].descriptor->isEnableable)
+                    m_columnMeta.enableableColumns[m_columnMeta.enableableColumnCount++] = c;
+            }
         }
 
         // Exact (non-pow2) capacity for a chunk of chunkBytes, under the same
@@ -98,7 +108,75 @@ namespace Astra
                 return chunkBytes >> 6;
             }
             const size_t usable = chunkBytes > m_alignmentOverhead ? chunkBytes - m_alignmentOverhead : 0;
-            return usable / m_perEntitySize;
+            size_t cap = usable / m_perEntitySize;
+
+            // Enableable columns carve disabled-bit words INSIDE the chunk (Task 2),
+            // which the column-only estimate above does not account for. Archetypes
+            // with NO enableable column skip this entirely and keep the exact legacy
+            // value (verified: enableableColumnCount == 0 => early return of `cap`).
+            // Otherwise shrink `cap` until the precise carve layout (columns + word
+            // regions, mirrored by ComputeLayoutBytesForCapacity) fits chunkBytes,
+            // using an overshoot-proportional step so even tiny components converge in
+            // a couple of iterations, then reclaim any slack the step overshot.
+            if (m_columnMeta.enableableColumnCount > 0 && cap > 0)
+            {
+                size_t layout = ComputeLayoutBytesForCapacity(cap);
+                while (cap > 0 && layout > chunkBytes)
+                {
+                    // Each unit of cap contributes >= m_perEntitySize column bytes, so
+                    // this step can never under-shrink into a non-terminating loop.
+                    size_t dec = (layout - chunkBytes) / m_perEntitySize;
+                    if (dec == 0) dec = 1;
+                    cap -= std::min(cap, dec);
+                    layout = ComputeLayoutBytesForCapacity(cap);
+                }
+                while (ComputeLayoutBytesForCapacity(cap + 1) <= chunkBytes)
+                    ++cap;
+            }
+            return cap;
+        }
+
+        // Exact byte footprint of a chunk holding `cap` entities, byte-for-byte
+        // mirroring ArchetypeChunk::InitializeColumns: cache-line-aligned column
+        // blocks followed by 8-byte-aligned disabled-word regions for each enableable
+        // column. The single source of truth the capacity math shrinks against so the
+        // chunk's own `offset <= m_chunkSize` carve assert can never trip.
+        ASTRA_NODISCARD size_t ComputeLayoutBytesForCapacity(size_t cap) const noexcept
+        {
+            size_t offset = 0;
+            for (uint16_t c = 0; c < m_columnMeta.columnCount; ++c)
+            {
+                offset = (offset + CACHE_LINE_SIZE - 1) & ~(CACHE_LINE_SIZE - 1);
+                offset += static_cast<size_t>(m_columnMeta.columns[c].stride) * cap;
+            }
+            const size_t words = (cap + 63) / 64;
+            for (uint16_t e = 0; e < m_columnMeta.enableableColumnCount; ++e)
+            {
+                offset = (offset + 7) & ~size_t(7);
+                offset += words * 8;
+            }
+            return offset;
+        }
+
+        // Byte size a chunk must be allocated at to be GUARANTEED to hold exactly
+        // `cap` entities once ComputeCapacityForBytes re-derives its capacity, i.e.
+        // the conservative column estimate (perEntitySize*cap + alignmentOverhead)
+        // PLUS an upper bound on the enableable word regions. Callers that size a
+        // chunk from a known capacity (Deserialize) MUST use this rather than the raw
+        // column formula, or the word carve would shrink the re-derived capacity below
+        // `cap` and overflow. Zero-size archetypes keep the legacy entity-vector sizing.
+        ASTRA_NODISCARD size_t ChunkBytesToHold(size_t cap) const noexcept
+        {
+            if (m_perEntitySize == 0)
+                return std::max<size_t>(64, cap << 6);
+            size_t bytes = cap * m_perEntitySize + m_alignmentOverhead;
+            const uint16_t ec = m_columnMeta.enableableColumnCount;
+            if (ec > 0)
+            {
+                const size_t words = (cap + 63) / 64;
+                bytes += static_cast<size_t>(ec) * (words * 8 + 8);   // +8/col: 8-byte-align slack upper bound
+            }
+            return bytes;
         }
 
         // Grow-as-populate (Phase 2 Unit C part 2): size each NEW chunk from the
@@ -614,6 +692,12 @@ namespace Astra
                     const ComponentDescriptor& desc = *dm.columns[a].descriptor;
                     if (desc.is_trivially_copyable) std::memcpy(dstPtr, srcPtr, dm.columns[a].stride);
                     else                            desc.MoveConstruct(dstPtr, srcPtr);
+                    // Disabled-bit carry (Task 2): shared enableable column keeps its
+                    // state. dst slot is freshly allocated (born enabled); the src bit
+                    // is cleared by the caller's source swap-remove. Both column a (dst)
+                    // and b (src) share id dId => same enableable-ness.
+                    if (desc.isEnableable) ASTRA_UNLIKELY
+                        dstChunk->SetDisabled(a, dstEntityIndex, srcChunk->IsDisabled(b, srcEntityIndex));
                     ++b;
                 }
                 else ASTRA_UNLIKELY                                              // dst-only: default-construct
@@ -1061,9 +1145,12 @@ namespace Astra
                 // reference) is set once and never reassigned, so that pointer is
                 // stable for the life of every chunk created here.
                 const size_t capacity = std::max<size_t>(1, chunkEntityCount);
-                const size_t chunkBytes = archetype->m_perEntitySize == 0
-                    ? std::max<size_t>(64, capacity << 6)
-                    : capacity * archetype->m_perEntitySize + archetype->m_alignmentOverhead;
+                // ChunkBytesToHold (not the raw column formula) so that when an
+                // enableable archetype's chunk re-derives its capacity via
+                // ComputeCapacityForBytes, the carved disabled-word regions do not
+                // shrink it below `capacity` and overflow. Reduces to the legacy
+                // formula exactly when there are no enableable columns.
+                const size_t chunkBytes = archetype->ChunkBytesToHold(capacity);
 
                 ArchetypeChunk* chunk = archetype->AppendChunk(chunkBytes);
                 if (!chunk)
@@ -1249,6 +1336,17 @@ namespace Astra
                                 desc.MoveConstruct(dstPtr + k * stride, srcPtr + k * stride);
                                 desc.Destruct(srcPtr + k * stride);
                             }
+                        }
+
+                        // Disabled-bit carry (Task 2, spec §12.5): src and dst are
+                        // chunks of the SAME archetype, so column ordinal `c` matches on
+                        // both. dst is a fresh chunk (born enabled); copy each moved
+                        // slot's bit. src bits need no clearing -- the old chunks are
+                        // freed wholesale below.
+                        if (desc.isEnableable) ASTRA_UNLIKELY
+                        {
+                            for (size_t k = 0; k < run; ++k)
+                                dst->SetDisabled(c, dstIndex + k, src->IsDisabled(c, srcIndex + k));
                         }
                     }
 
@@ -1654,8 +1752,20 @@ namespace Astra
                     // Use move constructor to transfer component data
                     desc.MoveConstruct(destPtr, srcPtr);
                     desc.Destruct(srcPtr);
+
+                    // Disabled-bit carry (Task 2): same archetype => same column ordinal
+                    // on both chunks. dst slot is freshly counted (born enabled); the
+                    // src bit is cleared right after via the pop below shrinking count.
+                    // NOTE: this method currently has no live callers (referenced only
+                    // in a comment); the carry is here so every entity-relocation path
+                    // is uniformly covered if it is ever revived.
+                    if (desc.isEnableable) ASTRA_UNLIKELY
+                    {
+                        destChunk->SetDisabled(c, destEntityIndex, srcChunk->IsDisabled(c, srcEntityIndex));
+                        srcChunk->SetDisabled(c, srcEntityIndex, false);
+                    }
                 }
-                
+
                 // Remove entity from source chunk's entity vector
                 srcChunk->GetEntities().pop_back();
             }

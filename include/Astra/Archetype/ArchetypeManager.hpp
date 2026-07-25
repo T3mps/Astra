@@ -1269,6 +1269,13 @@ namespace Astra
                         const ComponentDescriptor& desc = *dm.columns[c].descriptor;
                         if (desc.is_trivially_copyable) std::memcpy(dstPtr, srcPtr, dm.columns[c].stride);
                         else                            desc.MoveConstruct(dstPtr, srcPtr);
+                        // Disabled-bit carry (Task 2): shared enableable column keeps its
+                        // state across the add transition. dst slot is freshly allocated
+                        // (born enabled); the src bit is cleared by the caller's source
+                        // swap-remove. The newly ADDED component (id == newComponentId)
+                        // takes the born-enabled branch above -- no bit write.
+                        if (desc.isEnableable) ASTRA_UNLIKELY
+                            dstChunk->SetDisabled(c, dstEntityIdx, srcChunk->IsDisabled(sc, srcEntityIdx));
                     }
                 }
             }
@@ -1552,6 +1559,11 @@ namespace Astra
                         const ComponentDescriptor& desc = *dm.columns[c].descriptor;
                         if (desc.is_trivially_copyable) std::memcpy(dstPtr, srcPtr, dm.columns[c].stride);
                         else                            desc.MoveConstruct(dstPtr, srcPtr);
+                        // Disabled-bit carry (Task 2): mirror MoveAndAdd -- a shared
+                        // enableable column keeps its state; the added component (handled
+                        // in the id == newComponentId branch above) is born enabled.
+                        if (desc.isEnableable) ASTRA_UNLIKELY
+                            dstChunk->SetDisabled(c, dstEntityIdx, srcChunk->IsDisabled(sc, srcEntityIdx));
                     }
                 }
             }

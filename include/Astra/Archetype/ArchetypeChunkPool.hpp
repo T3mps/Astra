@@ -41,6 +41,15 @@ namespace Astra
         ColumnDesc columns[MAX_COMPONENTS]{};            // [0, columnCount) valid, ascending id
         int16_t   idToColumn[MAX_COMPONENTS];            // id -> column index, or -1 (absent OR tag)
 
+        // Enableable-components (spec §3/§4): the column ordinals (into `columns`)
+        // whose component opted into ASTRA_ENABLEABLE. Only these carve per-chunk
+        // disabled-bit words + do bit bookkeeping on relocation; enableableColumnCount
+        // == 0 is the zero-cost early-out every non-enableable archetype takes. Built
+        // once by Archetype::BuildColumnMeta after the ascending-id sort (so the
+        // ordinals are final). Shared per-archetype, not per-chunk.
+        uint16_t  enableableColumns[MAX_COMPONENTS]{};   // [0, enableableColumnCount) valid, ascending ordinal
+        uint16_t  enableableColumnCount{0};
+
         ArchetypeColumnMeta() { for (auto& c : idToColumn) c = -1; }
     };
 
@@ -231,6 +240,17 @@ namespace Astra
                         }
                     }
                 }
+
+                // Disabled-bit carry (Task 2): for an enableable shared column, copy
+                // each src slot's bit into its dst slot. dst slots are freshly
+                // allocated (born enabled), so SetDisabled sets them; src bits are
+                // cleared by the src archetype's own swap-remove. Column `c` (dst) and
+                // `sc` (src) share the same component id => same enableable-ness.
+                if (desc.isEnableable) ASTRA_UNLIKELY
+                {
+                    for (size_t i = 0; i < count; ++i)
+                        SetDisabled(c, dstIndices[i], srcChunk.IsDisabled(sc, srcIndices[i]));
+                }
             }
         }
         
@@ -356,11 +376,26 @@ namespace Astra
                     m_meta->columns[c].descriptor->Destruct(ptr);
                 }
             }
-            
+
+            // Disabled-bit carry (Task 2), mirroring the component swap-remove above.
+            // For every enableable column: the moved (last) entity's bit fills the
+            // vacated slot, then the tail slot is cleared so bits at slots >= the new
+            // count stay 0 (invariant 2). SetDisabled keeps disabledCount == popcount,
+            // and its per-slot delta makes the count arithmetic correct even in the
+            // index == lastIndex (removing the last entity) case -- only the tail clear
+            // runs then, dropping exactly the removed entity's own bit.
+            for (uint16_t e = 0; e < m_meta->enableableColumnCount; ++e)
+            {
+                const uint16_t c = m_meta->enableableColumns[e];
+                if (index != lastIndex) ASTRA_LIKELY
+                    SetDisabled(c, index, IsDisabled(c, lastIndex));
+                SetDisabled(c, lastIndex, false);
+            }
+
             // Remove last entity
             m_entities.pop_back();
             --m_count;
-            
+
             return movedEntity;
         }
         
@@ -431,6 +466,62 @@ namespace Astra
             return col < 0 ? nullptr : m_columns[col].base;
         }
         
+        // ===================== Enableable-components (Task 2) =====================
+        // SET bit == DISABLED. `column` is a storage-column ordinal (m_meta->columns
+        // index), NOT a ComponentID -- callers resolve id -> column via idToColumn.
+        // A non-enableable column has no word region: GetDisabledWords returns nullptr,
+        // IsDisabled returns false, SetDisabled is a no-op returning false.
+
+        // Raw word region for a column, or nullptr if the column is not enableable.
+        // Tasks 3-5 read this directly for query filtering.
+        ASTRA_NODISCARD uint64_t* GetDisabledWords(int column) noexcept
+        {
+            ASTRA_ASSERT(column >= 0 && column < m_meta->columnCount, "column ordinal out of range");
+            return m_columns[column].disabledWords;
+        }
+
+        ASTRA_NODISCARD uint32_t GetDisabledCount(int column) const noexcept
+        {
+            ASTRA_ASSERT(column >= 0 && column < m_meta->columnCount, "column ordinal out of range");
+            return m_columns[column].disabledCount;
+        }
+
+        ASTRA_NODISCARD bool IsDisabled(int column, size_t index) const noexcept
+        {
+            const uint64_t* words = m_columns[column].disabledWords;
+            if (!words) ASTRA_UNLIKELY
+                return false;   // not enableable: everyone is enabled
+            return (words[index >> 6] >> (index & 63)) & 1ull;
+        }
+
+        // Sets slot `index` of `column` to disabled/enabled, keeping disabledCount ==
+        // popcount. Returns true IFF the bit actually changed (the signal-fire gate);
+        // an idempotent set (or a non-enableable column) returns false.
+        bool SetDisabled(int column, size_t index, bool disabled) noexcept
+        {
+            uint64_t* words = m_columns[column].disabledWords;
+            if (!words) ASTRA_UNLIKELY
+                return false;   // not enableable: nothing to store
+
+            const size_t w = index >> 6;
+            const uint64_t bit = 1ull << (index & 63);
+            const bool cur = (words[w] & bit) != 0;
+            if (cur == disabled)
+                return false;   // no change
+
+            if (disabled)
+            {
+                words[w] |= bit;
+                ++m_columns[column].disabledCount;
+            }
+            else
+            {
+                words[w] &= ~bit;
+                --m_columns[column].disabledCount;
+            }
+            return true;
+        }
+
         ASTRA_NODISCARD bool IsFull() const noexcept { return m_count >= m_capacity; }
         // Byte size of this chunk's arena. Chunks of one archetype no longer
         // share a single size (Phase 2), so memory accounting must sum this
@@ -473,6 +564,14 @@ namespace Astra
             InitializeColumns();
         }
 
+        // Words of disabled bits a column needs to cover `capacity` slots (64 slots
+        // per 64-bit word). Kept alongside the carve so the archetype-side capacity
+        // math (Archetype::ComputeLayoutBytesForCapacity) can mirror it exactly.
+        ASTRA_NODISCARD static constexpr size_t WordsForCapacity(size_t capacity) noexcept
+        {
+            return (capacity + 63) / 64;
+        }
+
         // Assign each storage column a cache-line-aligned base within the chunk arena.
         // Column physical order follows m_meta->columns (ascending by id); tags carry
         // no column, so every column here has real storage.
@@ -487,6 +586,22 @@ namespace Astra
                 m_columns[c].stride = m_meta->columns[c].stride;
                 offset += static_cast<size_t>(m_meta->columns[c].stride) * m_capacity;
             }
+
+            // Second loop: carve one disabled-bit-word region per ENABLEABLE column,
+            // 8-byte aligned, immediately after the column data. Chunk memory was just
+            // zeroed (ctor memset), so every entity is born ENABLED with ZERO writes --
+            // the create/batch-create paths gain nothing (invariant 1). Non-enableable
+            // columns keep disabledWords == nullptr. The archetype's capacity math has
+            // already guaranteed these regions fit; the assert below is the net.
+            const size_t words = WordsForCapacity(m_capacity);
+            for (uint16_t e = 0; e < m_meta->enableableColumnCount; ++e)
+            {
+                const uint16_t c = m_meta->enableableColumns[e];
+                offset = (offset + 7) & ~size_t(7);
+                m_columns[c].disabledWords = reinterpret_cast<uint64_t*>(static_cast<std::byte*>(m_memory) + offset);
+                offset += words * 8;
+            }
+
             ASTRA_ASSERT(offset <= m_chunkSize, "Component layout exceeds chunk size");
         }
 
@@ -504,10 +619,21 @@ namespace Astra
         // Packed per-column storage descriptor. Fixed-capacity array (one slot per
         // possible component id) avoids a per-chunk heap allocation; only
         // [0, m_meta->columnCount) are live.
+        //
+        // Enableable columns additionally own a region of disabled-bit words carved
+        // INSIDE the chunk arena (SET bit == DISABLED; zero-init == enabled) plus a
+        // running disabledCount that is always == popcount(disabledWords). Non-
+        // enableable columns keep disabledWords == nullptr and pay nothing. The
+        // growth of the per-chunk Column footprint (16 -> 32 bytes) is accepted:
+        // the recorded Phase-C packed-[N] Column deferral now also covers these two
+        // fields. uint32_t count (not uint16) because capacity can exceed 65535 at
+        // the 512KB chunk cap.
         struct Column
         {
             void* base{nullptr};
             uint32_t stride{0};
+            uint32_t disabledCount{0};        // == popcount(disabledWords[0, words)); 0 for non-enableable
+            uint64_t* disabledWords{nullptr}; // enableable columns only; nullptr otherwise
         };
 
         void* m_memory;
