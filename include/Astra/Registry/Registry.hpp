@@ -221,14 +221,31 @@ namespace Astra
 
         void DestroyEntity(Entity entity)
         {
-            if (!m_entityManager.IsValid(entity))
+            // Single validated fetch: version + archetype checks subsume the old
+            // IsValid pre-check (same unified record slot -- W1). GetEntityRecord
+            // hands back const for its read-only call sites; the record is
+            // genuinely mutable memory here, so bridge constness once at this
+            // consumer (same const_cast idiom used elsewhere in this file).
+            auto* rec = const_cast<EntityRecord*>(m_archetypeManager->GetEntityRecord(entity));
+            if (!rec) ASTRA_UNLIKELY
                 return;
-            
-            m_signalManager.Emit<Events::EntityDestroyed>(entity);
-            
-            m_archetypeManager->RemoveEntity(entity);
-            m_relationshipGraph->OnEntityDestroyed(entity);
-            m_entityManager.Destroy(entity);
+
+            if (m_signalManager.IsSignalEnabled(Signal::EntityDestroyed)) ASTRA_UNLIKELY
+            {
+                m_signalManager.Emit<Events::EntityDestroyed>(entity);
+            }
+
+            m_archetypeManager->RemoveEntity(entity, rec);
+
+            // Empty-graph fast path: three size loads replace three hash probes.
+            // A relation-holding entity makes the graph non-empty by construction,
+            // so cleanup can never be skipped for an entity that needs it.
+            if (!m_relationshipGraph->Empty()) ASTRA_UNLIKELY
+            {
+                m_relationshipGraph->OnEntityDestroyed(entity);
+            }
+
+            m_entityManager.Destroy(entity, rec);
         }
         
         void DestroyEntities(std::span<Entity> entities)

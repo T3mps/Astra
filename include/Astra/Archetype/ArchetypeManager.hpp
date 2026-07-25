@@ -192,6 +192,15 @@ namespace Astra
             if (!rec || rec->version != entity.GetVersion() || !rec->archetype) ASTRA_UNLIKELY
                 return;
 
+            RemoveEntity(entity, rec);
+        }
+
+        // Record-taking variant: caller already validated the record. Same body as
+        // RemoveEntity(Entity) minus the fetch/guard.
+        void RemoveEntity(Entity entity, EntityRecord* rec)
+        {
+            ASTRA_ASSERT(rec && rec->version == entity.GetVersion() && rec->archetype,
+                         "RemoveEntity(rec): caller must pass a validated record");
             Archetype* archetype = rec->archetype;
             EntityLocation oldLocation = rec->location;
 

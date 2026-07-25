@@ -364,6 +364,13 @@ namespace Astra
         size_t GetParentChildCount() const { return m_parents.Size(); }
         size_t GetParentCount() const { return m_children.Size(); }
         size_t GetLinkedEntityCount() const { return m_links.Size(); }
+
+        // True when the graph has never held (or no longer holds) any relationship
+        // of any kind -- the destroy fast path skips OnEntityDestroyed entirely.
+        ASTRA_NODISCARD bool Empty() const noexcept
+        {
+            return m_parents.Empty() && m_children.Empty() && m_links.Empty();
+        }
         
         void Clear()
         {
