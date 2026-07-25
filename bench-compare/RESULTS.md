@@ -1041,12 +1041,12 @@ non-noise fraction of the gap and stopped short, for the same underlying reason:
 scoped brief).
 
 - **destroy: target ~14.6 ns — NOT reached.** Landed at ~20.02 ns (−23.4% from baseline, confirmed
-  cost-neutral through the `cc57374` fix by ckpt2's flat 19.67 ns). Remaining gap to flecs ≈ **1.37×**
-  (20.02 / 14.58). Task 1's scope was strictly the `Registry::DestroyEntity` seam (validate-once +
+  cost-neutral through the `cc57374` fix by ckpt2's flat 19.67 ns). Remaining gap to flecs ≈ **1.38×**
+  (20.02 / 14.48, same-session ckpt1 pair). Task 1's scope was strictly the `Registry::DestroyEntity` seam (validate-once +
   early-out) — it did not touch `Archetype::RemoveEntity`'s own per-entity chunk-erase/backfill cost,
   which the task's own report already flagged as "the remaining dominant term."
 - **create_batch: target ~17.2 ns — NOT reached.** Landed at 22.59 ns (−31% from ckpt1, −33.7% from
-  baseline). Remaining gap to flecs ≈ **1.31×** (22.59 / 17.17). Task 2's chunk-run rewrite eliminated
+  baseline). Remaining gap to flecs ≈ **1.31×** (22.59 / 17.21, same-session ckpt2 pair). Task 2's chunk-run rewrite eliminated
   the *per-element* `idToColumn`/fn-ptr resolution and the *per-run* chunk/record derivation, but three
   terms remain squarely outside chunk-run's scope: the mandatory **per-entity `generator(...)` call**
   (the API contract is exactly one call per entity — cannot be batched away), the **per-entity
@@ -1055,7 +1055,7 @@ scoped brief).
   run** (once per chunk boundary, not per entity, but still not eliminated).
 
 Both sub-levers are correctly scoped, honestly reported wins, not disguised failures: destroy closed
-roughly three-fifths of the baseline-to-target distance ((26.14−20.02)/(26.14−14.58) ≈ 53%),
+just over half of the baseline-to-target distance ((26.14−20.02)/(26.14−14.58) ≈ 53%),
 create_batch closed roughly two-thirds ((34.06−22.59)/(34.06−17.17) ≈ 68%) — real progress that
 stopped at each task's deliberately scoped boundary, not at a measurement or implementation ceiling.
 
