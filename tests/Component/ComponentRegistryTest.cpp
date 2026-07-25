@@ -745,3 +745,49 @@ TEST(ComponentDescriptorTagTest, DestructSkipsEmptyComponent)
 
     EXPECT_EQ(ThemeFCountedTag::s_live, 0);   // BUG: -1 (the dtor ran on non-object storage)
 }
+
+// ==========================================================================
+// Enableable-components (spec 2026-07-25 Task 1): trait detection + descriptor
+// snapshot. File-scope (specializations cannot target function-local types).
+// Compile-time only -- never registered, zero TypeIDs consumed.
+// ==========================================================================
+namespace EnableableTraitTestDetail
+{
+    struct MemberSpelled { static constexpr bool AstraEnableable = true; int v; };
+    struct Plain         { int v; };
+    struct SpecSpelled   { int v; };
+}
+template<> struct Astra::EnableableTraits<EnableableTraitTestDetail::SpecSpelled>
+{
+    static constexpr bool value = true;
+};
+
+TEST(EnableableTrait, DetectionCoversBothSpellingsAndNegative)
+{
+    using namespace Astra;
+    using namespace EnableableTraitTestDetail;
+    static_assert(IsEnableableV<MemberSpelled>);
+    static_assert(IsEnableableV<SpecSpelled>);     // specialization escape hatch
+    static_assert(!IsEnableableV<Plain>);
+    static_assert(!IsEnableableV<int>);
+    SUCCEED();
+}
+
+TEST(EnableableTrait, DescriptorSnapshotsTrait)
+{
+    // The two suite components Task 1 marks enableable (Hierarchy, Timer)
+    // must snapshot true; an unmarked sibling (Position) stays false.
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponents<Hierarchy, Timer, Position>();
+
+    const auto* dHierarchy = registry.GetComponentDescriptor(Astra::TypeID<Hierarchy>::Value());
+    const auto* dTimer = registry.GetComponentDescriptor(Astra::TypeID<Timer>::Value());
+    const auto* dOff = registry.GetComponentDescriptor(Astra::TypeID<Position>::Value());
+    ASSERT_NE(dHierarchy, nullptr);
+    ASSERT_NE(dTimer, nullptr);
+    ASSERT_NE(dOff, nullptr);
+
+    EXPECT_TRUE(dHierarchy->isEnableable);
+    EXPECT_TRUE(dTimer->isEnableable);
+    EXPECT_FALSE(dOff->isEnableable);
+}

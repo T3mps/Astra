@@ -32,6 +32,8 @@ namespace Astra
         ResourceAdded    = 1 << 8,
         ResourceRemoved  = 1 << 9,
         ResourceUpdated  = 1 << 10,
+        ComponentEnabled  = 1 << 11,
+        ComponentDisabled = 1 << 12,
         // Reserve space for future signals
         All = ~0u
     };
@@ -122,7 +124,26 @@ namespace Astra
             ComponentID componentId;
             void* component;
         };
-        
+
+        // Enableable-components signal pair (spec 2026-07-25 §2). Gated OFF by
+        // default like every other signal; no emission wired up yet -- Task 1
+        // is groundwork only (enum bits + Events structs).
+        struct ComponentEnabled
+        {
+            static constexpr Signal flag = Signal::ComponentEnabled;
+            Entity entity;
+            ComponentID componentId;
+            void* component;
+        };
+
+        struct ComponentDisabled
+        {
+            static constexpr Signal flag = Signal::ComponentDisabled;
+            Entity entity;
+            ComponentID componentId;
+            void* component;
+        };
+
         struct ParentChanged
         {
             static constexpr Signal flag = Signal::ParentChanged;

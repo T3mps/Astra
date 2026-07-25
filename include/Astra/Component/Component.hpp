@@ -1,5 +1,6 @@
 #pragma once
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -33,6 +34,33 @@ namespace Astra
     class TypeMeta;          // Forward declaration for reflection integration
     class IFieldVisitor;     // Forward declaration for format-agnostic visitor seam
 
+    /**
+     * Opt-in enableability (spec 2026-07-25 §2). A component is enableable iff
+     * it declares `static constexpr bool AstraEnableable = true` or specializes
+     * Astra::EnableableTraits<T>. Enableable columns carry per-chunk disabled
+     * bits; everything else pays nothing.
+     */
+    template<typename T>
+    struct EnableableTraits
+    {
+        // NOTE: `requires {...} && T::AstraEnableable` (the spec's literal shape) does
+        // NOT compile as a single expression -- the right operand of && is not inside
+        // the requires-expression's SFINAE-protected scope, so for a T lacking the
+        // member (or a non-class T like `int`) MSVC hard-errors resolving `T::AstraEnableable`
+        // instead of short-circuiting. if constexpr genuinely gates instantiation of the
+        // branch not taken, which is what the spec's short-circuit intent requires.
+        static constexpr bool value = []() constexpr
+        {
+            if constexpr (requires { { T::AstraEnableable } -> std::convertible_to<bool>; })
+                return T::AstraEnableable;
+            else
+                return false;
+        }();
+    };
+
+    template<typename T>
+    inline constexpr bool IsEnableableV = EnableableTraits<std::remove_const_t<T>>::value;
+
     struct ComponentDescriptor
     {
         using ConstructFn = void(void*);
@@ -63,6 +91,7 @@ namespace Astra
         bool is_trivially_default_constructible;
         bool is_trivially_destructible = false;   // ONLY trait bool with a default: false = always-call-fn-ptr, so a descriptor built outside the registry factory stays safe; siblings are factory-assigned only
         bool is_empty;
+        bool isEnableable = false;   // defaults false (same rationale as is_trivially_destructible above): a hand-built descriptor stays safe; the registry factory assigns IsEnableableV<T>
         ConstructFn* defaultConstruct;
         DestructFn* destruct;
         CopyConstructFn* copyConstruct;

@@ -178,6 +178,7 @@ namespace Astra
             desc.is_trivially_default_constructible = std::is_trivially_default_constructible_v<T>;
             desc.is_trivially_destructible = std::is_trivially_destructible_v<T>;
             desc.is_empty = std::is_empty_v<T>;
+            desc.isEnableable = IsEnableableV<T>;
 
             desc.defaultConstruct = &DefaultConstruct<T>;
             desc.destruct = &Destruct<T>;

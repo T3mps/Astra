@@ -179,11 +179,13 @@ namespace Astra::Test
     // 13. Timer/cooldown component
     struct Timer
     {
+        static constexpr bool AstraEnableable = true;   // enableable-components suite opt-in (spec §2)
+
         float elapsed = 0.0f;
         float duration = 1.0f;
         bool loop = false;
         bool paused = false;
-        
+
         Timer() = default;
         Timer(float dur, bool l = false) : duration(dur), loop(l) {}
         
@@ -194,11 +196,13 @@ namespace Astra::Test
     // 14. Relationship/hierarchy component
     struct Hierarchy
     {
+        static constexpr bool AstraEnableable = true;   // enableable-components suite opt-in (spec §2)
+
         uint32_t parent = 0;
         uint32_t firstChild = 0;
         uint32_t nextSibling = 0;
         uint32_t childCount = 0;
-        
+
         Hierarchy() = default;
     };
     
