@@ -322,6 +322,40 @@ namespace Astra::Test
         }
     };
 
+    // 18. Relocation canary (Commands C1 regression guard): self-referential
+    //     invariant self == &tag. A bitwise relocation of the containing buffer
+    //     preserves `self` but moves `tag`, so any properly-run copy/move ctor
+    //     afterwards sees src.self != &src.tag and counts the violation.
+    //     Pointer COMPARISON only -- never dereferenced: no UB in the detection.
+    struct RelocationCanary
+    {
+        static inline int s_violations = 0;
+        static inline int s_live = 0;
+        int value = 0;
+        char tag = 0;
+        char* self = &tag;
+
+        RelocationCanary() { ++s_live; }
+        explicit RelocationCanary(int v) : value(v) { ++s_live; }
+        RelocationCanary(const RelocationCanary& o) : value(o.value)
+        { s_violations += (o.self != &o.tag) ? 1 : 0; ++s_live; }
+        RelocationCanary(RelocationCanary&& o) noexcept : value(o.value)
+        { s_violations += (o.self != &o.tag) ? 1 : 0; ++s_live; }
+        RelocationCanary& operator=(const RelocationCanary& o)
+        { s_violations += (o.self != &o.tag) ? 1 : 0; value = o.value; return *this; }
+        RelocationCanary& operator=(RelocationCanary&& o) noexcept
+        { s_violations += (o.self != &o.tag) ? 1 : 0; value = o.value; return *this; }
+        ~RelocationCanary() { --s_live; }
+
+        // Mirror Tracked's Serialize rationale (RegisterComponents odr-instantiation).
+        // `tag`/`self` are NOT serialized -- only the plain `value` field.
+        template<typename Archive>
+        void Serialize(Archive& ar)
+        {
+            ar(value);
+        }
+    };
+
     // Helper type traits for testing
     template<typename T>
     struct ComponentTraits

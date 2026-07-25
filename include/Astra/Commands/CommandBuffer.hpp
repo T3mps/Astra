@@ -33,74 +33,140 @@ namespace Astra
     };
 
     /**
-     * Internal byte buffer for storing commands contiguously.
-     * Commands are stored as [Header][Payload] pairs.
+     * Internal segmented byte storage for commands. Commands are stored as
+     * [Header][Payload] pairs inside a chain of STABLE blocks: once written,
+     * a command's bytes never move until Clear()/destruction (Commands C1
+     * fix -- growth acquires a fresh block instead of relocating). Commands
+     * never straddle blocks; walks use CommandHeader::totalSize within each
+     * block's [base, base+used) extent.
      */
     class CommandByteBuffer
     {
     public:
         static constexpr size_t DEFAULT_INITIAL_CAPACITY = 4096;
-        // Every command start is aligned to 16. std::vector<std::byte>'s
-        // allocation is aligned to __STDCPP_DEFAULT_NEW_ALIGNMENT__ (16 on all
-        // supported targets), so for payload alignment A <= 16 the reader's
-        // absolute-address alignment and the writer's command-relative offset
-        // computation are guaranteed to agree.
+        static constexpr size_t MAX_BLOCK_BYTES = 64 * 1024;
+        // Every command start is aligned to 16 within its block. Blocks come
+        // from CommandBlockArena (TLSF payloads: 64B-aligned by its size-
+        // congruence law), so block bases satisfy this with headroom.
         static constexpr size_t ALIGNMENT = 16;
         static_assert(__STDCPP_DEFAULT_NEW_ALIGNMENT__ >= ALIGNMENT,
             "CommandByteBuffer requires operator-new alignment >= 16 (32-bit targets are unsupported)");
 
-        explicit CommandByteBuffer(size_t initialCapacity = DEFAULT_INITIAL_CAPACITY)
+        struct Block
         {
-            m_data.reserve(initialCapacity);
+            std::byte* base = nullptr;
+            size_t capacity = 0;
+            size_t used = 0;
+        };
+
+        explicit CommandByteBuffer(CommandBlockArena* arena,
+                                   size_t initialCapacity = DEFAULT_INITIAL_CAPACITY) :
+            m_arena(arena),
+            m_nextBlockBytes(initialCapacity)
+        {}
+
+        CommandByteBuffer(const CommandByteBuffer&) = delete;
+        CommandByteBuffer& operator=(const CommandByteBuffer&) = delete;
+
+        ~CommandByteBuffer()
+        {
+            if (m_arena)
+            {
+                for (Block& b : m_blocks)
+                    m_arena->Release(b.base);
+            }
         }
 
         /**
-         * Allocate space in the buffer for a command.
-         * @param size Total size needed (header + payload + data)
-         * @return Pointer to the allocated space, or nullptr if allocation failed
+         * Allocate STABLE space for one command (never moves until
+         * Clear()/destruction). Returns nullptr only on arena exhaustion.
+         *
+         * @param size           Total size needed (header + payload + data).
+         * @param outAlignedSize If non-null, receives the 16-aligned byte
+         *                       stride the command actually occupies (some
+         *                       record sites stamp this into the header).
          */
         std::byte* Allocate(size_t size, size_t* outAlignedSize = nullptr)
         {
-            // Align the size to ALIGNMENT (16) bytes
             size_t alignedSize = AlignUp(size, ALIGNMENT);
-
-            size_t currentSize = m_data.size();
-            m_data.resize(currentSize + alignedSize);
-
             if (outAlignedSize)
                 *outAlignedSize = alignedSize;
 
-            return m_data.data() + currentSize;
+            // Advance-only: a command that doesn't fit the active block moves
+            // to the NEXT block (never back), so walking blocks in order
+            // always replays record order. Skipped remainders stay dead until
+            // Clear() resets the cursors.
+            while (m_activeBlock < m_blocks.size() &&
+                   m_blocks[m_activeBlock].capacity - m_blocks[m_activeBlock].used < alignedSize)
+            {
+                ++m_activeBlock;
+            }
+            if (m_activeBlock == m_blocks.size())
+            {
+                if (!AcquireBlock(alignedSize)) ASTRA_UNLIKELY
+                    return nullptr;
+            }
+
+            Block& b = m_blocks[m_activeBlock];
+            ASTRA_ASSERT((reinterpret_cast<uintptr_t>(b.base) % ALIGNMENT) == 0,
+                         "command block base must satisfy command alignment");
+            std::byte* ptr = b.base + b.used;
+            b.used += alignedSize;
+            m_totalUsed += alignedSize;
+            return ptr;
+        }
+
+        [[nodiscard]] const std::vector<Block>& Blocks() const noexcept { return m_blocks; }
+        [[nodiscard]] size_t BlockCount() const noexcept { return m_blocks.size(); }
+        [[nodiscard]] size_t Size() const noexcept { return m_totalUsed; }
+        [[nodiscard]] bool IsEmpty() const noexcept { return m_totalUsed == 0; }
+
+        /**
+         * Reset every block's write cursor, KEEPING the blocks (retention:
+         * steady-state record->flush->clear cycles make zero arena calls).
+         */
+        void Clear() noexcept
+        {
+            for (Block& b : m_blocks)
+                b.used = 0;
+            m_activeBlock = 0;
+            m_totalUsed = 0;
         }
 
         /**
-         * Get pointer to the beginning of the buffer.
+         * Ensure total capacity >= capacity by acquiring at most one block.
          */
-        [[nodiscard]] std::byte* Data() noexcept { return m_data.data(); }
-        [[nodiscard]] const std::byte* Data() const noexcept { return m_data.data(); }
-
-        /**
-         * Get the current size of the buffer in bytes.
-         */
-        [[nodiscard]] size_t Size() const noexcept { return m_data.size(); }
-
-        /**
-         * Check if the buffer is empty.
-         */
-        [[nodiscard]] bool IsEmpty() const noexcept { return m_data.empty(); }
-
-        /**
-         * Clear the buffer, but keep the allocated capacity.
-         */
-        void Clear() noexcept { m_data.clear(); }
-
-        /**
-         * Reserve capacity in the buffer.
-         */
-        void Reserve(size_t capacity) { m_data.reserve(capacity); }
+        void Reserve(size_t capacity)
+        {
+            size_t total = 0;
+            for (const Block& b : m_blocks)
+                total += b.capacity;
+            if (total < capacity)
+                AcquireBlock(capacity - total);
+        }
 
     private:
-        std::vector<std::byte> m_data;
+        bool AcquireBlock(size_t minBytes)
+        {
+            if (!m_arena) ASTRA_UNLIKELY
+                return false;
+            // Geometric ramp capped at MAX_BLOCK_BYTES; an oversized command
+            // gets a block sized to fit it exactly.
+            size_t request = std::max(m_nextBlockBytes, minBytes);
+            CommandBlockArena::BlockAlloc alloc = m_arena->Acquire(request);
+            if (!alloc.ptr) ASTRA_UNLIKELY
+                return false;
+            m_blocks.push_back(Block{alloc.ptr, alloc.bytes, 0});
+            m_activeBlock = m_blocks.size() - 1;
+            m_nextBlockBytes = std::min(request * 2, MAX_BLOCK_BYTES);
+            return true;
+        }
+
+        CommandBlockArena* m_arena = nullptr;
+        std::vector<Block> m_blocks;
+        size_t m_activeBlock = 0;
+        size_t m_nextBlockBytes = DEFAULT_INITIAL_CAPACITY;
+        size_t m_totalUsed = 0;
     };
 
     /**
@@ -147,6 +213,7 @@ namespace Astra
         // with deferredCreation == true (see InitializeThreadBuffer).
         explicit CommandBuffer(Registry* registry, bool deferredCreation = false) :
             m_registry(registry),
+            m_buffer(registry ? &registry->GetCommandBlockArena() : nullptr),
             m_deferredCreation(deferredCreation)
         {
             ASTRA_ASSERT(registry != nullptr, "Registry cannot be null");
@@ -797,10 +864,6 @@ namespace Astra
                 return Result<void, ExecutionError>::Err(ExecutionError::InvalidRegistry);
             }
 
-            std::byte* ptr = m_buffer.Data();
-            ASTRA_ASSERT((reinterpret_cast<uintptr_t>(ptr) % CommandByteBuffer::ALIGNMENT) == 0,
-                         "Command buffer base must be 16-aligned");
-            std::byte* end = ptr + m_buffer.Size();
             m_lastExecutedCount = 0;
 
             // Deferred-mode buffers (ParallelCommandBuffer's per-worker buffers)
@@ -812,34 +875,42 @@ namespace Astra
             // nothing.
             PlaceholderMap placeholders;
 
-            while (ptr < end)
+            // Walk each STABLE block in acquisition order (== record order):
+            // every command lives wholly within one block's [base, base+used)
+            // extent (C1 fix -- commands never straddle blocks).
+            for (const CommandByteBuffer::Block& block : m_buffer.Blocks())
             {
-                auto* header = reinterpret_cast<CommandHeader*>(ptr);
-                std::byte* payloadPtr = ptr + sizeof(CommandHeader);
-
-                if (m_deferredCreation)
-                    ResolvePlaceholders(header->type, payloadPtr, placeholders);
-
-                bool success = ExecuteCommand(header->type, payloadPtr);
-
-                if (!success)
+                std::byte* ptr = block.base;
+                std::byte* end = block.base + block.used;
+                while (ptr < end)
                 {
-                    // Partial execution occurred - clean up what we can
-                    // Note: Already-executed commands are NOT rolled back
-                    RollbackAllocatedEntities();
-                    CleanupPendingCommands();
-                    m_buffer.Clear();
-                    m_commandCount = 0;
-                    m_commandKeys.clear();
-                    m_hasCustomSortKey = false;
-                    m_autoSeq = 0;
-                    m_nextPlaceholder = 0;
-                    return Result<void, ExecutionError>::Err(ExecutionError::ExecutionFailed);
-                }
+                    auto* header = reinterpret_cast<CommandHeader*>(ptr);
+                    std::byte* payloadPtr = ptr + sizeof(CommandHeader);
 
-                // Advance by aligned size (commands are stored at ALIGNMENT-byte stride)
-                ptr += AlignUp(static_cast<size_t>(header->totalSize), CommandByteBuffer::ALIGNMENT);
-                m_lastExecutedCount++;
+                    if (m_deferredCreation)
+                        ResolvePlaceholders(header->type, payloadPtr, placeholders);
+
+                    bool success = ExecuteCommand(header->type, payloadPtr);
+
+                    if (!success)
+                    {
+                        // Partial execution occurred - clean up what we can
+                        // Note: Already-executed commands are NOT rolled back
+                        RollbackAllocatedEntities();
+                        CleanupPendingCommands();
+                        m_buffer.Clear();
+                        m_commandCount = 0;
+                        m_commandKeys.clear();
+                        m_hasCustomSortKey = false;
+                        m_autoSeq = 0;
+                        m_nextPlaceholder = 0;
+                        return Result<void, ExecutionError>::Err(ExecutionError::ExecutionFailed);
+                    }
+
+                    // Advance by aligned size (commands are stored at ALIGNMENT-byte stride)
+                    ptr += AlignUp(static_cast<size_t>(header->totalSize), CommandByteBuffer::ALIGNMENT);
+                    m_lastExecutedCount++;
+                }
             }
 
             // Success - clear allocated entities tracking
@@ -861,35 +932,36 @@ namespace Astra
         [[nodiscard]] size_t GetLastExecutedCount() const noexcept { return m_lastExecutedCount; }
 
         /**
-         * Get the {SortKey, byte offset} descriptor recorded for every command
-         * currently in this buffer, in the same order they were recorded
-         * (i.e. in the same order their offsets appear walking the byte
-         * buffer). Consumed by ParallelCommandBuffer::ExecuteSorted() to build
-         * a cross-buffer, globally-sorted apply order; never used by the
-         * physical-order Execute() path.
+         * Get the {SortKey, stable command pointer} descriptor recorded for
+         * every command currently in this buffer, in the same order they were
+         * recorded (i.e. the same order they appear walking the block chain).
+         * The pointers are STABLE (C1 fix): each addresses its command's header
+         * in place, valid until Clear()/destruction. Consumed by
+         * ParallelCommandBuffer::ExecuteSorted() to build a cross-buffer,
+         * globally-sorted apply order; never used by the physical-order
+         * Execute() path.
          */
-        [[nodiscard]] const std::vector<std::pair<SortKey, size_t>>& CommandKeys() const noexcept
+        [[nodiscard]] const std::vector<std::pair<SortKey, std::byte*>>& CommandKeys() const noexcept
         {
             return m_commandKeys;
         }
 
         /**
-         * Apply the single command whose header starts at the given byte
-         * offset into this buffer, via the same per-command dispatch Execute()
-         * uses. This is the public entry point ParallelCommandBuffer::
-         * ExecuteSorted() uses to apply commands out of physical order without
-         * reaching into CommandBuffer's private execution internals.
+         * Apply the single command whose header is at the given stable command
+         * pointer, via the same per-command dispatch Execute() uses. This is
+         * the public entry point ParallelCommandBuffer::ExecuteSorted() uses to
+         * apply commands out of physical order without reaching into
+         * CommandBuffer's private execution internals.
          *
-         * @param offset Byte offset of a CommandHeader previously returned via
-         *               CommandKeys(); must belong to THIS buffer.
+         * @param command Stable command pointer from CommandKeys(); must belong
+         *                to THIS buffer.
          * @return true if the command applied successfully (same semantics as
          *         each per-command Execute*() helper).
          */
-        bool ApplyCommandAt(size_t offset)
+        bool ApplyCommandAt(std::byte* command)
         {
-            std::byte* ptr = m_buffer.Data() + offset;
-            auto* header = reinterpret_cast<CommandHeader*>(ptr);
-            std::byte* payloadPtr = ptr + sizeof(CommandHeader);
+            auto* header = reinterpret_cast<CommandHeader*>(command);
+            std::byte* payloadPtr = command + sizeof(CommandHeader);
             return ExecuteCommand(header->type, payloadPtr);
         }
 
@@ -907,15 +979,15 @@ namespace Astra
          * per-buffer counters, so two buffers can mint the same placeholder
          * value; ExecuteSorted therefore keys one map per CommandBuffer*.
          *
-         * @param offset Byte offset of a CommandHeader from CommandKeys().
-         * @param map    This buffer's placeholder->real resolution map.
+         * @param command Stable command pointer from CommandKeys(); must belong
+         *                to THIS buffer.
+         * @param map     This buffer's placeholder->real resolution map.
          * @return true iff the (translated) command applied successfully.
          */
-        bool ResolveAndApplyCommandAt(size_t offset, PlaceholderMap& map)
+        bool ResolveAndApplyCommandAt(std::byte* command, PlaceholderMap& map)
         {
-            std::byte* ptr = m_buffer.Data() + offset;
-            auto* header = reinterpret_cast<CommandHeader*>(ptr);
-            std::byte* payloadPtr = ptr + sizeof(CommandHeader);
+            auto* header = reinterpret_cast<CommandHeader*>(command);
+            std::byte* payloadPtr = command + sizeof(CommandHeader);
             ResolvePlaceholders(header->type, payloadPtr, map);
             return ExecuteCommand(header->type, payloadPtr);
         }
@@ -971,6 +1043,12 @@ namespace Astra
         }
 
         /**
+         * Number of storage blocks currently held (diagnostics/tests: the
+         * retention contract -- Clear() keeps blocks -- is observable here).
+         */
+        [[nodiscard]] size_t GetStorageBlockCount() const noexcept { return m_buffer.BlockCount(); }
+
+        /**
          * Rollback all entities that were allocated but not yet added to archetypes.
          *
          * m_allocatedEntities is populated in the same order CreateEntity/CreateEntities
@@ -996,19 +1074,16 @@ namespace Astra
 
     private:
         /**
-         * Record the {SortKey, offset} descriptor for the command whose header
-         * was just allocated at commandPtr. Must be called immediately after
-         * m_buffer.Allocate() returns, before any further allocation on this
-         * buffer, so the offset is computed from the current (possibly just-
-         * reallocated) base pointer -- storing an offset rather than the raw
-         * pointer keeps the descriptor valid across future buffer growth.
+         * Record the {SortKey, command pointer} descriptor for the command
+         * whose header was just allocated at commandPtr. Block storage is
+         * STABLE (C1 fix), so the raw pointer stays valid until
+         * Clear()/destruction -- no offset indirection needed.
          */
-        void StampCommand(const std::byte* commandPtr)
+        void StampCommand(std::byte* commandPtr)
         {
-            size_t offset = static_cast<size_t>(commandPtr - m_buffer.Data());
             SortKey key = m_hasCustomSortKey ? m_currentSortKey : SortKey{0, 0, m_autoSeq};
             ++m_autoSeq;
-            m_commandKeys.emplace_back(key, offset);
+            m_commandKeys.emplace_back(key, commandPtr);
         }
 
         // ============= Placeholder Entities (deferred creation, Task 5) =======
@@ -1468,50 +1543,55 @@ namespace Astra
          */
         void CleanupPendingCommands()
         {
-            std::byte* ptr = m_buffer.Data();
-            std::byte* end = ptr + m_buffer.Size();
-
-            while (ptr < end)
+            // Per-block walk (C1 fix): each command lives wholly within one
+            // STABLE block. Destructor thunks run exactly once per recorded
+            // command -- once over the whole chain here.
+            for (const CommandByteBuffer::Block& block : m_buffer.Blocks())
             {
-                auto* header = reinterpret_cast<CommandHeader*>(ptr);
-                std::byte* payloadPtr = ptr + sizeof(CommandHeader);
-
-                // Only need to cleanup commands with inline component data
-                switch (header->type)
+                std::byte* ptr = block.base;
+                std::byte* end = block.base + block.used;
+                while (ptr < end)
                 {
-                    case CommandType::AddComponent:
-                    {
-                        auto* cmd = reinterpret_cast<AddComponentPayload*>(payloadPtr);
-                        if (cmd->destructor)
-                        {
-                            cmd->destructor(cmd->GetDataPtr());
-                        }
-                        break;
-                    }
-                    case CommandType::AddComponentBatch:
-                    {
-                        auto* cmd = reinterpret_cast<AddComponentBatchPayload*>(payloadPtr);
-                        if (cmd->destructor)
-                        {
-                            cmd->destructor(cmd->GetDataPtr());
-                        }
-                        break;
-                    }
-                    case CommandType::SetResource:
-                    {
-                        auto* cmd = reinterpret_cast<SetResourcePayload*>(payloadPtr);
-                        if (cmd->destructor)
-                        {
-                            cmd->destructor(cmd->GetDataPtr());
-                        }
-                        break;
-                    }
-                    default:
-                        break;
-                }
+                    auto* header = reinterpret_cast<CommandHeader*>(ptr);
+                    std::byte* payloadPtr = ptr + sizeof(CommandHeader);
 
-                // Advance by aligned size (commands are stored at ALIGNMENT-byte stride)
-                ptr += AlignUp(static_cast<size_t>(header->totalSize), CommandByteBuffer::ALIGNMENT);
+                    // Only need to cleanup commands with inline component data
+                    switch (header->type)
+                    {
+                        case CommandType::AddComponent:
+                        {
+                            auto* cmd = reinterpret_cast<AddComponentPayload*>(payloadPtr);
+                            if (cmd->destructor)
+                            {
+                                cmd->destructor(cmd->GetDataPtr());
+                            }
+                            break;
+                        }
+                        case CommandType::AddComponentBatch:
+                        {
+                            auto* cmd = reinterpret_cast<AddComponentBatchPayload*>(payloadPtr);
+                            if (cmd->destructor)
+                            {
+                                cmd->destructor(cmd->GetDataPtr());
+                            }
+                            break;
+                        }
+                        case CommandType::SetResource:
+                        {
+                            auto* cmd = reinterpret_cast<SetResourcePayload*>(payloadPtr);
+                            if (cmd->destructor)
+                            {
+                                cmd->destructor(cmd->GetDataPtr());
+                            }
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+
+                    // Advance by aligned size (commands are stored at ALIGNMENT-byte stride)
+                    ptr += AlignUp(static_cast<size_t>(header->totalSize), CommandByteBuffer::ALIGNMENT);
+                }
             }
         }
 
@@ -1538,7 +1618,9 @@ namespace Astra
         Entity::StorageType m_nextPlaceholder = 0;
 
         // Sort-key bookkeeping, parallel to m_buffer (see StampCommand/SetNextSortKey).
-        std::vector<std::pair<SortKey, size_t>> m_commandKeys;
+        // The second element is a STABLE command pointer (C1 fix): block storage
+        // never moves, so the raw pointer stays valid until Clear()/destruction.
+        std::vector<std::pair<SortKey, std::byte*>> m_commandKeys;
         SortKey m_currentSortKey{};
         bool m_hasCustomSortKey = false;
         uint32_t m_autoSeq = 0;  // stamped as recordSequence when no explicit key was set
@@ -1607,8 +1689,8 @@ namespace Astra
          * Execute every recorded command from every thread buffer in
          * deterministic SortKey order rather than physical arrival order.
          *
-         * Gathers a {SortKey, CommandBuffer*, offset} descriptor for every
-         * command across every worker buffer (via CommandBuffer::CommandKeys()),
+         * Gathers a {SortKey, CommandBuffer*, command pointer} descriptor for
+         * every command across every worker buffer (via CommandBuffer::CommandKeys()),
          * stable-sorts by key (so commands with equal keys keep their original
          * gather order -- which is arrival order within a buffer, and
          * worker-registration order across buffers), then applies each command
@@ -1656,7 +1738,7 @@ namespace Astra
             {
                 SortKey key;
                 CommandBuffer* buf;
-                size_t offset;
+                std::byte* cmd;   // stable command pointer (C1 fix)
             };
 
             std::vector<Item> items;
@@ -1664,9 +1746,9 @@ namespace Astra
             {
                 if (b)
                 {
-                    for (const auto& [key, offset] : b->CommandKeys())
+                    for (const auto& [key, cmd] : b->CommandKeys())
                     {
-                        items.push_back({key, b.get(), offset});
+                        items.push_back({key, b.get(), cmd});
                     }
                 }
             }
@@ -1687,7 +1769,7 @@ namespace Astra
 
             for (const auto& it : items)
             {
-                if (!it.buf->ResolveAndApplyCommandAt(it.offset, perBufferMaps[it.buf]))
+                if (!it.buf->ResolveAndApplyCommandAt(it.cmd, perBufferMaps[it.buf]))
                 {
                     // Task 4: logical failure -- skip and record, do NOT abort
                     // or roll back the flush. See this function's class-level

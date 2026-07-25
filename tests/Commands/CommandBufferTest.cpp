@@ -508,3 +508,115 @@ TEST_F(CommandBufferTest, CommandBufferAddByIDComplexMoveUsesMoveConstructNotMem
     registry->DestroyEntity(e);
     EXPECT_EQ(Tracked::s_live, baseLive) << "destroy must return the live count to baseline";
 }
+
+TEST_F(CommandBufferTest, NonTrivialComponentsSurviveBufferGrowth)
+{
+    using Astra::Test::RelocationCanary;
+    RelocationCanary::s_violations = 0;
+    const int liveBase = RelocationCanary::s_live;
+
+    // ~64 encoded bytes per AddComponent command: 200 of them blow far past
+    // the 4096-byte initial capacity, forcing storage growth mid-recording.
+    constexpr int kCount = 200;
+    std::vector<Entity> ents;
+    ents.reserve(kCount);
+    for (int i = 0; i < kCount; ++i)
+    {
+        Entity e = cmdBuffer->CreateEntity();
+        cmdBuffer->AddComponent(e, RelocationCanary{i});
+        ents.push_back(e);
+    }
+    ASSERT_TRUE(cmdBuffer->Execute().IsOk());
+
+    EXPECT_EQ(RelocationCanary::s_violations, 0)
+        << "recorded component objects were bitwise-relocated by buffer growth (C1)";
+    // Buffer payloads destructed by the post-Execute clear; archetype copies live.
+    EXPECT_EQ(RelocationCanary::s_live, liveBase + kCount);
+    for (int i = 0; i < kCount; ++i)
+    {
+        auto* c = registry->GetComponent<RelocationCanary>(ents[i]);
+        ASSERT_NE(c, nullptr) << "i=" << i;
+        EXPECT_EQ(c->value, i);
+    }
+    for (Entity e : ents) registry->DestroyEntity(e);
+    EXPECT_EQ(RelocationCanary::s_live, liveBase);  // destructor thunk exactly-once overall
+}
+
+TEST_F(CommandBufferTest, GrowthUsesNewBlocksAndClearRetainsThem)
+{
+    auto recordLoad = [&] {
+        for (int i = 0; i < 200; ++i)
+        {
+            Entity e = cmdBuffer->CreateEntity();
+            cmdBuffer->AddComponent(e, Position{float(i), 0.0f, 0.0f});
+        }
+    };
+
+    recordLoad();
+    EXPECT_GT(cmdBuffer->GetStorageBlockCount(), 1u)
+        << "load must actually exercise growth or this test is vacuous";
+    ASSERT_TRUE(cmdBuffer->Execute().IsOk());   // clears on success
+    const size_t blocksAfterFirst = cmdBuffer->GetStorageBlockCount();
+    EXPECT_GT(blocksAfterFirst, 1u);            // retention: Clear() kept them
+
+    recordLoad();
+    ASSERT_TRUE(cmdBuffer->Execute().IsOk());
+    // Same load, second cycle: retained blocks absorb it with zero arena calls.
+    EXPECT_EQ(cmdBuffer->GetStorageBlockCount(), blocksAfterFirst);
+}
+
+TEST_F(CommandBufferTest, RollbackSpansStorageBlocks)
+{
+    // First command fails at Execute -> whole-buffer failure path; every
+    // eagerly-allocated entity is uncommitted and must be destroyed, across
+    // MULTIPLE blocks (300 creates + the add far exceed the 4KB first block).
+    cmdBuffer->AddComponent(Entity::Invalid(), Position{1.0f, 2.0f, 3.0f});
+    std::vector<Entity> ents;
+    for (int i = 0; i < 300; ++i)
+        ents.push_back(cmdBuffer->CreateEntity());
+    EXPECT_GT(cmdBuffer->GetStorageBlockCount(), 1u);
+
+    auto result = cmdBuffer->Execute();
+    EXPECT_TRUE(result.IsErr());
+    EXPECT_EQ(registry->Size(), 0u);
+    for (Entity e : ents)
+        EXPECT_FALSE(registry->IsValid(e));
+}
+
+TEST_F(CommandBufferTest, ParallelSortedFlushCarriesNonTrivialComponents)
+{
+    using Astra::Test::Name;
+    ParallelCommandBuffer pcb(registry.get());
+    constexpr int kThreads = 4;
+    constexpr int kPerThread = 100;
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t)
+    {
+        threads.emplace_back([&pcb, t] {
+            auto& buf = pcb.GetThreadBuffer();
+            for (int j = 0; j < kPerThread; ++j)
+            {
+                Entity e = buf.CreateEntity();
+                // Long enough to be heap-backed on every std::string impl.
+                buf.AddComponent(e, Name{"thread_" + std::to_string(t) +
+                                         "_entity_" + std::to_string(j) +
+                                         "_padded_beyond_any_sso_buffer"});
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    ASSERT_TRUE(pcb.ExecuteSorted().IsOk());
+    EXPECT_TRUE(pcb.GetDeferredErrors().empty());
+    EXPECT_EQ(registry->Size(), size_t(kThreads) * kPerThread);
+
+    auto view = registry->CreateView<Name>();
+    size_t count = 0;
+    view.ForEach([&](Entity, Name& n) {
+        EXPECT_NE(n.value.find("_padded_beyond_any_sso_buffer"), std::string::npos);
+        ++count;
+    });
+    EXPECT_EQ(count, size_t(kThreads) * kPerThread);
+}

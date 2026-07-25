@@ -9,6 +9,7 @@
 
 #include "../Archetype/Archetype.hpp"
 #include "../Archetype/ArchetypeManager.hpp"
+#include "../Commands/CommandBlockArena.hpp"
 #include "../Component/Component.hpp"
 #include "../Component/ComponentRegistry.hpp"
 #include "../Component/ResourceStorage.hpp"
@@ -1061,6 +1062,13 @@ namespace Astra
         ASTRA_NODISCARD std::shared_ptr<ComponentRegistry> ShareComponentRegistry() const noexcept { return m_componentRegistry; }
         ASTRA_NODISCARD ArchetypeManager* GetArchetypeManager() noexcept { return m_archetypeManager.get(); }
         ASTRA_NODISCARD const ArchetypeManager* GetArchetypeManager() const noexcept { return m_archetypeManager.get(); }
+
+        /**
+         * Block source for CommandBuffer storage (Commands C1 fix): stable
+         * blocks that never move until released. Command buffers bound to
+         * this Registry must not outlive it.
+         */
+        ASTRA_NODISCARD CommandBlockArena& GetCommandBlockArena() noexcept { return m_commandBlockArena; }
         
         ASTRA_NODISCARD float GetFragmentationLevel() const
         {
@@ -1625,6 +1633,9 @@ namespace Astra
         std::shared_ptr<RelationshipGraph> m_relationshipGraph;
         SignalManager m_signalManager;
         ResourceStorage m_resourceStorage;
+        // Stable block source for CommandBuffer storage (Commands C1 fix). Holds
+        // a std::mutex, so Registry is intentionally non-movable (documented).
+        CommandBlockArena m_commandBlockArena;
         std::shared_ptr<IWorkScheduler> m_workScheduler;  // null = sequential inline fallback
         Config m_config;   // retained so Clear()/Load() preserve pool + storage policy
     };
