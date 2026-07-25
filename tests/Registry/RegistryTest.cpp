@@ -574,6 +574,52 @@ TEST_F(RegistryTest, BatchOperationsPerformance)
     EXPECT_EQ(registry->Size(), 0u);
 }
 
+// Characterization tests for the chunk-run bulk-create rewrite (Lever 3 Task 2).
+// These lock current observable behavior BEFORE the rewrite: every batch-created
+// entity must own ITS OWN generator values across chunk boundaries (a mis-hoisted
+// column base or wrong run offset would surface as an entity reading a neighbor's
+// value), and a move-only component must be constructed exactly once per entity and
+// torn down to full balance (a doubled/leaked move would desync s_live).
+TEST_F(RegistryTest, BatchCreateValuesSurviveChunkBoundaries)
+{
+    using namespace Astra::Test;
+    // Enough entities to span multiple chunks (grow-as-populate ramps from 4KB).
+    constexpr size_t kCount = 3000;
+    std::vector<Astra::Entity> ents(kCount);
+    size_t created = registry->CreateEntitiesWith<Position, Velocity>(
+        kCount, ents,
+        [](size_t i) { return std::tuple{Position{float(i), 0.f, 0.f},
+                                         Velocity{float(i) * 2.f, 0.f, 0.f}}; });
+    ASSERT_EQ(created, kCount);
+    for (size_t i = 0; i < kCount; ++i)
+    {
+        auto* p = registry->GetComponent<Position>(ents[i]);
+        auto* v = registry->GetComponent<Velocity>(ents[i]);
+        ASSERT_NE(p, nullptr) << "i=" << i;
+        ASSERT_NE(v, nullptr) << "i=" << i;
+        EXPECT_FLOAT_EQ(p->x, float(i));             // every entity owns ITS generator values
+        EXPECT_FLOAT_EQ(v->dx, float(i) * 2.f);      // Velocity's field is dx (not x)
+    }
+}
+
+TEST_F(RegistryTest, BatchCreateLifetimeBalanceMoveOnly)
+{
+    using namespace Astra::Test;
+    const int base = Tracked::s_live;
+    {
+        constexpr size_t kCount = 500;
+        std::vector<Astra::Entity> ents(kCount);
+        size_t created = registry->CreateEntitiesWith<Tracked>(
+            kCount, ents,
+            [](size_t i) { return std::tuple{Tracked{int(i)}}; });
+        ASSERT_EQ(created, kCount);
+        EXPECT_EQ(Tracked::s_live, base + int(kCount));      // constructed exactly once each
+        EXPECT_EQ(registry->GetComponent<Tracked>(ents[123])->value, 123);
+        for (auto e : ents) registry->DestroyEntity(e);
+    }
+    EXPECT_EQ(Tracked::s_live, base);                        // full teardown balance
+}
+
 // Serialization tests split out (2026-07-10 test-suite audit) into
 // tests/Registry/RegistrySerializationTest.cpp.
 

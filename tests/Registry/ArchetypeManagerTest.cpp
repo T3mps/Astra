@@ -191,6 +191,49 @@ TEST_F(ArchetypeManagerTest, RecordChunkInvariant_Deserialize)
         ExpectChunkInvariant(&manager2, testEntities[i]);
 }
 
+// Lever 3 Task 2 (chunk-run bulk create + run-hoisted record writes): a batch
+// AddEntitiesWith spanning multiple chunks must leave every record's cached chunk
+// pointer EXACTLY GetChunks()[chunkIndex].get(). The manager's record loop derives
+// that pointer once per chunk run and feeds the 4-arg SetRecordLocation funnel; a
+// stale or mis-hoisted pointer here is a use-after-free on the get hot path. This
+// is the record-invariant assertion loop the brief calls for -- it lives here (not
+// in RegistryTest) because ExpectChunkInvariant is file-local to this fixture.
+// Reuses only Position/Velocity (no new component types); handles are seeded 0..10000.
+TEST_F(ArchetypeManagerTest, RecordChunkInvariant_BatchAddEntitiesWith)
+{
+    using namespace Astra;
+    using namespace Astra::Test;
+
+    constexpr int N = 3000;   // spans multiple 4KB-floored chunks
+    std::vector<Entity> ents;
+    ents.reserve(N);
+    for (int i = 0; i < N; ++i)
+        ents.emplace_back(static_cast<uint32_t>(i), 1);
+
+    manager->AddEntitiesWith<Position, Velocity>(
+        std::span<const Entity>(ents),
+        [](size_t i) { return std::make_tuple(Position{float(i), 0.f, 0.f},
+                                              Velocity{float(i) * 2.f, 0.f, 0.f}); });
+
+    Archetype* arch = manager->GetEntityRecord(ents[0])->archetype;
+    ASSERT_NE(arch, nullptr);
+    ASSERT_GT(arch->GetChunks().size(), 1u);   // precondition: batch spans >1 chunk
+
+    for (int i = 0; i < N; ++i)
+    {
+        ExpectChunkInvariant(manager.get(), ents[i]);
+        // Per-entity value integrity across the run-hoisted writes.
+        const EntityRecord* rec = manager->GetEntityRecord(ents[i]);
+        ASSERT_NE(rec, nullptr);
+        Position* p = arch->GetComponent<Position>(rec->location);
+        Velocity* v = arch->GetComponent<Velocity>(rec->location);
+        ASSERT_NE(p, nullptr);
+        ASSERT_NE(v, nullptr);
+        EXPECT_FLOAT_EQ(p->x, float(i));
+        EXPECT_FLOAT_EQ(v->dx, float(i) * 2.f);
+    }
+}
+
 // Test basic entity addition and removal
 TEST_F(ArchetypeManagerTest, BasicEntityOperations)
 {
