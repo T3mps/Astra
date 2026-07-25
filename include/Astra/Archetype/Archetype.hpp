@@ -960,6 +960,35 @@ namespace Astra
                         // Should not happen - components should be serializable
                         ASTRA_ASSERT(false, "Component type is not serializable");
                     }
+
+                    // Enableable-components (Task 4, format v4): persist this column's
+                    // per-chunk disabled-bit state immediately after its component data.
+                    // Zero-cost for non-enableable columns (invariant 1) -- the branch
+                    // below is skipped entirely unless the descriptor opted into
+                    // ASTRA_ENABLEABLE, so a zero-enableable archetype's serialized size
+                    // is unchanged by this feature (beyond the version-constant bump).
+                    if (desc.isEnableable)
+                    {
+                        // Tag components (desc.size == 0) never reach here -- their
+                        // componentArray is null and the `continue` above already
+                        // skipped them -- so this ordinal is always a real storage column.
+                        const int col = m_columnMeta.idToColumn[desc.id];
+                        writer(chunk->GetDisabledCount(col));
+
+                        const uint64_t* words = chunk->GetDisabledWords(col);
+                        // Word count mirrors the EXACT capacity Deserialize will
+                        // reconstruct this chunk at (max(1, chunkEntityCount)), not this
+                        // (possibly larger, not-yet-full) live chunk's own capacity. Any
+                        // bit at or beyond chunkEntityCount is guaranteed zero by the
+                        // disabled-bit invariant (spec 14.2), so truncating to the
+                        // reader's exact-fit word count loses no information.
+                        const size_t wordCapacity = std::max<size_t>(1, chunkEntityCount);
+                        const size_t wordCount = (wordCapacity + 63) / 64;
+                        for (size_t w = 0; w < wordCount; ++w)
+                        {
+                            writer(words[w]);
+                        }
+                    }
                 }
             }
         }
@@ -1225,6 +1254,72 @@ namespace Astra
 
                         // Copy decompressed data to component array
                         std::memcpy(componentArray, data.data(), arraySize);
+                    }
+
+                    // Enableable-components (Task 4, format v4): mirror-image of the
+                    // write side above. v4+ archives carry a disabledCount + word
+                    // section for every enableable column right after its component
+                    // data -- read and VALIDATE it (refuse-not-trust, spec 14 invariant
+                    // 8): a disabledCount that doesn't match popcount(words), or any bit
+                    // set at or beyond this chunk's live entity count, is corrupted data
+                    // and fails the whole load rather than loading it silently. Pre-v4
+                    // archives never wrote this section for ANY column (the feature did
+                    // not exist yet) -- skip reading it; the chunk's word region is
+                    // already zero-init from AppendChunk/InitializeColumns above, so
+                    // every entity in a legacy load comes back enabled at zero extra
+                    // cost (invariant 8's "legacy loads all-enabled" contract).
+                    if (desc.isEnableable)
+                    {
+                        const int col = archetype->m_columnMeta.idToColumn[desc.id];
+                        const size_t wordCapacity = std::max<size_t>(1, static_cast<size_t>(chunkEntityCount));
+                        const size_t wordCount = (wordCapacity + 63) / 64;
+
+                        if (reader.GetVersion() >= 4)
+                        {
+                            uint32_t diskDisabledCount = 0;
+                            reader(diskDisabledCount);
+                            if (reader.HasError())
+                            {
+                                return ResultType::Err(reader.GetError());
+                            }
+
+                            // Read into a local buffer first and validate BEFORE touching
+                            // the live chunk -- a rejected section must not leave the
+                            // chunk's real word region partially written (the archetype
+                            // is discarded on Err either way, but this keeps the write
+                            // atomic/all-or-nothing, matching the compressed-block read
+                            // above).
+                            std::vector<uint64_t> diskWords(wordCount, 0);
+                            uint32_t popcount = 0;
+                            for (size_t w = 0; w < wordCount; ++w)
+                            {
+                                reader(diskWords[w]);
+                                popcount += static_cast<uint32_t>(std::popcount(diskWords[w]));
+                            }
+                            if (reader.HasError())
+                            {
+                                return ResultType::Err(reader.GetError());
+                            }
+
+                            if (diskDisabledCount != popcount)
+                            {
+                                return ResultType::Err(SerializationError::CorruptedData);
+                            }
+
+                            for (size_t i = static_cast<size_t>(chunkEntityCount); i < wordCount * 64; ++i)
+                            {
+                                if ((diskWords[i >> 6] >> (i & 63)) & 1ull)
+                                {
+                                    return ResultType::Err(SerializationError::CorruptedData);
+                                }
+                            }
+
+                            uint64_t* liveWords = chunk->GetDisabledWords(col);
+                            std::memcpy(liveWords, diskWords.data(), wordCount * sizeof(uint64_t));
+                            chunk->m_columns[col].disabledCount = diskDisabledCount;
+                        }
+                        // else: legacy (pre-v4) archive -- no bits on disk, chunk already
+                        // all-enabled by zero-init.
                     }
                 }
 

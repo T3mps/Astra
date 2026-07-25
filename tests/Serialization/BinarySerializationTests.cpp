@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 #include <Astra/Serialization/BinaryWriter.hpp>
 #include <Astra/Serialization/BinaryReader.hpp>
+#include <Astra/Astra.hpp>
 #include <filesystem>
 #include <array>
+#include <span>
+#include <vector>
+#include "../TestComponents.hpp"
 
 namespace
 {
@@ -843,5 +847,255 @@ TEST_F(BinarySerializationTests, EmptyContainerSerialization)
         EXPECT_TRUE(readSet.empty());
         EXPECT_FALSE(readOpt.has_value());
         EXPECT_EQ(readArray.size(), 0u);
+    }
+}
+
+// ======================= Enableable-component bit persistence (Task 4) =======================
+//
+// Astra::Test::Hierarchy is the suite's ASTRA_ENABLEABLE component (spec 2026-07-25
+// section 2; see RegistryTest.cpp's EnA alias). Reused here rather than introducing a
+// new type -- the suite sits near the TypeID ceiling.
+
+// Full round trip through the public Registry::Save()/Load() API: mixed
+// enabled/disabled state across enough entities to span multiple chunks must
+// come back byte-identical by entity identity.
+TEST_F(BinarySerializationTests, EnabledBitsRoundTrip)
+{
+    using namespace Astra::Test;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponent<Hierarchy>();
+
+    // Hierarchy is 16 bytes; grow-as-populate chunk sizing puts several chunks
+    // well within this count (mirrors RegistryTest.cpp's N=3000 "spans chunks"
+    // idiom for the same component).
+    constexpr size_t N = 3000;
+    std::vector<Astra::Entity> ents(N);
+    size_t created = reg.CreateEntitiesWith<Hierarchy>(N, std::span{ents},
+        [](size_t) { return std::tuple{Hierarchy{}}; });
+    ASSERT_EQ(created, N);
+
+    std::vector<bool> expectedEnabled(N, true);
+    for (size_t i = 0; i < N; ++i)
+    {
+        if ((i % 3) == 0)
+        {
+            reg.SetEnabled<Hierarchy>(ents[i], false);
+            expectedEnabled[i] = false;
+        }
+    }
+    for (size_t i = 0; i < N; ++i)
+        ASSERT_EQ(reg.IsEnabled<Hierarchy>(ents[i]), expectedEnabled[i]) << "pre-save model mismatch at " << i;
+
+    auto saved = reg.Save();
+    ASSERT_TRUE(saved.IsOk());
+
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    creg->RegisterComponent<Hierarchy>();
+    auto loaded = Astra::Registry::Load(std::span<const std::byte>(*saved.GetValue()), creg);
+    ASSERT_TRUE(loaded.IsOk());
+    auto& loadedReg = **loaded.GetValue();
+
+    ASSERT_EQ(loadedReg.Size(), N);
+    for (size_t i = 0; i < N; ++i)
+    {
+        EXPECT_EQ(loadedReg.IsEnabled<Hierarchy>(ents[i]), expectedEnabled[i])
+            << "round-trip enabled-state mismatch at identity " << i;
+    }
+}
+
+// A capture written at the pre-v4 version (bits section absent entirely) must
+// load with every enableable component enabled. There is no live pre-v4
+// writer to call (Archetype::Serialize always emits the current wire format),
+// so this hand-builds the legacy buffer directly -- mirroring the exact field
+// order visible in Archetype::Serialize/Deserialize today, minus the
+// disabledCount+words section this task adds -- and stamps the header at the
+// old version, the same seam ArchetypeManagerTest.cpp's
+// V2LoadNullsSurvivingRootStaleEdges test uses to drive a specific version's
+// deserialize branch.
+TEST_F(BinarySerializationTests, LegacyFormatLoadsAllEnabled)
+{
+    using namespace Astra::Test;
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+    cr->RegisterComponents<Hierarchy>();
+    const Astra::ComponentID hierId = Astra::TypeID<Hierarchy>::Value();
+    const Astra::ComponentDescriptor* hierDesc = cr->GetComponentDescriptor(hierId);
+    ASSERT_NE(hierDesc, nullptr);
+
+    std::vector<Astra::ComponentDescriptor> registryDescriptors;
+    cr->GetAllDescriptors(registryDescriptors);
+
+    const uint32_t chunkEntityCount = 5;
+    const uint64_t entitiesPerChunk = 8;
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryHeader header;             // ctor stamps magic/endianness/current version...
+        header.version = Astra::BINARY_FORMAT_VERSION - 1;   // ...override to the pre-bits format
+        const auto* raw = reinterpret_cast<const std::byte*>(&header);
+        buf.insert(buf.end(), raw, raw + sizeof(header));
+
+        Astra::BinaryWriter writer(buf);        // memory mode appends after the header bytes
+
+        Astra::ComponentMask mask;
+        mask.Set(hierId);
+        for (size_t i = 0; i < Astra::ComponentMask::WORD_COUNT; ++i)
+        {
+            writer(mask.Data()[i]);
+        }
+
+        writer(static_cast<uint64_t>(chunkEntityCount));   // archetype entityCount
+        writer(entitiesPerChunk);
+        writer(static_cast<uint32_t>(1));                   // chunkCount = 1
+
+        writer(static_cast<uint32_t>(1));                   // descriptorCount = 1
+        writer(hierDesc->hash);
+        writer(static_cast<uint64_t>(hierDesc->size));
+        writer(static_cast<uint64_t>(hierDesc->alignment));
+        writer(hierDesc->version);
+
+        // Chunk 0: chunkEntityCount entities, then Hierarchy's per-entity
+        // component data. The ComponentRegistry factory wires serializeVersioned
+        // for every registered type regardless of triviality (ComponentRegistry.hpp
+        // Register<T>), so Archetype::Serialize's real wire format for Hierarchy is
+        // WriteVersionedComponent per entity (hash+version+POD data), not the
+        // compressed-block path -- WriteVersionedComponent is public, so call it
+        // directly to guarantee an exact format match. No disabledCount/words
+        // section follows: this is the pre-bump format.
+        writer(chunkEntityCount);
+        for (uint32_t i = 0; i < chunkEntityCount; ++i)
+        {
+            writer(Astra::Entity(i + 1, 1));
+        }
+        for (uint32_t i = 0; i < chunkEntityCount; ++i)
+        {
+            Hierarchy h{};
+            writer.WriteVersionedComponent(h);
+        }
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    ASSERT_TRUE(reader.ReadHeader().IsOk());
+    ASSERT_EQ(reader.GetVersion(), static_cast<uint16_t>(Astra::BINARY_FORMAT_VERSION - 1));  // confirm the legacy branch is driven
+
+    Astra::ArchetypeChunkPool pool;
+    auto result = Astra::Archetype::Deserialize(reader, registryDescriptors, &pool);
+    ASSERT_TRUE(result.IsOk()) << "legacy load must succeed cleanly";
+    auto archetype = std::move(*result.GetValue());
+
+    ASSERT_EQ(archetype->GetChunkCount(), 1u);
+    Astra::ArchetypeChunk& chunk = *archetype->GetChunks()[0];
+    const Astra::ArchetypeColumnMeta& meta = archetype->GetColumnMeta();
+    ASSERT_EQ(meta.enableableColumnCount, 1u);
+    const int col = meta.enableableColumns[0];
+
+    EXPECT_EQ(chunk.GetDisabledCount(col), 0u);
+    for (uint32_t i = 0; i < chunkEntityCount; ++i)
+    {
+        EXPECT_FALSE(chunk.IsDisabled(col, i)) << "legacy load must be all-enabled at slot " << i;
+    }
+}
+
+// Corrupt disabled-bit sections must be refused, not loaded silently. Both
+// sub-cases hand-build a single-archetype, single-chunk v4 buffer directly
+// (mirroring Archetype::Serialize's current field order, including the
+// disabledCount+words section this task adds) and call Archetype::Deserialize
+// directly -- same self-contained-wire-format rationale as
+// LoadRobustnessTest.cpp's ChunkEntityCountOverCapacityIsRejected test. Going
+// through Archetype::Deserialize directly (rather than a tampered
+// Registry::Save() buffer) means no whole-archive checksum is ever computed
+// over these buffers, so the failure exercised here is unambiguously the new
+// bit-validation logic, not an incidental checksum mismatch.
+TEST_F(BinarySerializationTests, CorruptDisabledBitsRefused)
+{
+    using namespace Astra::Test;
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+    cr->RegisterComponents<Hierarchy>();
+    const Astra::ComponentID hierId = Astra::TypeID<Hierarchy>::Value();
+    const Astra::ComponentDescriptor* hierDesc = cr->GetComponentDescriptor(hierId);
+    ASSERT_NE(hierDesc, nullptr);
+
+    std::vector<Astra::ComponentDescriptor> registryDescriptors;
+    cr->GetAllDescriptors(registryDescriptors);
+
+    const uint32_t chunkEntityCount = 5;   // live range is [0, 5)
+    const uint64_t entitiesPerChunk = 8;
+
+    auto buildBuffer = [&](uint32_t diskDisabledCount, uint64_t word0)
+    {
+        std::vector<std::byte> buf;
+        Astra::BinaryWriter writer(buf);
+
+        Astra::ComponentMask mask;
+        mask.Set(hierId);
+        for (size_t i = 0; i < Astra::ComponentMask::WORD_COUNT; ++i)
+        {
+            writer(mask.Data()[i]);
+        }
+
+        writer(static_cast<uint64_t>(chunkEntityCount));   // archetype entityCount
+        writer(entitiesPerChunk);
+        writer(static_cast<uint32_t>(1));                   // chunkCount = 1
+
+        writer(static_cast<uint32_t>(1));                   // descriptorCount = 1
+        writer(hierDesc->hash);
+        writer(static_cast<uint64_t>(hierDesc->size));
+        writer(static_cast<uint64_t>(hierDesc->alignment));
+        writer(hierDesc->version);
+
+        writer(chunkEntityCount);
+        for (uint32_t i = 0; i < chunkEntityCount; ++i)
+        {
+            writer(Astra::Entity(i + 1, 1));
+        }
+        // The ComponentRegistry factory wires serializeVersioned for every
+        // registered type regardless of triviality, so the real per-entity wire
+        // format is WriteVersionedComponent (hash+version+POD data), not the
+        // compressed-block path -- call the same public method Archetype::Serialize
+        // ultimately reaches, to guarantee an exact format match.
+        for (uint32_t i = 0; i < chunkEntityCount; ++i)
+        {
+            Hierarchy h{};
+            writer.WriteVersionedComponent(h);
+        }
+
+        // Enableable-bits section (format v4): disabledCount then
+        // ceil(max(1, chunkEntityCount)/64) == 1 word for a 5-entity chunk.
+        writer(diskDisabledCount);
+        writer(word0);
+
+        EXPECT_FALSE(writer.HasError());
+        return buf;
+    };
+
+    Astra::ArchetypeChunkPool pool;
+
+    // (a) disabledCount != popcount(words): claims 1 disabled, but the word is
+    // all-zero (popcount 0).
+    {
+        std::vector<std::byte> buf = buildBuffer(/*diskDisabledCount=*/1u, /*word0=*/0ull);
+        Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+        // No header was written/read -- GetVersion() defaults to the current
+        // format, which is exactly the "validate" branch this sub-case needs.
+        ASSERT_EQ(reader.GetVersion(), Astra::BINARY_FORMAT_VERSION);
+
+        auto result = Astra::Archetype::Deserialize(reader, registryDescriptors, &pool);
+        ASSERT_TRUE(result.IsErr()) << "disabledCount/popcount mismatch must be refused, not loaded silently";
+        EXPECT_EQ(*result.GetError(), Astra::SerializationError::CorruptedData);
+    }
+
+    // (b) a set bit >= chunk entity count: bit 5 is beyond the live range [0, 5).
+    {
+        const uint64_t word0 = 1ull << 5;
+        std::vector<std::byte> buf = buildBuffer(/*diskDisabledCount=*/1u, word0);
+        Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+
+        auto result = Astra::Archetype::Deserialize(reader, registryDescriptors, &pool);
+        ASSERT_TRUE(result.IsErr()) << "out-of-range disabled bit must be refused, not loaded silently";
+        EXPECT_EQ(*result.GetError(), Astra::SerializationError::CorruptedData);
     }
 }
