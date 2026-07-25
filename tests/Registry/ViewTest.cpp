@@ -1,12 +1,20 @@
 #include <algorithm>
+#include <atomic>
 #include <gtest/gtest.h>
 #include <numeric>
+#include <set>
 #include <unordered_set>
 #include <vector>
 #include "../TestComponents.hpp"
 #include "Astra/Commands/CommandBuffer.hpp"
 #include "Astra/Registry/Registry.hpp"
 #include "Astra/Registry/View.hpp"
+
+// Enableable-components suite (spec 2026-07-25 §2/§5). EnA / EnB are the suite's
+// two ASTRA_ENABLEABLE components -- reuse them, do NOT introduce new types
+// (TypeID ceiling). CreateEntity<EnA>() auto-registers them.
+using EnA = Astra::Test::Hierarchy;
+using EnB = Astra::Test::Timer;
 
 class ViewTest : public ::testing::Test
 {
@@ -475,4 +483,115 @@ TEST_F(ViewTest, NullManagerViewIsEmptyNotCrash)
     int n = 0;
     nullView.ForEach([&](Astra::Entity, Position&) { ++n; });
     EXPECT_EQ(n, 0);
+}
+
+// ===================== Enableable-components query filtering (spec §5) =====================
+
+// A default query skips disabled components; Size() reflects only the enabled.
+TEST_F(ViewTest, DefaultQueryExcludesDisabled)
+{
+    auto e1 = registry->CreateEntity<EnA>(); auto e2 = registry->CreateEntity<EnA>();
+    registry->SetEnabled<EnA>(e2, false);
+    auto view = registry->CreateView<EnA>();
+    std::vector<Astra::Entity> seen;
+    view.ForEach([&](Astra::Entity e, EnA&) { seen.push_back(e); });
+    ASSERT_EQ(seen.size(), 1u);
+    EXPECT_EQ(seen[0], e1);
+    EXPECT_EQ(view.Size(), 1u);
+}
+
+// IncludeDisabled<T> opts the whole view out of enabled filtering.
+TEST_F(ViewTest, IncludeDisabledOptOutSeesEverything)
+{
+    auto e1 = registry->CreateEntity<EnA>(); auto e2 = registry->CreateEntity<EnA>();
+    (void)e1; (void)e2;
+    registry->SetEnabled<EnA>(e2, false);
+    auto view = registry->CreateView<Astra::IncludeDisabled<EnA>>();
+    size_t n = 0;
+    view.ForEach([&](Astra::Entity, EnA&) { ++n; });
+    EXPECT_EQ(n, 2u);
+    EXPECT_EQ(view.Size(), 2u);
+}
+
+// Two enableable required columns intersect: only enabled-in-BOTH is visited.
+TEST_F(ViewTest, MultiEnableableIntersection)
+{
+    auto both    = registry->CreateEntity<EnA, EnB>();
+    auto aOff    = registry->CreateEntity<EnA, EnB>(); registry->SetEnabled<EnA>(aOff, false);
+    auto bOff    = registry->CreateEntity<EnA, EnB>(); registry->SetEnabled<EnB>(bOff, false);
+    auto neither = registry->CreateEntity<EnA, EnB>();
+    registry->SetEnabled<EnA>(neither, false); registry->SetEnabled<EnB>(neither, false);
+    size_t n = 0; Astra::Entity onlyHit{};
+    registry->CreateView<EnA, EnB>().ForEach([&](Astra::Entity e, EnA&, EnB&) { ++n; onlyHit = e; });
+    EXPECT_EQ(n, 1u);
+    EXPECT_EQ(onlyHit, both);
+}
+
+// Run-scan must handle bits on / around word boundaries (63/64/65/127/128) and
+// a fully-disabled word.
+TEST_F(ViewTest, WordBoundaryRunScan)
+{
+    std::vector<Astra::Entity> es;
+    for (int i = 0; i < 200; ++i) es.push_back(registry->CreateEntity<EnA>());
+    for (int i : {0, 63, 64, 65, 127, 128}) registry->SetEnabled<EnA>(es[i], false);
+    std::set<int> disabledIdx = {0, 63, 64, 65, 127, 128};
+    size_t n = 0;
+    registry->CreateView<EnA>().ForEach([&](Astra::Entity e, EnA&) {
+        ++n;
+        for (int i : disabledIdx) EXPECT_NE(e, es[i]);
+    });
+    EXPECT_EQ(n, 200u - disabledIdx.size());
+    // Fully disable [64,128) and re-count.
+    for (int i = 64; i < 128; ++i) registry->SetEnabled<EnA>(es[i], false);
+    size_t m = 0;
+    registry->CreateView<EnA>().ForEach([&](Astra::Entity, EnA&) { ++m; });
+    std::set<int> all(disabledIdx); for (int i = 64; i < 128; ++i) all.insert(i);
+    EXPECT_EQ(m, 200u - all.size());
+}
+
+// An enableable Optional<T> pointer is null while disabled, non-null while enabled.
+TEST_F(ViewTest, OptionalEnableableReportsNullWhileDisabled)
+{
+    using namespace Astra::Test;
+    auto e = registry->CreateEntity<Position, EnA>();
+    registry->SetEnabled<EnA>(e, false);
+    registry->CreateView<Position, Astra::Optional<EnA>>().ForEach(
+        [&](Astra::Entity, Position&, EnA* a) { EXPECT_EQ(a, nullptr); });
+    registry->SetEnabled<EnA>(e, true);
+    registry->CreateView<Position, Astra::Optional<EnA>>().ForEach(
+        [&](Astra::Entity, Position&, EnA* a) { EXPECT_NE(a, nullptr); });
+}
+
+// Visit order is a function of storage layout only, not toggle history.
+TEST_F(ViewTest, IterationOrderIndependentOfToggleHistory)
+{
+    std::vector<Astra::Entity> es;
+    for (int i = 0; i < 300; ++i) es.push_back(registry->CreateEntity<EnA>());
+    auto visit = [&] {
+        std::vector<Astra::Entity> order;
+        registry->CreateView<EnA>().ForEach([&](Astra::Entity e, EnA&) { order.push_back(e); });
+        return order;
+    };
+    for (int i = 0; i < 300; i += 2) registry->SetEnabled<EnA>(es[i], false);
+    for (int i = 0; i < 300; i += 2) registry->SetEnabled<EnA>(es[i], true);
+    auto a = visit();
+    for (int r = 0; r < 2; ++r)
+        for (int i = 1; i < 300; i += 2) { registry->SetEnabled<EnA>(es[i], false); registry->SetEnabled<EnA>(es[i], true); }
+    auto b = visit();
+    EXPECT_EQ(a, b);
+}
+
+// ParallelForEach applies the same per-chunk filter (runs sequentially here: the
+// default Registry injects no scheduler, so this exercises the inline fallback,
+// which still validates filtering).
+TEST_F(ViewTest, ParallelForEachRespectsDisabled)
+{
+    for (int i = 0; i < 5000; ++i)
+    {
+        auto e = registry->CreateEntity<EnA>();
+        if (i % 3 == 0) registry->SetEnabled<EnA>(e, false);
+    }
+    std::atomic<size_t> n{0};
+    registry->CreateView<EnA>().ParallelForEach([&](Astra::Entity, EnA&) { n.fetch_add(1, std::memory_order_relaxed); });
+    EXPECT_EQ(n.load(), 5000u - (5000u + 2) / 3);
 }
