@@ -656,6 +656,34 @@ TEST_F(CommandBufferTest, BatchPartialFailureSurfacesPerEntityErrorsInSortedFlus
     EXPECT_EQ(errs2[0].systemInsertionOrder, 3u);
     EXPECT_EQ(registry->GetComponent<Position>(e1), nullptr);
     EXPECT_EQ(registry->GetComponent<Position>(e3), nullptr);
+
+    // Granularity pin: a batch with TWO dead targets must surface TWO
+    // DeferredCommandErrors -- one per failed ENTITY, not one per BATCH. A
+    // wrong per-batch implementation would collapse this to errs3.size()==1
+    // and fail the assert below (the single-dead-target phases above can't
+    // tell the two implementations apart).
+    Entity e4 = registry->CreateEntity();
+    Entity e5 = registry->CreateEntity();
+
+    auto& buf3 = pcb.GetThreadBuffer();
+    buf3.SetNextSortKey(SortKey{1, 0, 0});
+    buf3.DestroyEntity(e4);
+    buf3.DestroyEntity(e5);                       // both destroyed before the batch (lower key)
+    buf3.SetNextSortKey(SortKey{4, 0, 0});
+    Entity batch2[] = {e1, e2, e4, e3};            // e2 (reused, already dead) + e4: TWO dead targets
+    buf3.AddComponents<Position>(batch2, Position{7.0f, 8.0f, 9.0f});
+
+    ASSERT_TRUE(pcb.ExecuteSorted().IsOk());
+
+    // Attempt-all semantics: both live targets got the component...
+    EXPECT_NE(registry->GetComponent<Position>(e1), nullptr);
+    EXPECT_NE(registry->GetComponent<Position>(e3), nullptr);
+    // ...and each of the TWO dead targets produced its OWN attributed error.
+    const auto& errs3 = pcb.GetDeferredErrors();
+    ASSERT_EQ(errs3.size(), 2u);
+    EXPECT_EQ(errs3[0].systemInsertionOrder, 4u);
+    EXPECT_EQ(errs3[1].systemInsertionOrder, 4u);
+    EXPECT_FALSE(registry->IsValid(e5));           // destroyed, unrelated to this batch
 }
 
 TEST_F(CommandBufferTest, BatchPartialFailureFailsEagerExecute)
