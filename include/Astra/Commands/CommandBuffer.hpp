@@ -562,6 +562,30 @@ namespace Astra
         }
 
         /**
+         * Defer an enable/disable toggle of enableable component T on an entity
+         * (spec 2026-07-25 §7). Applied at flush via Registry::SetEnabledByID;
+         * mirrors RemoveComponent's header + POD-payload shape (no inline data).
+         */
+        template<Component T>
+        void SetEnabled(Entity entity, bool enable)
+        {
+            using DecayedT = std::decay_t<T>;
+            static_assert(IsEnableableV<DecayedT>,
+                "SetEnabled<T> requires an enableable component (opt in with `static constexpr bool AstraEnableable = true;`)");
+
+            size_t totalSize = sizeof(CommandHeader) + sizeof(SetEnabledPayload);
+            std::byte* ptr = m_buffer.Allocate(totalSize);
+            StampCommand(ptr);
+
+            auto* header = new (ptr) CommandHeader{CommandType::SetEnabled, 0, static_cast<uint32_t>(totalSize)};
+            auto* payload = new (ptr + sizeof(CommandHeader)) SetEnabledPayload{entity, TypeID<DecayedT>::Value(), static_cast<uint8_t>(enable ? 1 : 0)};
+            (void)header;
+            (void)payload;
+
+            m_commandCount++;
+        }
+
+        /**
          * Add a component to multiple entities with the same value.
          *
          * This records as ONE command whose encoded size grows with
@@ -1302,6 +1326,11 @@ namespace Astra
                     TranslateEntity(cmd->b, map);
                     break;
                 }
+                case CommandType::SetEnabled:
+                {
+                    TranslateEntity(reinterpret_cast<SetEnabledPayload*>(payload)->entity, map);
+                    break;
+                }
                 case CommandType::SetResource:
                 case CommandType::RemoveResource:
                 case CommandType::ClearResources:
@@ -1364,6 +1393,8 @@ namespace Astra
                     return ExecuteRemoveResource(payload);
                 case CommandType::ClearResources:
                     return ExecuteClearResources(payload);
+                case CommandType::SetEnabled:
+                    return ExecuteSetEnabled(payload);
                 default:
                     return false;
             }
@@ -1469,6 +1500,15 @@ namespace Astra
                 return false;
 
             return m_registry->RemoveComponentByID(cmd->entity, cmd->componentId);
+        }
+
+        bool ExecuteSetEnabled(std::byte* payload)
+        {
+            auto* cmd = reinterpret_cast<SetEnabledPayload*>(payload);
+            if (cmd->entity == Entity::Invalid())
+                return false;
+
+            return m_registry->SetEnabledByID(cmd->entity, cmd->componentId, cmd->enable != 0);
         }
 
         bool ExecuteAddComponentBatch(std::byte* payload)

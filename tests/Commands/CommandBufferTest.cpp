@@ -6,6 +6,10 @@
 using namespace Astra;
 using namespace Astra::Test;
 
+// EnA is the suite's ASTRA_ENABLEABLE component (spec 2026-07-25 §2/§7). Do
+// NOT introduce a new component type -- reuse Astra::Test::Hierarchy.
+using EnA = Astra::Test::Hierarchy;
+
 class CommandBufferTest : public ::testing::Test
 {
 protected:
@@ -724,4 +728,40 @@ TEST_F(CommandBufferTest, BatchPartialFailureFailsEagerExecute)
     // Attempt-all: the survivors were still processed before the failure surfaced.
     EXPECT_NE(registry->GetComponent<Velocity>(e1), nullptr);
     EXPECT_NE(registry->GetComponent<Velocity>(e3), nullptr);
+}
+
+// ======================= Deferred SetEnabled (Task 5) =======================
+
+TEST_F(CommandBufferTest, DeferredSetEnabledAppliesAtFlush)
+{
+    Entity e = registry->CreateEntity();
+    registry->AddComponent(e, EnA{});
+    cmdBuffer->SetEnabled<EnA>(e, false);
+    EXPECT_TRUE(registry->IsEnabled<EnA>(e));        // not yet applied
+    ASSERT_TRUE(cmdBuffer->Execute().IsOk());
+    EXPECT_FALSE(registry->IsEnabled<EnA>(e));
+}
+
+TEST_F(CommandBufferTest, DeferredSetEnabledOnStaleTargetReportsError)
+{
+    Entity e = registry->CreateEntity();
+    registry->AddComponent(e, EnA{});
+    ParallelCommandBuffer pcb(registry.get());
+    auto& buf = pcb.GetThreadBuffer();
+    buf.SetNextSortKey(SortKey{1, 0, 0});
+    buf.DestroyEntity(e);
+    buf.SetNextSortKey(SortKey{2, 0, 0});
+    buf.SetEnabled<EnA>(e, false);                    // target dies earlier in the same flush
+    ASSERT_TRUE(pcb.ExecuteSorted().IsOk());
+    const auto& errs = pcb.GetDeferredErrors();
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_EQ(errs[0].systemInsertionOrder, 2u);
+}
+
+TEST_F(CommandBufferTest, DeferredSetEnabledEagerFailureFailsBuffer)
+{
+    Entity dead = registry->CreateEntity();
+    registry->DestroyEntity(dead);
+    cmdBuffer->SetEnabled<EnA>(dead, false);
+    EXPECT_TRUE(cmdBuffer->Execute().IsErr());
 }

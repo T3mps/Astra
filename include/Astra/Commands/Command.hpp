@@ -37,7 +37,11 @@ namespace Astra
         // Resource commands
         SetResource,
         RemoveResource,
-        ClearResources
+        ClearResources,
+
+        // Enableable-component commands (spec 2026-07-25 §7). Appended, not
+        // inserted -- CommandType values are not serialized.
+        SetEnabled
     };
 
     /**
@@ -181,6 +185,16 @@ namespace Astra
     {
         Entity entity;
         ComponentID componentId;
+    };
+
+    /**
+     * Payload for SetEnabled command (enableable components, spec 2026-07-25 §7).
+     */
+    struct SetEnabledPayload
+    {
+        Entity entity;
+        ComponentID componentId;
+        uint8_t enable;   // bool, fixed-width for the POD payload
     };
 
     /**
