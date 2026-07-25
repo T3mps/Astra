@@ -108,3 +108,33 @@ TEST(SignalContract, AddEmitsOnlyWhenEnabledWithTheNewPointer)
         EXPECT_EQ(calls, 0);                                  // but no emission
     }
 }
+
+TEST(SignalContract, DestroyBehaviorTable)
+{
+    // Signal disabled (default): valid entity destroyed silently; stale/invalid = no-op.
+    {
+        Astra::Registry reg;
+        int calls = 0;
+        reg.GetSignalManager()->On<Astra::Events::EntityDestroyed>().Register(
+            [&](const Astra::Events::EntityDestroyed&) { ++calls; });
+        auto e = reg.CreateEntity<Tracked>();
+        reg.DestroyEntity(e);
+        EXPECT_FALSE(reg.IsValid(e));                    // destroyed
+        EXPECT_EQ(reg.GetComponent<Tracked>(e), nullptr);
+        reg.DestroyEntity(e);                            // stale handle: no-op, no crash
+        EXPECT_EQ(calls, 0);                             // disabled: nothing fired
+    }
+    // Signal enabled: fires exactly once per valid destroy, not for stale.
+    {
+        Astra::Registry reg;
+        reg.EnableSignals(Astra::Signal::EntityDestroyed);
+        int calls = 0;
+        reg.GetSignalManager()->On<Astra::Events::EntityDestroyed>().Register(
+            [&](const Astra::Events::EntityDestroyed&) { ++calls; });
+        auto e = reg.CreateEntity<Tracked>();
+        reg.DestroyEntity(e);
+        EXPECT_EQ(calls, 1);
+        reg.DestroyEntity(e);                            // stale: no second emission
+        EXPECT_EQ(calls, 1);
+    }
+}

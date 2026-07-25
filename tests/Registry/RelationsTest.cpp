@@ -559,3 +559,23 @@ TEST_F(RelationsTest, CircularHierarchyHandling)
     // Should visit b and a (ancestors of c)
     EXPECT_EQ(ancestorCount, 2u);
 }
+
+// Guards the validate-once DestroyEntity restructure: a non-empty relationship
+// graph must still be walked and cleaned up on destroy (the empty-graph fast
+// path must never fire for an entity that actually has relations).
+TEST(RelationsDestroyGuard, DestroyParentStillOrphansChildrenWithFastPathPresent)
+{
+    Astra::Registry reg;
+    auto parent = reg.CreateEntity();
+    auto c1 = reg.CreateEntity();
+    auto c2 = reg.CreateEntity();
+    reg.SetParent(c1, parent);
+    reg.SetParent(c2, parent);
+    reg.DestroyEntity(parent);                 // graph NON-empty: cleanup must run
+    EXPECT_FALSE(reg.IsValid(parent));
+    // Children live and orphaned.
+    EXPECT_TRUE(reg.IsValid(c1));
+    EXPECT_TRUE(reg.IsValid(c2));
+    EXPECT_EQ(reg.GetParent(c1), Astra::Entity::Invalid());
+    EXPECT_EQ(reg.GetParent(c2), Astra::Entity::Invalid());
+}
