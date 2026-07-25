@@ -72,9 +72,12 @@ Rules:
 - Alignment: `Astra::Tlsf` guarantees every payload is 64-byte aligned by construction
   (its size-congruence law, `Tlsf.hpp:19-28`) — exceeding `CommandByteBuffer::ALIGNMENT`
   (16) with headroom. Note the congruence law adjusts requested sizes to ≡56 (mod 64):
-  a "4096-byte" block comes back slightly larger; `Block::capacity` records the adjusted
-  size and the buffer uses all of it. Intra-block layout keeps the existing
-  header/payload/data alignment math unchanged.
+  a "4096-byte" block's underlying TLSF payload comes back slightly larger, but
+  `CommandBlockArena::Acquire` returns (and `Block::capacity` records) the
+  REQUESTED size, not TLSF's adjusted size — the congruence remainder is
+  intentionally left unused (a safe under-use of the allocation, not a bug).
+  Intra-block layout keeps the existing header/payload/data alignment math
+  unchanged.
 
 Lifetime: a `CommandBuffer` already requires a live `Registry*` at construction; blocks
 must be returned before the Registry (and its arena) dies. This is the existing implicit

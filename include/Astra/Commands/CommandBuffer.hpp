@@ -104,7 +104,13 @@ namespace Astra
             if (m_activeBlock == m_blocks.size())
             {
                 if (!AcquireBlock(alignedSize)) ASTRA_UNLIKELY
+                {
+                    ASTRA_ASSERT(false,
+                        "command arena exhausted or single command exceeds the TLSF request "
+                        "ceiling (batch commands encode all entities inline -- split batches "
+                        "over ~4M entities into multiple calls)");
                     return nullptr;
+                }
             }
 
             Block& b = m_blocks[m_activeBlock];
@@ -181,6 +187,12 @@ namespace Astra
      * - Only pre-allocated entities that haven't been processed yet are destroyed
      * - Use smaller command buffers if you need atomic all-or-nothing semantics
      * - Consider validating preconditions before adding commands
+     *
+     * LIFETIME: a CommandBuffer holds blocks from its Registry's internal command
+     * arena and MUST be destroyed BEFORE that Registry -- this includes plain
+     * declaration/destruction order in the same scope (e.g. a SystemScheduler or
+     * a CommandBuffer declared before its Registry is a bug); see
+     * Registry::GetCommandBlockArena() for the enforced invariant.
      *
      * Usage:
      *   CommandBuffer cmd(&registry);
@@ -370,6 +382,11 @@ namespace Astra
 
         /**
          * Create multiple entities at once.
+         *
+         * This records as ONE command whose encoded size grows with count (the
+         * entity array is inline); a single call is capped by the arena's TLSF
+         * request ceiling (32MB, ~4M entities) -- split larger batches into
+         * multiple calls.
          */
         void CreateEntities(size_t count, Entity* outEntities)
         {
@@ -429,6 +446,11 @@ namespace Astra
 
         /**
          * Destroy multiple entities at once.
+         *
+         * This records as ONE command whose encoded size grows with
+         * entities.size() (the entity array is inline); a single call is
+         * capped by the arena's TLSF request ceiling (32MB, ~4M entities) --
+         * split larger batches into multiple calls.
          */
         void DestroyEntities(std::span<const Entity> entities)
         {
@@ -541,6 +563,11 @@ namespace Astra
 
         /**
          * Add a component to multiple entities with the same value.
+         *
+         * This records as ONE command whose encoded size grows with
+         * entities.size() (the entity array is inline); a single call is
+         * capped by the arena's TLSF request ceiling (32MB, ~4M entities) --
+         * split larger batches into multiple calls.
          */
         template<Component T>
         void AddComponents(std::span<const Entity> entities, const T& component)
@@ -607,6 +634,11 @@ namespace Astra
 
         /**
          * Remove a component from multiple entities.
+         *
+         * This records as ONE command whose encoded size grows with
+         * entities.size() (the entity array is inline); a single call is
+         * capped by the arena's TLSF request ceiling (32MB, ~4M entities) --
+         * split larger batches into multiple calls.
          */
         template<Component T>
         void RemoveComponents(std::span<const Entity> entities)

@@ -583,6 +583,29 @@ TEST_F(CommandBufferTest, RollbackSpansStorageBlocks)
         EXPECT_FALSE(registry->IsValid(e));
 }
 
+TEST_F(CommandBufferTest, FailedExecuteCleansUpNonTrivialPayloadsExactlyOnce)
+{
+    using Astra::Test::RelocationCanary;
+    RelocationCanary::s_violations = 0;
+    const int liveBase = RelocationCanary::s_live;
+
+    // First command fails at Execute -> whole-buffer failure path; the 200
+    // canary payloads span multiple blocks and must be destructed exactly once
+    // by the cleanup walk, never applied.
+    cmdBuffer->AddComponent(Entity::Invalid(), Position{1.0f, 2.0f, 3.0f});
+    for (int i = 0; i < 200; ++i)
+    {
+        Entity e = cmdBuffer->CreateEntity();
+        cmdBuffer->AddComponent(e, RelocationCanary{i});
+    }
+    EXPECT_GT(cmdBuffer->GetStorageBlockCount(), 1u);
+
+    EXPECT_TRUE(cmdBuffer->Execute().IsErr());
+    EXPECT_EQ(RelocationCanary::s_live, liveBase);      // every payload destructed exactly once
+    EXPECT_EQ(RelocationCanary::s_violations, 0);       // and nothing was ever bit-relocated
+    EXPECT_EQ(registry->Size(), 0u);                    // rollback destroyed the eager creates
+}
+
 TEST_F(CommandBufferTest, ParallelSortedFlushCarriesNonTrivialComponents)
 {
     using Astra::Test::Name;

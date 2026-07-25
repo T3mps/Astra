@@ -1066,7 +1066,13 @@ namespace Astra
         /**
          * Block source for CommandBuffer storage (Commands C1 fix): stable
          * blocks that never move until released. Command buffers bound to
-         * this Registry must not outlive it.
+         * this Registry must not outlive it. This is a real destruction-order
+         * requirement, not just a don't-use-after-free caveat: because
+         * m_commandBlockArena is a Registry member, any CommandBuffer/
+         * ParallelCommandBuffer/SystemScheduler declared BEFORE the Registry
+         * in the same scope is destroyed AFTER it (reverse declaration order)
+         * and will trip CommandBlockArena's outstanding-block assert on exit
+         * -- declare Registry first.
          */
         ASTRA_NODISCARD CommandBlockArena& GetCommandBlockArena() noexcept { return m_commandBlockArena; }
         
