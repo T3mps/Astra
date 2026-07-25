@@ -179,10 +179,23 @@ namespace Astra
             std::vector<EntityLocation> locations = archetype->AddEntitiesWith(entities, std::forward<Generator>(generator));
 
             // See AddEntities: the shared record table is owned/sized by EntityManager.
+            // Locations arrive in chunk-run order (Archetype fills one chunk fully before
+            // the next), so the chunk pointer only changes at run boundaries: derive it
+            // once per chunk and feed the 4-arg funnel, avoiding a per-entity
+            // GetChunks()[...] re-derivation.
+            const auto& chunks = archetype->GetChunks();
+            size_t lastChunkIndex = SIZE_MAX;
+            ArchetypeChunk* chunk = nullptr;
             for (size_t i = 0; i < locations.size(); ++i)
             {
+                const size_t ci = locations[i].GetChunkIndex();
+                if (ci != lastChunkIndex) ASTRA_UNLIKELY
+                {
+                    chunk = chunks[ci].get();
+                    lastChunkIndex = ci;
+                }
                 EntityRecord* rec = m_records->GetOrCreateRecord(entities[i].GetID());
-                SetRecordLocation(rec, archetype, locations[i]);   // NEVER assign rec->version
+                SetRecordLocation(rec, archetype, chunk, locations[i]);   // NEVER assign rec->version
             }
         }
 

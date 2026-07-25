@@ -11,6 +11,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <tuple>
@@ -359,7 +360,38 @@ namespace Astra
                 }
             }
 
-            for (size_t i = 0; i < count; ++i)
+            // Deduce the generator's component tuple ONCE (the generator is never
+            // called here -- the contract is exactly one invocation per entity, in
+            // index order, inside the run loop below).
+            using TupleType = std::decay_t<std::invoke_result_t<Generator&, size_t>>;
+            constexpr size_t tupleSize = std::tuple_size_v<TupleType>;
+
+            const ArchetypeColumnMeta& cm = m_columnMeta;
+
+            // Uncovered storage columns: those the generator tuple does NOT produce.
+            // On this path the archetype was built from the tuple's exact component set,
+            // so this is normally empty -- computed ONCE (not per entity) and kept as a
+            // defensive guard so a column the tuple misses is still default-constructed
+            // rather than left as raw (zeroed) bytes.
+            uint16_t uncovered[MAX_COMPONENTS];
+            uint16_t uncoveredCount = 0;
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+                for (uint16_t c = 0; c < cm.columnCount; ++c)
+                {
+                    const ComponentID id = cm.columns[c].id;
+                    const bool covered = ((TypeID<std::decay_t<std::tuple_element_t<Is, TupleType>>>::Value() == id) || ...);
+                    if (!covered) ASTRA_UNLIKELY
+                        uncovered[uncoveredCount++] = c;
+                }
+            }(std::make_index_sequence<tupleSize>{});
+
+            // Chunk-run loop: claim a contiguous run of slots in the current non-full
+            // chunk, hoist that chunk's typed column bases ONCE for the run, then
+            // move-construct each entity's components directly through those typed
+            // pointers (no idToColumn resolution, no per-element fn-ptr indirection).
+            size_t produced = 0;
+            while (produced < count)
             {
                 auto [chunkIndex, wasCreated] = GetOrCreateChunk();
                 if (chunkIndex == INVALID_CHUNK_INDEX) ASTRA_UNLIKELY
@@ -367,43 +399,69 @@ namespace Astra
                     break;
                 }
 
-                auto& chunk = m_chunks[chunkIndex];
-                size_t entityIndex = chunk->GetCount();
-                chunk->GetEntities().push_back(entities[i]);
-                chunk->SetCount(chunk->GetCount() + 1);
-                
-                auto componentTuple = generator(i);
-                
-                using TupleType = decltype(componentTuple);
-                constexpr size_t tupleSize = std::tuple_size_v<TupleType>;
-                
-                [&]<std::size_t... Is>(std::index_sequence<Is...>)
+                ArchetypeChunk* chunk = m_chunks[chunkIndex].get();
+                const size_t startSlot = chunk->GetCount();
+                const size_t capacity  = chunk->GetCapacity();
+                const size_t runLen    = std::min(count - produced, capacity - startSlot);
+                ASTRA_ASSERT(runLen > 0 && startSlot + runLen <= capacity,
+                             "AddEntitiesWith: run exceeds chunk capacity");
+
+                // One bulk entity-handle append + one count bump for the whole run.
+                std::vector<Entity>& entityVec = chunk->GetEntities();
+                entityVec.insert(entityVec.end(),
+                                 entities.begin() + produced,
+                                 entities.begin() + produced + runLen);
+                chunk->SetCount(startSlot + runLen);
+
+                // Hoist the run's typed column bases ONCE. Empty (tag) components yield
+                // a null base -- never dereferenced; their placement-new is elided below.
+                auto bases = [&]<std::size_t... Is>(std::index_sequence<Is...>)
                 {
-                    const ArchetypeColumnMeta& cm = m_columnMeta;
-                    for (uint16_t c = 0; c < cm.columnCount; ++c)
+                    return std::tuple{ chunk->template GetComponentArray<std::decay_t<std::tuple_element_t<Is, TupleType>>>()... };
+                }(std::make_index_sequence<tupleSize>{});
+
+                for (size_t r = 0; r < runLen; ++r)
+                {
+                    const size_t slot = startSlot + r;
+                    ASTRA_ASSERT(slot < capacity, "AddEntitiesWith: slot out of chunk capacity");
+
+                    auto componentTuple = generator(produced + r);   // exactly once, in order
+
+                    [&]<std::size_t... Is>(std::index_sequence<Is...>)
                     {
-                        const ComponentID id = cm.columns[c].id;
-
-                        bool willBeConstructed = ((TypeID<std::decay_t<std::tuple_element_t<Is, TupleType>>>::Value() == id) || ...);
-
-                        if (!willBeConstructed)
+                        // Move-construct each covered element straight into its slot
+                        // through the hoisted typed base (ConstructComponentAt semantics
+                        // without the id->column lookup).
+                        (([&]
                         {
-                            void* ptr = chunk->GetComponentPointer(id, entityIndex);
-                            cm.columns[c].descriptor->DefaultConstruct(ptr);
-                        }
+                            using ElemT = std::decay_t<std::tuple_element_t<Is, TupleType>>;
+                            if constexpr (!std::is_empty_v<ElemT>)
+                            {
+                                ::new (static_cast<void*>(std::get<Is>(bases) + slot))
+                                    ElemT(std::get<Is>(std::move(componentTuple)));
+                            }
+                        }()), ...);
+                    }(std::make_index_sequence<tupleSize>{});
+
+                    // Defensive: default-construct any column the tuple did not cover.
+                    for (uint16_t u = 0; u < uncoveredCount; ++u)
+                    {
+                        const uint16_t c = uncovered[u];
+                        cm.columns[c].descriptor->DefaultConstruct(chunk->GetColumnPointer(c, slot));
                     }
 
-                    ((chunk->ConstructComponentAt(entityIndex, std::get<Is>(std::move(componentTuple)))), ...);
-                }(std::make_index_sequence<tupleSize>{});
-                
-                ++m_entityCount;
-                
-                if (chunk->IsFull()) ASTRA_UNLIKELY
+                    locations.push_back(EntityLocation::Create(chunkIndex, slot));
+                }
+
+                produced += runLen;
+                m_entityCount += runLen;
+
+                // Chunk transition: advance the non-full cursor past a now-full chunk
+                // (IsFull => chunkIndex + 1), matching AddEntities' convention.
+                if (chunk->IsFull() && chunkIndex == m_firstNonFullChunkIndex) ASTRA_UNLIKELY
                 {
                     m_firstNonFullChunkIndex = chunkIndex + 1;
                 }
-                
-                locations.push_back(EntityLocation::Create(chunkIndex, entityIndex));
             }
 
             return locations;
