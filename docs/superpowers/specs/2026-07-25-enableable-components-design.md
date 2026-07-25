@@ -40,6 +40,11 @@ present FAT components); nothing here forecloses it.
   with no new per-archetype state beyond what §3 adds.
 - `SetEnabled<T>`/`IsEnabled<T>` on a non-enableable `T` is a compile error
   (`static_assert` with an actionable message naming the trait).
+- **Compatibility caveat:** toggling a type's `AstraEnableable` opt-in between builds
+  (adding or removing it) is a BREAKING on-disk format change that `BINARY_FORMAT_VERSION`
+  does NOT capture -- the format doesn't self-describe per-column enableability, the
+  reader infers it from its own registry's current trait snapshot, same class of hazard
+  as changing a component's size.
 
 ## 3. Storage — disabled-bit words in chunk memory
 
@@ -83,7 +88,7 @@ present FAT components); nothing here forecloses it.
 | valid entity, has T, state same | no-op (no signal), returns true | current state |
 | valid entity, no T | no-op, returns false | false |
 | stale/invalid entity | no-op, returns false | false |
-| T not enableable | compile error (typed API); ByID: no-op, returns false | compile error / ByID false |
+| T not enableable | compile error (typed API); ByID: no-op, returns false (nothing to toggle) | compile error (typed API); ByID: true if present (present + not disabled ⇒ enabled is the correct answer for a type-erased caller — only `SetEnabledByID` has "nothing to toggle" to refuse), false if absent |
 
 - **Existence never lies:** `Has<T>` remains true and `GetComponent<T>` returns the data
   pointer while disabled (DOTS semantics; disabled ≠ removed). Only query filtering and
@@ -163,8 +168,13 @@ pattern (deterministic `Tracked`-style guards) extends to bits.
 
 ## 10. Serialization
 
-- Chunk sections gain, per enableable column: the disabled words (`ceil(capacity/64)`
-  words as stored) and `disabledCount`. Binary format version bump.
+- Chunk sections gain, per enableable column: the disabled words (`ceil(chunkEntityCount/64)`
+  words, derived from the persisted entity count) and `disabledCount`. Binary format
+  version bump. Per-chunk capacity is NEVER persisted, and a reload's
+  `ChunkBytesToHold` may re-derive a load capacity `>=` the saved entity count (dynamic
+  chunk sizing, Phase 2) -- entity count is the only basis both sides agree on, and the
+  bits at slots `>= chunkEntityCount` are provably zero (§14 invariant 2), so writing
+  more than `ceil(chunkEntityCount/64)` words would only ever store zeros.
 - Legacy (pre-bump) saves load as all-enabled (absent section ⇒ words zero, count zero —
   the polarity pays again).
 - Load validation (safety-first lane): refuse a chunk section where
@@ -228,7 +238,9 @@ sparse-set component storage; atomic/concurrent immediate toggles.
    entered for queries whose enableable-intersection is empty; no added instructions on
    create/batch-create paths.
 2. SET bit == DISABLED; zero-init == enabled; `disabledCount == popcount(words)`; bits
-   beyond chunk count are zero.
+   beyond chunk count are zero. (Serialized word count is `ceil(chunkEntityCount/64)`,
+   derived from the persisted entity count -- per-chunk capacity is never persisted, see
+   §10.)
 3. Enabled state preserved across swap-remove, transitions, compaction, defragment;
    fresh components born enabled.
 4. `Has`/`GetComponent` ignore bits; only queries (default), `IsEnabled`, and `Size()`

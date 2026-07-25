@@ -624,10 +624,13 @@ namespace Astra
         // INSIDE the chunk arena (SET bit == DISABLED; zero-init == enabled) plus a
         // running disabledCount that is always == popcount(disabledWords). Non-
         // enableable columns keep disabledWords == nullptr and pay nothing. The
-        // growth of the per-chunk Column footprint (16 -> 32 bytes) is accepted:
+        // growth of the per-chunk Column footprint (16 -> 24 bytes) is accepted:
         // the recorded Phase-C packed-[N] Column deferral now also covers these two
-        // fields. uint32_t count (not uint16) because capacity can exceed 65535 at
-        // the 512KB chunk cap.
+        // fields. Since m_columns is a fixed MAX_COMPONENTS-slot array regardless of
+        // how many columns are enableable, this is a flat +8 bytes/slot = +1KB/chunk
+        // fixed metadata cost, always on -- the one part of this feature that isn't
+        // pay-for-what-you-use. uint32_t count (not uint16) because capacity can
+        // exceed 65535 at the 512KB chunk cap.
         struct Column
         {
             void* base{nullptr};
