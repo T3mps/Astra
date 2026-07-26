@@ -102,7 +102,9 @@ Grouped by theme. Full mechanism + concrete failure scenario for each NEW-I# is 
 
 ---
 
-## 3. The LZ4 compression cluster — one decision governs four findings  ⚠️ GATED
+## 3. The LZ4 compression cluster — one decision governs four findings  ✅ SHIPPED
+
+> **✅ SHIPPED 2026-07-26 — LZ4 dispatch wired up (branch `fix/tier0-correctness-batch` @ `2ceb13d`, FF-merged from `feat/lz4-per-column-compression`, 6 commits).** Chosen approach: **per-column block compression** (columnar standard, Parquet/ORC/Arrow-style), orthogonal to per-element versioning (covers all component types), on-disk format bumped **v4→v5**. Delivered via full SDD (spec `2026-07-25-lz4-per-column-compression-design.md`, plan `…/plans/2026-07-25-lz4-per-column-compression.md`; opus whole-branch review = ready to merge, zero Critical/Important). **OLD-C6 CLOSED** (compression now engages: measured 5,000,279 → 19,967 bytes, ~250×). **NEW-C3 CLOSED** — the >4MB multi-block round-trip is fixed and tested (previously saved-but-never-loaded). **NEW-I11 + IM-18 CLOSED** — the codec fixes (multi-block shared-buffer decode, output cap + clamped reserve, `memcpy` reads) landed in the tier0 batch + review and are now on the live path. `None` mode is byte-identical; v≤4 files load as legacy-raw (version-gated). 3-config green: Debug 776 / Release 774 / Dist 774. Deferred follow-up: reuse `colBuf` across columns (cold-path allocation nit; spec §3 envisioned it). *The GATED analysis below is retained as the historical record of why this was needed.*
 
 **[SPOT] verdict: the LZ4 path is entirely DEAD on `Registry::Save`/`Load`** (OLD-C6 confirmed). `ComponentDescriptor::serializeVersioned` is unconditionally non-null for every component (`ComponentRegistry.hpp:212`), so `Archetype::Serialize`'s compressed branch (`Archetype.hpp:952/956 WriteCompressedBlock`) and its read mirror (`1241 ReadCompressedBlock`) are **unreachable**. A default save writes a header *claiming* `CompressionMode::LZ4` (`Registry.hpp:1530`) with **zero compressed bytes** — a cosmetic header/body mismatch.
 
