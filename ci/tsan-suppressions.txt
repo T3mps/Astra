@@ -1,0 +1,11 @@
+# ThreadSanitizer suppressions for Astra's CI TSan lane.
+#
+# Add an entry ONLY for a triaged, understood-benign race (e.g. a documented
+# third-party data race that cannot be fixed here). NEVER add an entry to
+# silence a real Astra finding -- fix the code instead.
+#
+# Format: https://github.com/google/sanitizers/wiki/ThreadSanitizerSuppressions
+#   race:SymbolNameSubstring
+#   called_from_lib:libname
+#
+# (empty -- populated only from triage)

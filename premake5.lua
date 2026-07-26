@@ -1,3 +1,13 @@
+newoption {
+    trigger = "sanitize",
+    value = "MODE",
+    description = "Build AstraTest with a sanitizer (Linux/clang; used by the CI sanitizer lane)",
+    allowed = {
+        { "address", "AddressSanitizer + UndefinedBehaviorSanitizer" },
+        { "thread",  "ThreadSanitizer" },
+    }
+}
+
 workspace "Astra"
     architecture "x64"
     configurations { "Debug", "Release", "Dist" }
@@ -127,7 +137,23 @@ workspace "Astra"
                 exceptionhandling "off"
                 rtti "on"
                 defines { "ASTRA_BUILD_DIST", "NDEBUG", "GTEST_HAS_EXCEPTIONS=0" }
-        
+
+            -- Sanitizer lane (opt-in via --sanitize; Linux/clang). Option-gated so a
+            -- normal generation with no --sanitize is byte-identical. staticruntime is
+            -- forced off because static libstdc++ conflicts with the sanitizer runtimes'
+            -- link-ordering requirement. Both compile AND link need the -fsanitize flags.
+            filter { "options:sanitize=address" }
+                staticruntime "off"
+                buildoptions { "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-sanitize-recover=all" }
+                linkoptions  { "-fsanitize=address,undefined" }
+
+            filter { "options:sanitize=thread" }
+                staticruntime "off"
+                buildoptions { "-fsanitize=thread" }
+                linkoptions  { "-fsanitize=thread" }
+
+            filter {}
+
         project "AstraBenchmark"
             kind "ConsoleApp"
             language "C++"
