@@ -423,6 +423,56 @@ namespace Astra
         }
 
     private:
+        // Random-access yield shape: each required -> a reference (const preserved),
+        // each optional -> a pointer. Mirrors ForEach's yielded arguments.
+        template<typename ReqTuple, typename OptTuple> struct AccessTupleImpl;
+        template<typename... R, typename... O>
+        struct AccessTupleImpl<std::tuple<R...>, std::tuple<O...>>
+        {
+            using type = std::tuple<R&..., O*...>;
+        };
+
+        template<typename R>
+        ASTRA_FORCEINLINE R& BindRequired(const EntityRecord* rec) const
+        {
+            using Bare = std::remove_const_t<R>;
+            return *rec->archetype->GetComponent<Bare>(rec->location);   // Bare* binds to R& (adds const if any)
+        }
+        template<typename O>
+        ASTRA_FORCEINLINE O* BindOptional(const EntityRecord* rec) const
+        {
+            using Bare = std::remove_const_t<O>;
+            return rec->archetype->template HasComponent<Bare>()
+                 ? rec->archetype->template GetComponent<Bare>(rec->location)
+                 : nullptr;
+        }
+
+        template<typename... R, typename... O, size_t... Ri, size_t... Oi>
+        ASTRA_FORCEINLINE auto MakeAccessTuple(const EntityRecord* rec,
+                                               std::tuple<R...>, std::tuple<O...>,
+                                               std::index_sequence<Ri...>, std::index_sequence<Oi...>) const
+        {
+            return typename AccessTupleImpl<RequiredTypes, OptionalTypes>::type{
+                BindRequired<std::tuple_element_t<Ri, RequiredTypes>>(rec)...,
+                BindOptional<std::tuple_element_t<Oi, OptionalTypes>>(rec)...
+            };
+        }
+
+    public:
+        using AccessTuple = typename AccessTupleImpl<RequiredTypes, OptionalTypes>::type;
+
+        ASTRA_NODISCARD Result<AccessTuple, QueryError> Get(Entity e) const
+        {
+            const EntityRecord* rec = VisibleRecord(e);
+            if (!rec) ASTRA_UNLIKELY
+                return Result<AccessTuple, QueryError>::Err(QueryError::NotMatched);
+            return Result<AccessTuple, QueryError>::Ok(
+                MakeAccessTuple(rec, RequiredTypes{}, OptionalTypes{},
+                                std::make_index_sequence<std::tuple_size_v<RequiredTypes>>{},
+                                std::make_index_sequence<std::tuple_size_v<OptionalTypes>>{}));
+        }
+
+    private:
         // The record iff `e` is alive AND structurally matches this view AND is
         // enabled-visible; else nullptr. No EnsureArchetypes needed — matching is
         // tested against the entity's OWN archetype mask.

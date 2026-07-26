@@ -120,3 +120,55 @@ TEST(ViewContains, FilterAware)
     reg.DestroyEntity(match);
     EXPECT_FALSE(v.Contains(match));      // stale handle
 }
+
+// ---- Task 5: Get ----------------------------------------------------------
+
+TEST(ViewGet, ReturnsRefsAndPointers)
+{
+    Astra::Registry reg;
+    auto e = reg.CreateEntity<Position, Velocity>();
+    reg.GetComponent<Position>(e)->x = 5.0f;
+    reg.GetComponent<Velocity>(e)->dx = 2.0f;
+
+    auto v = reg.CreateView<Position, const Velocity, Astra::Optional<Health>>();
+
+    auto r = v.Get(e);
+    ASSERT_TRUE(r.IsOk());
+    auto& [pos, vel, health] = *r.GetValue();
+    EXPECT_FLOAT_EQ(pos.x, 5.0f);
+    EXPECT_FLOAT_EQ(vel.dx, 2.0f);
+    EXPECT_EQ(health, nullptr);        // Optional<Health> absent -> null
+
+    pos.x = 9.0f;                      // write through the returned ref
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 9.0f);
+
+    // pointer identity with GetComponent
+    EXPECT_EQ(&pos, reg.GetComponent<Position>(e));
+}
+
+TEST(ViewGet, NotMatchedCases)
+{
+    Astra::Registry reg;
+    auto noVel = reg.CreateEntity<Position>();
+    auto v = reg.CreateView<Position, const Velocity>();
+
+    auto r = v.Get(noVel);
+    ASSERT_TRUE(r.IsErr());
+    EXPECT_EQ(*r.GetError(), Astra::QueryError::NotMatched);
+
+    reg.DestroyEntity(noVel);
+    EXPECT_TRUE(v.Get(noVel).IsErr());   // stale handle
+}
+
+TEST(ViewGet, OptionalPresentIsNonNull)
+{
+    Astra::Registry reg;
+    auto e = reg.CreateEntity<Position, Velocity, Health>();
+    auto v = reg.CreateView<Position, const Velocity, Astra::Optional<Health>>();
+    auto r = v.Get(e);
+    ASSERT_TRUE(r.IsOk());
+    auto& [pos, vel, health] = *r.GetValue();
+    (void)pos; (void)vel;
+    ASSERT_NE(health, nullptr);
+    EXPECT_EQ(health, reg.GetComponent<Health>(e));
+}
