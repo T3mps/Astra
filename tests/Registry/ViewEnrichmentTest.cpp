@@ -134,16 +134,16 @@ TEST(ViewGet, ReturnsRefsAndPointers)
 
     auto r = v.Get(e);
     ASSERT_TRUE(r.IsOk());
-    auto& [pos, vel, health] = *r.GetValue();
-    EXPECT_FLOAT_EQ(pos.x, 5.0f);
-    EXPECT_FLOAT_EQ(vel.dx, 2.0f);
+    auto [pos, vel, health] = *r.GetValue();
+    EXPECT_FLOAT_EQ(pos->x, 5.0f);
+    EXPECT_FLOAT_EQ(vel->dx, 2.0f);
     EXPECT_EQ(health, nullptr);        // Optional<Health> absent -> null
 
-    pos.x = 9.0f;                      // write through the returned ref
+    pos->x = 9.0f;                     // write through the returned pointer
     EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 9.0f);
 
     // pointer identity with GetComponent
-    EXPECT_EQ(&pos, reg.GetComponent<Position>(e));
+    EXPECT_EQ(pos, reg.GetComponent<Position>(e));
 }
 
 TEST(ViewGet, NotMatchedCases)
@@ -167,7 +167,7 @@ TEST(ViewGet, OptionalPresentIsNonNull)
     auto v = reg.CreateView<Position, const Velocity, Astra::Optional<Health>>();
     auto r = v.Get(e);
     ASSERT_TRUE(r.IsOk());
-    auto& [pos, vel, health] = *r.GetValue();
+    auto [pos, vel, health] = *r.GetValue();
     (void)pos; (void)vel;
     ASSERT_NE(health, nullptr);
     EXPECT_EQ(health, reg.GetComponent<Health>(e));

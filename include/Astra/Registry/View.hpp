@@ -423,20 +423,20 @@ namespace Astra
         }
 
     private:
-        // Random-access yield shape: each required -> a reference (const preserved),
+        // Random-access yield shape: each required -> a pointer (const preserved),
         // each optional -> a pointer. Mirrors ForEach's yielded arguments.
         template<typename ReqTuple, typename OptTuple> struct AccessTupleImpl;
         template<typename... R, typename... O>
         struct AccessTupleImpl<std::tuple<R...>, std::tuple<O...>>
         {
-            using type = std::tuple<R&..., O*...>;
+            using type = std::tuple<R*..., O*...>;
         };
 
         template<typename R>
-        ASTRA_FORCEINLINE R& BindRequired(const EntityRecord* rec) const
+        ASTRA_FORCEINLINE R* BindRequired(const EntityRecord* rec) const
         {
             using Bare = std::remove_const_t<R>;
-            return *rec->archetype->GetComponent<Bare>(rec->location);   // Bare* binds to R& (adds const if any)
+            return rec->archetype->template GetComponent<Bare>(rec->location);   // Bare* -> R* (adds const if any)
         }
         template<typename O>
         ASTRA_FORCEINLINE O* BindOptional(const EntityRecord* rec) const
@@ -461,6 +461,14 @@ namespace Astra
     public:
         using AccessTuple = typename AccessTupleImpl<RequiredTypes, OptionalTypes>::type;
 
+        /**
+         * Filter-aware random access: returns pointers to the yielded components for
+         * `e` (required -> T*, Optional -> T*), or Err(NotMatched) if `e` is absent,
+         * dead, filtered out, or disabled under this view's enabled filter. The
+         * pointers point INTO live chunk storage and are invalidated by any structural
+         * change (create/destroy/add/remove/defragment) — do not retain them across
+         * one. In-place value edits through the pointers are fine.
+         */
         ASTRA_NODISCARD Result<AccessTuple, QueryError> Get(Entity e) const
         {
             const EntityRecord* rec = VisibleRecord(e);
