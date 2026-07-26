@@ -936,7 +936,31 @@ namespace Astra
 
                     // (componentArray null / tag columns already skipped by the
                     //  `if (!componentArray) continue;` above)
-                    SerializeColumn(writer, chunk.get(), desc, chunkEntityCount);
+                    if (writer.GetCompressionMode() == CompressionMode::LZ4)
+                    {
+                        // Per-column block (orthogonal to versioning): serialize the
+                        // column (data + disabled section) into a sub-buffer with
+                        // checksum off, then compress that buffer as ONE block into
+                        // the main stream. WriteCompressedBlock stores raw when below
+                        // threshold / incompressible, so tiny columns never inflate.
+                        // The sub-writer's memory ctor defaults to None mode, so the
+                        // inner SerializeColumn writes plain (uncompressed) bytes;
+                        // compression happens exactly once, here in the outer stream.
+                        std::vector<std::byte> colBuf;
+                        {
+                            BinaryWriter sub(colBuf);
+                            sub.SetChecksumEnabled(false);
+                            SerializeColumn(sub, chunk.get(), desc, chunkEntityCount);
+                            sub.Flush();
+                        }
+                        writer.WriteCompressedBlock(colBuf.data(), colBuf.size());
+                    }
+                    else
+                    {
+                        // None mode: byte-identical to the pre-compression format --
+                        // SerializeColumn writes straight into the main stream.
+                        SerializeColumn(writer, chunk.get(), desc, chunkEntityCount);
+                    }
                 }
             }
         }
@@ -1204,9 +1228,31 @@ namespace Astra
                     void* componentArray = chunk->GetComponentArrayByID(desc.id);
                     if (!componentArray) continue;
 
-                    auto colResult = DeserializeColumn(reader, chunk, archetype.get(), desc,
-                                                       static_cast<size_t>(chunkEntityCount),
-                                                       diskHasDisabledSection[di]);
+                    // Mirror of the write path (Serialize above): LZ4 archives wrap
+                    // each column in a compressed block, so read+decompress it into a
+                    // memory sub-reader (checksum off, matching the writer) and let
+                    // DeserializeColumn consume the plain bytes. None archives feed
+                    // the main reader directly -- byte-identical to the old format.
+                    ResultType colResult = ResultType::Ok(nullptr);
+                    if (reader.GetCompressionMode() == CompressionMode::LZ4)
+                    {
+                        auto blk = reader.ReadCompressedBlock();
+                        if (blk.IsErr())
+                            return ResultType::Err(SerializationError::CorruptedData);
+                        const auto& bytes = *blk.GetValue();   // std::vector<uint8_t>
+                        BinaryReader sub(std::span<const std::byte>(
+                            reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()));
+                        sub.SetChecksumEnabled(false);
+                        colResult = DeserializeColumn(sub, chunk, archetype.get(), desc,
+                                                      static_cast<size_t>(chunkEntityCount),
+                                                      diskHasDisabledSection[di]);
+                    }
+                    else
+                    {
+                        colResult = DeserializeColumn(reader, chunk, archetype.get(), desc,
+                                                      static_cast<size_t>(chunkEntityCount),
+                                                      diskHasDisabledSection[di]);
+                    }
                     if (colResult.IsErr())
                         return colResult;
                 }
@@ -1426,9 +1472,14 @@ namespace Astra
         void SerializeColumn(BinaryWriter& w, ArchetypeChunk* chunk, const ComponentDescriptor& desc, size_t chunkEntityCount) const
         {
             void* componentArray = chunk->GetComponentArrayByID(desc.id);
-            size_t arraySize = chunkEntityCount * desc.size;
 
-            // Use component's serialization function if available
+            // Per-element serialize. Every registered component has serializeVersioned
+            // (ComponentRegistry.hpp), so the first arm always runs; the plain-serialize
+            // arm is kept for completeness. The former `is_trivially_copyable ->
+            // WriteCompressedBlock(rawArray)` bypass was REMOVED with the LZ4
+            // per-column wrapper (compression is now orthogonal to versioning and lives
+            // in Serialize()'s column loop, never here) -- it silently skipped
+            // versioning for POD columns and never actually ran anyway.
             if (desc.serializeVersioned || desc.serialize)
             {
                 // For custom serialization, we can't compress the whole array
@@ -1449,17 +1500,6 @@ namespace Astra
                         desc.serialize(w, componentPtr);
                     }
                 }
-            }
-            else if (desc.is_trivially_copyable)
-            {
-                // For POD types, compress the entire array if beneficial
-                // WriteCompressedBlock will automatically handle compression threshold
-                w.WriteCompressedBlock(componentArray, arraySize);
-            }
-            else
-            {
-                // Should not happen - components should be serializable
-                ASTRA_ASSERT(false, "Component type is not serializable");
             }
 
             // Enableable-components (Task 4, format v4): persist this column's
@@ -1509,8 +1549,11 @@ namespace Astra
             using ResultType = Result<std::unique_ptr<Archetype>, SerializationError>;
 
             void* componentArray = chunk->GetComponentArrayByID(desc.id);
-            size_t arraySize = chunkEntityCount * desc.size;
 
+            // Per-element deserialize (mirror of SerializeColumn). The former
+            // `is_trivially_copyable -> ReadCompressedBlock` arm was REMOVED with the
+            // LZ4 per-column wrapper: decompression now happens once, in Deserialize()'s
+            // column loop, which hands this helper the already-decompressed plain bytes.
             if (desc.deserializeVersioned || desc.deserialize)
             {
                 // For custom deserialization, components are not compressed
@@ -1536,26 +1579,6 @@ namespace Astra
                 {
                     return ResultType::Err(r.GetError());
                 }
-            }
-            else if (desc.is_trivially_copyable)
-            {
-                // POD types may be compressed - use ReadCompressedBlock
-                auto result = r.ReadCompressedBlock();
-                if (result.IsErr())
-                {
-                    // Error reading compressed block
-                    return ResultType::Err(SerializationError::CorruptedData);
-                }
-
-                auto& data = *result.GetValue();
-                if (data.size() != arraySize)
-                {
-                    // Size mismatch - data corruption
-                    return ResultType::Err(SerializationError::SizeMismatch);
-                }
-
-                // Copy decompressed data to component array
-                std::memcpy(componentArray, data.data(), arraySize);
             }
 
             // Enableable-components (Task 4, format v4): mirror-image of the

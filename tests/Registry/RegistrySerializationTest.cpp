@@ -6,6 +6,8 @@
 #include <vector>
 #include <chrono>
 #include <iostream>
+#include <filesystem>
+#include <system_error>
 #include "../TestComponents.hpp"
 #include "Astra/Registry/Registry.hpp"
 
@@ -337,4 +339,106 @@ TEST(RegistrySerialization, UnifiedRecordRoundTripPreservesLivenessAndLocation)
             EXPECT_FLOAT_EQ(p->x, float(i));   // location resolved correctly after load
         }
     }
+}
+
+// ===================== LZ4 per-column compression (Task 3) =====================
+
+namespace
+{
+    // A single entity's Name column must exceed 4 MB so WriteCompressedBlock compresses
+    // it into a MULTI-BLOCK LZ4 frame -- the >4MB case (C3) that previously saved but
+    // never loaded. Two constraints drive the component choice:
+    //   1. The storage engine hard-refuses any component whose one-entity in-memory
+    //      footprint exceeds the pool's chunk ceiling (<=1 MB), so a >4MB POD column is
+    //      impossible to store. Name's footprint is a std::string handle (~32 B); its
+    //      SERIALIZED column -- the bytes SerializeColumn emits, exactly what compression
+    //      wraps -- is the full string contents, which we make ~5 MB.
+    //   2. The test binary sits at the 128-component-type ceiling, so the component must
+    //      be one ALREADY registered elsewhere in the suite (using a type no other test
+    //      touches would consume a fresh global TypeID and overflow a later test's
+    //      ComponentMask). Astra::Test::Name is used across many suites -> zero new IDs.
+    constexpr size_t kBigChars = 5'000'000;   // ~5 MB serialized column ( > 4 MB )
+
+    // Deterministic, LZ4-friendly fill: repeats every 26 chars, so compression
+    // demonstrably engages while the whole payload is still checked on load.
+    std::string MakeBigString()
+    {
+        std::string s;
+        s.resize(kBigChars);
+        for (size_t i = 0; i < kBigChars; ++i)
+            s[i] = static_cast<char>('A' + (i % 26));
+        return s;   // heap buffer; NRVO -- no giant stack object
+    }
+}
+
+// Save a one-entity world whose Name serializes to a >4MB column twice -- once LZ4,
+// once None -- then assert (a) the LZ4 file is materially smaller (per-column
+// compression engaged) and (b) both files load back byte-equal (the >4MB multi-block
+// round trip that previously saved but never loaded -- C3).
+TEST(RegistrySerialization, LZ4_CompressesAndRoundTripsLargeColumn)
+{
+    using namespace Astra::Test;
+    namespace fs = std::filesystem;
+    const fs::path pathLz4  = fs::temp_directory_path() / "astra_lz4_big.bin";
+    const fs::path pathNone = fs::temp_directory_path() / "astra_none_big.bin";
+
+    const std::string expected = MakeBigString();
+
+    // Build the world once; the big string lives on the heap inside the component
+    // (never a 5 MB stack object) and is filled through a mutable pointer.
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<Name>();
+    Astra::Entity e = reg.CreateEntity();
+    ASSERT_TRUE(reg.EmplaceComponent<Name>(e));
+    {
+        Name* n = reg.GetComponent<Name>(e);
+        ASSERT_NE(n, nullptr);
+        n->value = expected;
+    }
+
+    // Save the same world twice with different compression modes.
+    {
+        Astra::Registry::SaveConfig cfg; cfg.compressionMode = Astra::CompressionMode::LZ4;
+        ASSERT_TRUE(reg.Save(pathLz4, cfg).IsOk());
+    }
+    {
+        Astra::Registry::SaveConfig cfg; cfg.compressionMode = Astra::CompressionMode::None;
+        ASSERT_TRUE(reg.Save(pathNone, cfg).IsOk());
+    }
+
+    // The real RED: before Task 3 nothing compressed, so these files were equal.
+    EXPECT_LT(fs::file_size(pathLz4), fs::file_size(pathNone))
+        << "LZ4 save (" << fs::file_size(pathLz4) << " B) should be smaller than None ("
+        << fs::file_size(pathNone) << " B) -- per-column compression did not engage";
+
+    // Both files must load back with the column byte-equal to what we saved.
+    auto verify = [&expected](const fs::path& p)
+    {
+        auto compReg = std::make_shared<Astra::ComponentRegistry>();
+        compReg->RegisterComponents<Name>();
+        auto loadResult = Astra::Registry::Load(p, compReg);
+        ASSERT_TRUE(loadResult.IsOk())
+            << "Load failed for " << p.string() << ", error "
+            << static_cast<int>(*loadResult.GetError());
+        auto loaded = std::move(*loadResult.GetValue());
+
+        EXPECT_EQ(loaded->Size(), 1u);
+        size_t seen = 0;
+        bool valueEqual = false;
+        loaded->CreateView<Name>().ForEach(
+            [&](Astra::Entity, Name& n)
+            {
+                ++seen;
+                valueEqual = (n.value == expected);   // full >4MB byte-equality
+            });
+        EXPECT_EQ(seen, 1u);
+        EXPECT_TRUE(valueEqual) << "column diverged across round trip in " << p.string();
+    };
+
+    verify(pathLz4);
+    verify(pathNone);
+
+    std::error_code ec;
+    fs::remove(pathLz4, ec);
+    fs::remove(pathNone, ec);
 }

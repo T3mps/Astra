@@ -836,6 +836,12 @@ namespace Astra
         [[nodiscard]] bool IsChecksumEnabled() const noexcept { return m_checksumEnabled; }
         [[nodiscard]] uint32_t GetChecksum() const noexcept { return m_runningChecksum; }
         [[nodiscard]] uint32_t GetExpectedChecksum() const noexcept { return m_expectedChecksum; }
+
+        /**
+         * The compression mode read from the file header (see ReadHeader).
+         * Used by column deserializers to choose the compressed vs inline path.
+         */
+        [[nodiscard]] CompressionMode GetCompressionMode() const noexcept { return m_compressionMode; }
         
     private:
         std::ifstream m_file;

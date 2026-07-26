@@ -567,6 +567,12 @@ namespace Astra
         void SetChecksumEnabled(bool enabled) { m_checksumEnabled = enabled; }
         [[nodiscard]] bool IsChecksumEnabled() const noexcept { return m_checksumEnabled; }
         [[nodiscard]] uint32_t GetChecksum() const noexcept { return m_runningChecksum; }
+
+        /**
+         * The compression mode this writer serializes with (from its SaveConfig).
+         * Used by column serializers to choose the compressed vs inline path.
+         */
+        [[nodiscard]] CompressionMode GetCompressionMode() const noexcept { return m_compressionMode; }
         
     private:
         std::ofstream m_file;
