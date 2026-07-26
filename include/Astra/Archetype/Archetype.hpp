@@ -901,6 +901,15 @@ namespace Astra
                 writer(static_cast<uint64_t>(desc.size));
                 writer(static_cast<uint64_t>(desc.alignment));
                 writer(desc.version);
+
+                // IM-9 (format v4): record whether this component carries a per-chunk
+                // disabled-bit section (written below iff desc.isEnableable). Recording
+                // presence EXPLICITLY makes it a property of the ARCHIVE rather than of
+                // the loading build -- so a component whose ASTRA_ENABLEABLE status
+                // differs between the saving and loading builds no longer desyncs the
+                // reader from the byte stream. Written unconditionally in the current
+                // (v4) format; the reader consumes it iff the archive is v4+.
+                writer(static_cast<uint8_t>(desc.isEnableable ? 1 : 0));
             }
             
             // Write each chunk's data
@@ -1041,9 +1050,11 @@ namespace Astra
             }
 
             // Same bound, sized to a descriptor entry's fixed on-disk fields:
-            // hash(8) + size(8) + alignment(8) + version(4) = 28 bytes, written
-            // unconditionally by Archetype::Serialize for every descriptor.
-            constexpr uint64_t kMinBytesPerDescriptor = sizeof(uint64_t) * 3 + sizeof(uint32_t);
+            // hash(8) + size(8) + alignment(8) + version(4) = 28 bytes, plus a 1-byte
+            // has-disabled-section flag (IM-9) present only from format v4 onward,
+            // written unconditionally by Archetype::Serialize for every descriptor.
+            const uint64_t kMinBytesPerDescriptor = sizeof(uint64_t) * 3 + sizeof(uint32_t)
+                + (reader.GetVersion() >= 4 ? sizeof(uint8_t) : 0);
             if (reader.CountExceedsRemaining(descriptorCount, kMinBytesPerDescriptor))
             {
                 return ResultType::Err(SerializationError::CorruptedData);
@@ -1052,12 +1063,28 @@ namespace Astra
             std::vector<ComponentDescriptor> descriptors;
             descriptors.reserve(descriptorCount);
 
+            // IM-9: per-descriptor "archive carries a disabled-bit section for this
+            // column" flags, kept in lockstep with `descriptors` (both are pushed
+            // together only when the hash resolves). Drives section CONSUMPTION on the
+            // chunk-read path below so it depends on the archive, not the local build.
+            std::vector<uint8_t> diskHasDisabledSection;
+            diskHasDisabledSection.reserve(descriptorCount);
+
             for (uint32_t i = 0; i < descriptorCount; ++i)
             {
                 uint64_t hash;
                 uint64_t size, alignment;
                 uint32_t version;
                 reader(hash)(size)(alignment)(version);
+
+                // IM-9: format v4+ records a per-descriptor has-disabled-section flag
+                // right after version. Pre-v4 archives have no such byte and never wrote
+                // a disabled section, so it defaults to 0 (absent) for them.
+                uint8_t hasDisabledSection = 0;
+                if (reader.GetVersion() >= 4)
+                {
+                    reader(hasDisabledSection);
+                }
 
                 if (reader.HasError())
                 {
@@ -1070,6 +1097,7 @@ namespace Astra
                 if (it != registryDescriptors.end())
                 {
                     descriptors.push_back(*it);
+                    diskHasDisabledSection.push_back(hasDisabledSection);
                 }
                 else
                 {
@@ -1077,6 +1105,32 @@ namespace Astra
                     // The component with this hash needs to be registered before deserialization
                     return ResultType::Err(SerializationError::UnknownComponent);
                 }
+            }
+
+            // CR-4: the on-disk ComponentMask words (read above into `mask`) hold the
+            // SAVING run's ComponentID bit positions. ComponentIDs are assigned per-run
+            // and are NOT stable across processes, so constructing the archetype from
+            // those raw bits desyncs Has<T>/queries/the archetype-map key when the
+            // archive is loaded in a different run. The per-descriptor block, by
+            // contrast, is keyed on the stable TypeID::Hash() and was just resolved to
+            // THIS run's descriptors (each carrying this run's desc.id, tags included).
+            // Rebuild the mask from those resolved ids so it is correct in the loading
+            // run; the raw disk words are consumed off the wire but their VALUES are not
+            // trusted.
+            ComponentMask localMask;
+            for (const auto& d : descriptors)
+            {
+                localMask.Set(d.id);
+            }
+
+            // Cross-process integrity check: the saved mask's popcount is run-
+            // independent (it counts how many components the archetype has, not which
+            // ids), so it must equal the descriptor count regardless of process. A
+            // mismatch means the mask half and the descriptor half of the record
+            // disagree -> corrupt/crafted input.
+            if (mask.Count() != descriptors.size())
+            {
+                return ResultType::Err(SerializationError::CorruptedData);
             }
 
             // Validate that the saved per-chunk layout fits the pool we will
@@ -1123,8 +1177,9 @@ namespace Astra
                 }
             }
 
-            // Create new archetype
-            auto archetype = std::make_unique<Archetype>(mask);
+            // Create new archetype from the run-local mask rebuilt above (CR-4), not
+            // the untrusted raw disk mask.
+            auto archetype = std::make_unique<Archetype>(localMask);
             archetype->m_chunkPool = componentPool;
             archetype->Initialize(descriptors);
 
@@ -1201,9 +1256,12 @@ namespace Astra
                     return ResultType::Err(reader.GetError());
                 }
 
-                // Read component arrays (SOA layout)
-                for (const auto& desc : descriptors)
+                // Read component arrays (SOA layout). Indexed (not range-for) so each
+                // descriptor's disk has-disabled-section flag can be looked up by the
+                // same ordinal (IM-9).
+                for (size_t di = 0; di < descriptors.size(); ++di)
                 {
+                    const ComponentDescriptor& desc = descriptors[di];
                     void* componentArray = chunk->GetComponentArrayByID(desc.id);
                     if (!componentArray) continue;
 
@@ -1257,69 +1315,80 @@ namespace Astra
                     }
 
                     // Enableable-components (Task 4, format v4): mirror-image of the
-                    // write side above. v4+ archives carry a disabledCount + word
-                    // section for every enableable column right after its component
-                    // data -- read and VALIDATE it (refuse-not-trust, spec 14 invariant
+                    // write side above. When the ARCHIVE recorded a disabled-bit section
+                    // for this column (diskHasDisabledSection[di] -- the per-descriptor
+                    // flag read from the descriptor block), a disabledCount + word section
+                    // follows this column's component data. Consume it iff that flag is
+                    // set -- NOT iff THIS build marks the component enableable (IM-9):
+                    // recording presence in the stream keeps the reader byte-synchronized
+                    // even when a component's ASTRA_ENABLEABLE status differs between the
+                    // saving and loading builds. The flag is only ever set for v4+
+                    // archives (pre-v4 defaults it to 0), which subsumes the old explicit
+                    // version gate; pre-v4 archives never wrote this section for ANY
+                    // column, so the chunk's word region stays zero-init from
+                    // AppendChunk/InitializeColumns above and every entity comes back
+                    // enabled (invariant 8's "legacy loads all-enabled" contract).
+                    //
+                    // The section is always VALIDATED (refuse-not-trust, spec 14 invariant
                     // 8): a disabledCount that doesn't match popcount(words), or any bit
                     // set at or beyond this chunk's live entity count, is corrupted data
-                    // and fails the whole load rather than loading it silently. Pre-v4
-                    // archives never wrote this section for ANY column (the feature did
-                    // not exist yet) -- skip reading it; the chunk's word region is
-                    // already zero-init from AppendChunk/InitializeColumns above, so
-                    // every entity in a legacy load comes back enabled at zero extra
-                    // cost (invariant 8's "legacy loads all-enabled" contract).
-                    if (desc.isEnableable)
+                    // and fails the whole load rather than loading it silently.
+                    if (diskHasDisabledSection[di])
                     {
-                        const int col = archetype->m_columnMeta.idToColumn[desc.id];
                         const size_t wordCapacity = std::max<size_t>(1, static_cast<size_t>(chunkEntityCount));
                         const size_t wordCount = (wordCapacity + 63) / 64;
 
-                        if (reader.GetVersion() >= 4)
+                        uint32_t diskDisabledCount = 0;
+                        reader(diskDisabledCount);
+                        if (reader.HasError())
                         {
-                            uint32_t diskDisabledCount = 0;
-                            reader(diskDisabledCount);
-                            if (reader.HasError())
-                            {
-                                return ResultType::Err(reader.GetError());
-                            }
+                            return ResultType::Err(reader.GetError());
+                        }
 
-                            // Read into a local buffer first and validate BEFORE touching
-                            // the live chunk -- a rejected section must not leave the
-                            // chunk's real word region partially written (the archetype
-                            // is discarded on Err either way, but this keeps the write
-                            // atomic/all-or-nothing, matching the compressed-block read
-                            // above).
-                            std::vector<uint64_t> diskWords(wordCount, 0);
-                            uint32_t popcount = 0;
-                            for (size_t w = 0; w < wordCount; ++w)
-                            {
-                                reader(diskWords[w]);
-                                popcount += static_cast<uint32_t>(std::popcount(diskWords[w]));
-                            }
-                            if (reader.HasError())
-                            {
-                                return ResultType::Err(reader.GetError());
-                            }
+                        // Read into a local buffer first and validate BEFORE touching the
+                        // live chunk -- a rejected section must not leave the chunk's real
+                        // word region partially written (the archetype is discarded on Err
+                        // either way, but this keeps the write atomic/all-or-nothing,
+                        // matching the compressed-block read above).
+                        std::vector<uint64_t> diskWords(wordCount, 0);
+                        uint32_t popcount = 0;
+                        for (size_t w = 0; w < wordCount; ++w)
+                        {
+                            reader(diskWords[w]);
+                            popcount += static_cast<uint32_t>(std::popcount(diskWords[w]));
+                        }
+                        if (reader.HasError())
+                        {
+                            return ResultType::Err(reader.GetError());
+                        }
 
-                            if (diskDisabledCount != popcount)
+                        if (diskDisabledCount != popcount)
+                        {
+                            return ResultType::Err(SerializationError::CorruptedData);
+                        }
+
+                        for (size_t i = static_cast<size_t>(chunkEntityCount); i < wordCount * 64; ++i)
+                        {
+                            if ((diskWords[i >> 6] >> (i & 63)) & 1ull)
                             {
                                 return ResultType::Err(SerializationError::CorruptedData);
                             }
+                        }
 
-                            for (size_t i = static_cast<size_t>(chunkEntityCount); i < wordCount * 64; ++i)
-                            {
-                                if ((diskWords[i >> 6] >> (i & 63)) & 1ull)
-                                {
-                                    return ResultType::Err(SerializationError::CorruptedData);
-                                }
-                            }
-
+                        if (desc.isEnableable)
+                        {
+                            // This build still stores per-entity disabled bits for the
+                            // type -- apply the validated section to the live chunk.
+                            const int col = archetype->m_columnMeta.idToColumn[desc.id];
                             uint64_t* liveWords = chunk->GetDisabledWords(col);
                             std::memcpy(liveWords, diskWords.data(), wordCount * sizeof(uint64_t));
                             chunk->m_columns[col].disabledCount = diskDisabledCount;
                         }
-                        // else: legacy (pre-v4) archive -- no bits on disk, chunk already
-                        // all-enabled by zero-init.
+                        // else: the archive carried disabled bits, but THIS build no
+                        // longer marks the component ASTRA_ENABLEABLE. The bytes are
+                        // consumed and validated (stream stays in sync) then dropped;
+                        // every entity of this type loads enabled -- graceful schema
+                        // evolution for a column that lost ASTRA_ENABLEABLE.
                     }
                 }
 

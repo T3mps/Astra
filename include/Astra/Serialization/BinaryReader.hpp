@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -316,10 +317,16 @@ namespace Astra
             uint64_t size;
             (*this)(size);
 
+            // Take the bulk path only for hook-free trivially-copyable T; a type that
+            // is trivially copyable AND defines a Serialize hook must be read element-
+            // wise so the hook is honored symmetrically with the writer (IM-8).
+            constexpr bool kBulk = std::is_trivially_copyable_v<T> && !HasSerializeMethod<T, BinaryReader>;
+
             // Sanity check to prevent huge allocations
-            // For POD types, we can check the exact size needed
-            // For non-POD types, just check that we have some data left
-            if constexpr (std::is_trivially_copyable_v<T>)
+            // For the bulk (POD) path we know the exact per-element on-disk size;
+            // otherwise every element consumes at least 1 byte, so reject any count
+            // that cannot possibly fit in what remains BEFORE reserving (IM-12).
+            if constexpr (kBulk)
             {
                 if (size > (m_size - m_position) / sizeof(T))
                 {
@@ -329,10 +336,7 @@ namespace Astra
             }
             else
             {
-                // For non-POD types, just check for reasonable size
-                // We can't know the actual serialized size without reading
-                const uint64_t maxReasonableSize = 1000000; // 1 million elements max
-                if (size > maxReasonableSize)
+                if (CountExceedsRemaining(size, 1))
                 {
                     m_error = SerializationError::CorruptedData;
                     return *this;
@@ -340,9 +344,9 @@ namespace Astra
             }
 
             vec.clear();
-            vec.reserve(static_cast<size_t>(size));
+            vec.reserve(static_cast<size_t>(size)); // bounded by the checks above
 
-            if constexpr (std::is_trivially_copyable_v<T>)
+            if constexpr (kBulk)
             {
                 // Read all at once for POD types
                 vec.resize(static_cast<size_t>(size));
@@ -350,7 +354,7 @@ namespace Astra
             }
             else
             {
-                // Read one by one for complex types
+                // Read one by one for complex types (or hook-bearing POD types)
                 for (uint64_t i = 0; i < size; ++i)
                 {
                     T item;
@@ -368,14 +372,16 @@ namespace Astra
         template<typename T, size_t N>
         BinaryReader& operator()(std::array<T, N>& arr)
         {
-            if constexpr (std::is_trivially_copyable_v<T>)
+            // See the vector overload: hook-bearing trivially-copyable T must be read
+            // element-wise so its Serialize hook is honored (IM-8).
+            if constexpr (std::is_trivially_copyable_v<T> && !HasSerializeMethod<T, BinaryReader>)
             {
                 // Read all at once for POD types
                 ReadBytes(arr.data(), N * sizeof(T));
             }
             else
             {
-                // Read one by one for complex types
+                // Read one by one for complex types (or hook-bearing POD types)
                 for (auto& item : arr)
                 {
                     (*this)(item);
@@ -481,6 +487,15 @@ namespace Astra
                 return *this;
             }
 
+            // Every entry writes a key and a value, i.e. at least 1 byte on disk;
+            // reject a count that cannot fit in what remains BEFORE reserving so a
+            // tiny corrupt input cannot drive a huge speculative allocation (IM-12).
+            if (CountExceedsRemaining(size, 1))
+            {
+                m_error = SerializationError::CorruptedData;
+                return *this;
+            }
+
             map.clear();
             map.reserve(static_cast<size_t>(size));
             for (uint64_t i = 0; i < size; ++i)
@@ -534,6 +549,15 @@ namespace Astra
             // Sanity check
             const uint64_t maxSetSize = 10000000; // 10 million entries max
             if (size > maxSetSize)
+            {
+                m_error = SerializationError::CorruptedData;
+                return *this;
+            }
+
+            // Every element writes at least 1 byte on disk; reject a count that cannot
+            // fit in what remains BEFORE reserving so a tiny corrupt input cannot drive
+            // a huge speculative allocation (IM-12).
+            if (CountExceedsRemaining(size, 1))
             {
                 m_error = SerializationError::CorruptedData;
                 return *this;
@@ -683,19 +707,57 @@ namespace Astra
                 m_error = SerializationError::CorruptedData;
                 return;
             }
-            
+
+            // Skipped bytes MUST feed the running checksum exactly as ReadBytes does:
+            // WritePadding emits real zero bytes through WriteBytes (folded into the
+            // writer's checksum), so a reader that merely advances past them would
+            // always mismatch the checksum (IM-11). Mirror ReadBytes' guard, which is
+            // evaluated against the start position before it advances.
+            const bool updateChecksum = m_checksumEnabled && m_position >= m_headerSize && m_headerSize > 0;
+
             if (!m_data.empty())
             {
-                // Memory mode - just advance position
+                // Memory mode - checksum the bytes in place, then advance
+                if (updateChecksum)
+                {
+                    const void* skipped = m_data.data() + m_position;
+                    m_runningChecksum = m_usePortableChecksum
+                        ? Checksum::Portable(skipped, bytes, m_runningChecksum)
+                        : Checksum::CRC32(skipped, bytes, m_runningChecksum);
+                }
                 m_position += bytes;
             }
             else if (m_file.is_open())
             {
-                // File mode - seek forward
-                m_file.seekg(bytes, std::ios::cur);
-                if (!m_file.good())
+                if (updateChecksum)
                 {
-                    m_error = SerializationError::IOError;
+                    // File mode - read-and-discard so the checksum sees the skipped
+                    // bytes (a bare seek would bypass the accumulation).
+                    std::array<std::byte, 512> scratch;
+                    size_t remaining = bytes;
+                    while (remaining > 0)
+                    {
+                        size_t chunk = std::min(remaining, scratch.size());
+                        m_file.read(reinterpret_cast<char*>(scratch.data()), static_cast<std::streamsize>(chunk));
+                        if (!m_file.good())
+                        {
+                            m_error = SerializationError::IOError;
+                            return;
+                        }
+                        m_runningChecksum = m_usePortableChecksum
+                            ? Checksum::Portable(scratch.data(), chunk, m_runningChecksum)
+                            : Checksum::CRC32(scratch.data(), chunk, m_runningChecksum);
+                        remaining -= chunk;
+                    }
+                }
+                else
+                {
+                    // File mode - seek forward (no checksum to maintain)
+                    m_file.seekg(bytes, std::ios::cur);
+                    if (!m_file.good())
+                    {
+                        m_error = SerializationError::IOError;
+                    }
                 }
                 m_position += bytes;
             }

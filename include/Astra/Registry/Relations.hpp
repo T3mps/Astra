@@ -210,14 +210,23 @@ namespace Astra
             if (!m_relationsGraph) ASTRA_UNLIKELY
                 return;  // Registry destroyed
 
-            const auto& cache = m_relationsGraph->GetDescendantsCached(m_rootEntity);
-            const size_t count = cache.entries.size();
-
             // Astra creates no threads — parallelism requires an injected scheduler.
+            // Fall back to the sequential path (which takes its own snapshot) before
+            // paying for a cache copy when there's no scheduler at all.
             if (!m_scheduler)
             {
                 return ForEachDescendant(std::forward<Func>(func));
             }
+
+            // Snapshot (value copy): GetDescendantsCached() returns a TraversalCache
+            // value copied under the cache lock. We must own a local copy here -- the
+            // ParallelFor lambda reads cache.entries lock-free from worker threads, and
+            // a concurrent insertion into the non-pointer-stable cache map would rehash
+            // and dangle any reference into it (CR-1). The lambda captures this local
+            // copy by reference; ParallelFor is synchronous, so the copy outlives every
+            // worker.
+            auto cache = m_relationsGraph->GetDescendantsCached(m_rootEntity);
+            const size_t count = cache.entries.size();
 
             if (count < MIN_ENTITIES_FOR_PARALLEL) ASTRA_LIKELY
             {

@@ -12,6 +12,7 @@
 #include "../Core/TypeID.hpp"
 #include "AnyValue.hpp"
 #include "Attribute.hpp"
+#include "ContainerTraits.hpp"
 
 namespace Astra
 {
@@ -335,6 +336,20 @@ namespace Astra
     namespace Detail
     {
         /**
+         * Detects whether ContainerTraits<T> exposes a `static constexpr bool IsString`
+         * member. Only the std::basic_string specializations currently define it;
+         * std::string otherwise shares std::vector's IsSequence/HasContiguousStorage/
+         * !HasFixedSize fingerprint in ContainerTraits, so this is needed to tell them
+         * apart when deriving FieldInfo::isVector below.
+         */
+        template<typename T, typename = void>
+        struct ContainerIsStringTrait : std::false_type {};
+
+        template<typename T>
+        struct ContainerIsStringTrait<T, std::void_t<decltype(ContainerTraits<T>::IsString)>>
+            : std::bool_constant<ContainerTraits<T>::IsString> {};
+
+        /**
          * Creates a FieldInfo for a member field.
          * This is used internally by the registration macros.
          */
@@ -364,8 +379,15 @@ namespace Astra
             info.isEnum = std::is_enum_v<DecayedType>;
             info.isClass = std::is_class_v<DecayedType>;
             info.isArray = std::is_array_v<FieldType>;
-            info.isStdArray = false; // Will be set by ContainerTraits
-            info.isVector = false;   // Will be set by ContainerTraits
+            // std::array is the only ContainerTraits specialization with HasFixedSize
+            // set; std::vector is a contiguous, non-fixed-size sequence that is not
+            // std::basic_string (which shares the same IsSequence/HasContiguousStorage/
+            // !HasFixedSize fingerprint).
+            info.isStdArray = ContainerTraits<DecayedType>::HasFixedSize;
+            info.isVector = ContainerTraits<DecayedType>::IsSequence
+                && ContainerTraits<DecayedType>::HasContiguousStorage
+                && !ContainerTraits<DecayedType>::HasFixedSize
+                && !ContainerIsStringTrait<DecayedType>::value;
 
             // Type-erased getter
             info.getter = [](const void* instance, void* outValue) {

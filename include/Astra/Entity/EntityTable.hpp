@@ -120,6 +120,11 @@ namespace Astra
             size_t localIdx = segment->ToLocal(id);
             VersionType oldVersion = segment->records[localIdx].version;
 
+            // Write the version before any accounting that can release the
+            // segment (MaybeReleaseSegments may segment.reset() this segment);
+            // writing after that would be a use-after-free.
+            segment->records[localIdx].version = version;
+
             // Update alive count
             if (oldVersion == NULL_VERSION && version != NULL_VERSION)
             {
@@ -137,8 +142,6 @@ namespace Astra
                     MaybeReleaseSegments();
                 }
             }
-
-            segment->records[localIdx].version = version;
         }
 
         ASTRA_NODISCARD VersionType GetVersion(IDType id) const noexcept

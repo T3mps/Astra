@@ -93,11 +93,14 @@ namespace Astra
     
     ASTRA_FORCEINLINE bool IsHugePagesAvailable() noexcept
     {
-        static bool checked = false;
-        static bool available = false;
-        
-        if (!checked)
+        // Meyers magic-static: C++11 guarantees thread-safe initialization of
+        // a function-local static, so the probe below runs exactly once even
+        // if multiple worker threads call this concurrently (the previous
+        // hand-rolled checked/available pair was an unsynchronized data race
+        // under TSan).
+        static const bool available = []() noexcept -> bool
         {
+            bool result = false;
             #ifdef ASTRA_PLATFORM_WINDOWS
                 HANDLE token;
                 if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
@@ -110,10 +113,10 @@ namespace Astra
                         privSet.Control = PRIVILEGE_SET_ALL_NECESSARY;
                         privSet.Privilege[0].Luid = luid;
                         privSet.Privilege[0].Attributes = SE_PRIVILEGE_ENABLED;
-                        
-                        BOOL result;
-                        PrivilegeCheck(token, &privSet, &result);
-                        available = (result == TRUE);
+
+                        BOOL privResult;
+                        PrivilegeCheck(token, &privSet, &privResult);
+                        result = (privResult == TRUE);
                     }
                     CloseHandle(token);
                 }
@@ -124,16 +127,15 @@ namespace Astra
                     char buffer[256];
                     if (fgets(buffer, sizeof(buffer), f))
                     {
-                        available = (strstr(buffer, "[always]") != nullptr || 
+                        result = (strstr(buffer, "[always]") != nullptr ||
                                    strstr(buffer, "[madvise]") != nullptr);
                     }
                     fclose(f);
                 }
             #endif
-            
-            checked = true;
-        }
-        
+            return result;
+        }();
+
         return available;
     }
     
@@ -207,21 +209,26 @@ namespace Astra
                 }
                 #endif
 
-                // Try generic huge pages
-                void* ptr = mmap(nullptr, hugePagesSize, prot,
-                    flags_mmap | MAP_HUGETLB, -1, 0);
-                if (ptr != MAP_FAILED)
+                // Try generic huge pages (MAP_HUGETLB is Linux-only; absent on
+                // macOS/BSD, so this attempt must not be compiled there).
+                #ifdef MAP_HUGETLB
                 {
-                    result.ptr = ptr;
-                    result.size = hugePagesSize;
-                    result.usedHugePages = true;
-
-                    if (zeroMemory)
+                    void* ptr = mmap(nullptr, hugePagesSize, prot,
+                        flags_mmap | MAP_HUGETLB, -1, 0);
+                    if (ptr != MAP_FAILED)
                     {
-                        std::memset(ptr, 0, hugePagesSize);
+                        result.ptr = ptr;
+                        result.size = hugePagesSize;
+                        result.usedHugePages = true;
+
+                        if (zeroMemory)
+                        {
+                            std::memset(ptr, 0, hugePagesSize);
+                        }
+                        return result;
                     }
-                    return result;
                 }
+                #endif
             }
             
             // Fall back to regular allocation with alignment

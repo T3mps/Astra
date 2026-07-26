@@ -756,41 +756,14 @@ namespace Astra
         ArchetypeChunkPool(const ArchetypeChunkPool&) = delete;
         ArchetypeChunkPool& operator=(const ArchetypeChunkPool&) = delete;
 
-        ArchetypeChunkPool(ArchetypeChunkPool&& other) noexcept :
-            m_config(other.m_config),
-            m_tlsf(std::move(other.m_tlsf)),
-            m_arenas(std::move(other.m_arenas)),
-            m_totalChunks(other.m_totalChunks.load()),
-            m_acquireCount(other.m_acquireCount.load()),
-            m_releaseCount(other.m_releaseCount.load()),
-            m_blockAllocations(other.m_blockAllocations.load()),
-            m_failedAcquires(other.m_failedAcquires.load())
-        {
-            other.ResetCounters();
-        }
-
-        ArchetypeChunkPool& operator=(ArchetypeChunkPool&& other) noexcept
-        {
-            if (this != &other)
-            {
-                for (const ArenaRecord& arena : m_arenas)
-                {
-                    FreeMemory(arena.memory, arena.size, arena.usedHugePages);
-                }
-                m_arenas.clear();
-
-                m_config = other.m_config;
-                m_tlsf = std::move(other.m_tlsf);
-                m_arenas = std::move(other.m_arenas);
-                m_totalChunks.store(other.m_totalChunks.load());
-                m_acquireCount.store(other.m_acquireCount.load());
-                m_releaseCount.store(other.m_releaseCount.load());
-                m_blockAllocations.store(other.m_blockAllocations.load());
-                m_failedAcquires.store(other.m_failedAcquires.load());
-                other.ResetCounters();
-            }
-            return *this;
-        }
+        // Move is also deleted: outstanding chunks carry a ChunkDeleter with a
+        // raw `pool` back-pointer into this instance. Moving would relocate the
+        // pool while those back-pointers still point at the old (freed) address,
+        // causing a use-after-free/double-free the next time such a chunk is
+        // destroyed. ArchetypeManager (the sole owner) is itself non-movable, so
+        // nothing depends on these.
+        ArchetypeChunkPool(ArchetypeChunkPool&& other) = delete;
+        ArchetypeChunkPool& operator=(ArchetypeChunkPool&& other) = delete;
 
         // Creates a chunk of `chunkBytes` bytes holding up to `capacity` entities.
         // The two are independent parameters: the caller (Archetype) owns the

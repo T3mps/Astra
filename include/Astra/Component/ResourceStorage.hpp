@@ -22,23 +22,29 @@ namespace Astra
 {
     /**
      * @brief Storage for singleton resources (global components)
-     * 
+     *
      * Resources are singleton components that exist globally rather than being attached
      * to entities. Common examples include Time, Input, RenderSettings, etc.
-     * 
+     *
      * Uses a sparse-dense storage pattern with swap-and-pop removal to maintain
      * cache locality and prevent fragmentation.
-     * 
+     *
      * Memory allocation strategy:
-     * - Small resources (≤64 bytes): Stored inline using Small Buffer Optimization
-     * - Large resources: Allocated directly from heap
+     * - Every resource's payload lives on the heap at a POINTER-STABLE address.
+     *   The dense vector stores only a heap pointer per slot, so the two ordinary
+     *   relocations of that vector — reallocation on growth, and swap-and-pop on
+     *   removal — move the *pointer*, never the payload bytes. A `T*` returned by
+     *   Get/Set/Emplace/GetByID therefore stays valid until that specific resource
+     *   is removed, immune to unrelated adds/removes. (Small inline storage was
+     *   removed precisely because it dangled every returned pointer on relocation.)
      */
     class ResourceStorage
     {
     public:
-        // Small Buffer Optimization threshold (cache line size)
+        // Retained for API compatibility. No longer selects a storage path — all
+        // resources are heap-allocated for pointer stability (see class docs).
         static constexpr size_t SBO_SIZE = CACHE_LINE_SIZE;
-        
+
         // Configuration for resource storage behavior
         struct Config
         {
@@ -47,7 +53,7 @@ namespace Astra
 
         // Constructor with just registry (backward compatibility)
         explicit ResourceStorage(std::weak_ptr<ComponentRegistry> registry) : ResourceStorage(registry, Config{}) {}
-        
+
         // Constructor with config
         ResourceStorage(std::weak_ptr<ComponentRegistry> registry, const Config& config) :
             m_componentRegistry(registry),
@@ -102,8 +108,8 @@ namespace Astra
             if (!slot.isValid) ASTRA_UNLIKELY
                 return nullptr;
 
-            // Return pointer to resource data
-            return reinterpret_cast<T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
+            // Return pointer-stable heap payload
+            return reinterpret_cast<T*>(slot.ptr);
         }
 
         template<typename T>
@@ -121,8 +127,8 @@ namespace Astra
             if (!slot.isValid) ASTRA_UNLIKELY
                 return nullptr;
 
-            // Return pointer to resource data
-            return reinterpret_cast<const T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
+            // Return pointer-stable heap payload
+            return reinterpret_cast<const T*>(slot.ptr);
         }
 
         template<typename T>
@@ -158,23 +164,12 @@ namespace Astra
                     return nullptr;
                 slot.descriptor = *desc;
 
-                // Decide between inline storage and heap allocation
-                if constexpr (sizeof(T) <= SBO_SIZE)
-                {
-                    // Use inline storage
-                    slot.isHeap = false;
-                    new (slot.storage.inlineData) T(std::forward<T>(resource));
-                }
-                else
-                {
-                    // Allocate from heap
-                    slot.isHeap = true;
-                    AllocResult result = AllocateMemory(sizeof(T), alignof(T));
-                    if (!result.ptr) ASTRA_UNLIKELY
-                        return nullptr;
-                    slot.storage.heapPtr = result.ptr;
-                    new (slot.storage.heapPtr) T(std::forward<T>(resource));
-                }
+                // Allocate pointer-stable heap storage and construct in place.
+                AllocResult result = AllocateMemory(sizeof(T), alignof(T));
+                if (!result.ptr) ASTRA_UNLIKELY
+                    return nullptr;
+                slot.ptr = result.ptr;
+                new (slot.ptr) T(std::forward<T>(resource));
 
                 // Only mark the slot valid once its storage is fully established —
                 // a failed heap allocation above must leave the slot invalid so
@@ -190,14 +185,14 @@ namespace Astra
                 ASTRA_ASSERT(slot.size == sizeof(T), "Resource size mismatch");
 
                 // Update existing resource
-                T* existing = reinterpret_cast<T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
+                T* existing = reinterpret_cast<T*>(slot.ptr);
                 *existing = std::forward<T>(resource);
                 return existing;
             }
 
             // Return pointer to newly created resource
             auto& slot = m_resources[index];
-            return reinterpret_cast<T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
+            return reinterpret_cast<T*>(slot.ptr);
         }
 
         template<typename T>
@@ -206,7 +201,7 @@ namespace Astra
             ComponentID id = TypeID<T>::Value();
             if (id >= MAX_COMPONENTS)
                 return false;
-            
+
             uint16_t index = m_sparse[id];
             return index != INVALID_INDEX && index < m_resources.size() && m_resources[index].isValid;
         }
@@ -244,23 +239,12 @@ namespace Astra
                     return nullptr;
                 slot.descriptor = *desc;
 
-                // Decide between inline storage and heap allocation
-                if constexpr (sizeof(T) <= SBO_SIZE)
-                {
-                    // Construct in-place with inline storage
-                    slot.isHeap = false;
-                    new (slot.storage.inlineData) T(std::forward<Args>(args)...);
-                }
-                else
-                {
-                    // Allocate from heap and construct in-place
-                    slot.isHeap = true;
-                    AllocResult result = AllocateMemory(sizeof(T), alignof(T));
-                    if (!result.ptr) ASTRA_UNLIKELY
-                        return nullptr;
-                    slot.storage.heapPtr = result.ptr;
-                    new (slot.storage.heapPtr) T(std::forward<Args>(args)...);
-                }
+                // Allocate pointer-stable heap storage and construct in place.
+                AllocResult result = AllocateMemory(sizeof(T), alignof(T));
+                if (!result.ptr) ASTRA_UNLIKELY
+                    return nullptr;
+                slot.ptr = result.ptr;
+                new (slot.ptr) T(std::forward<Args>(args)...);
 
                 // Only mark the slot valid once its storage is fully established —
                 // a failed heap allocation above must leave the slot invalid so
@@ -276,24 +260,17 @@ namespace Astra
                 ASTRA_ASSERT(slot.size == sizeof(T), "Resource size mismatch");
 
                 // Destroy existing resource (slot is valid, so its descriptor is set)
-                if (slot.isHeap)
-                {
-                    slot.descriptor.Destruct(slot.storage.heapPtr);
-                }
-                else
-                {
-                    slot.descriptor.Destruct(slot.storage.inlineData);
-                }
+                slot.descriptor.Destruct(slot.ptr);
 
-                // Construct new resource in-place
-                T* existing = reinterpret_cast<T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
+                // Construct new resource in-place (heap block is stable and correctly sized)
+                T* existing = reinterpret_cast<T*>(slot.ptr);
                 new (existing) T(std::forward<Args>(args)...);
                 return existing;
             }
 
             // Return pointer to newly created resource
             auto& slot = m_resources[index];
-            return reinterpret_cast<T*>(slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData);
+            return reinterpret_cast<T*>(slot.ptr);
         }
 
         template<typename T>
@@ -309,25 +286,19 @@ namespace Astra
 
             ASTRA_ASSERT(index < m_resources.size(), "Invalid resource index");
             auto& slot = m_resources[index];
-            
+
             if (!slot.isValid)
                 return;
 
-            // Destruct the resource (slot is valid, so its descriptor value is set)
-            if (slot.isHeap)
-            {
-                slot.descriptor.Destruct(slot.storage.heapPtr);
-                FreeMemory(slot.storage.heapPtr, slot.size);
-                slot.storage.heapPtr = nullptr;
-            }
-            else
-            {
-                slot.descriptor.Destruct(slot.storage.inlineData);
-            }
-            
+            // Destruct + free the resource (slot is valid, so its descriptor value is set)
+            slot.descriptor.Destruct(slot.ptr);
+            FreeMemory(slot.ptr, slot.size);
+            slot.ptr = nullptr;
             slot.isValid = false;
 
-            // Swap-and-pop to maintain density
+            // Swap-and-pop to maintain density. This moves the surviving slot's heap
+            // POINTER (not the payload bytes), so any T* previously returned for that
+            // resource stays valid.
             size_t lastIndex = m_resources.size() - 1;
             if (index != lastIndex)
             {
@@ -345,16 +316,9 @@ namespace Astra
             {
                 if (slot.isValid)
                 {
-                    if (slot.isHeap)
-                    {
-                        slot.descriptor.Destruct(slot.storage.heapPtr);
-                        FreeMemory(slot.storage.heapPtr, slot.size);
-                        slot.storage.heapPtr = nullptr;
-                    }
-                    else
-                    {
-                        slot.descriptor.Destruct(slot.storage.inlineData);
-                    }
+                    slot.descriptor.Destruct(slot.ptr);
+                    FreeMemory(slot.ptr, slot.size);
+                    slot.ptr = nullptr;
                     slot.isValid = false;
                 }
             }
@@ -377,10 +341,10 @@ namespace Astra
         {
             size_t totalSize = sizeof(ResourceStorage) + (m_resources.capacity() * sizeof(ResourceSlot));
 
-            // Add heap-allocated resource sizes
+            // Every resource payload is heap-allocated, so add each valid slot's size.
             for (const auto& slot : m_resources)
             {
-                if (slot.isValid && slot.isHeap)
+                if (slot.isValid)
                 {
                     totalSize += slot.size;
                 }
@@ -418,7 +382,7 @@ namespace Astra
             if (!slot.isValid)
                 return nullptr;
 
-            return slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData;
+            return slot.ptr;
         }
 
         /**
@@ -499,7 +463,7 @@ namespace Astra
             if (!slot.isValid)
                 return nullptr;
 
-            return slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData;
+            return slot.ptr;
         }
 
         /**
@@ -556,21 +520,14 @@ namespace Astra
                 slot.size = static_cast<uint16_t>(desc->size);
                 slot.descriptor = *desc;
 
-                // Decide between inline storage and heap allocation
-                if (desc->size <= SBO_SIZE)
-                {
-                    slot.isHeap = false;
-                    desc->ConstructWith(slot.storage.inlineData, data);
-                }
-                else
-                {
-                    slot.isHeap = true;
-                    AllocResult result = AllocateMemory(desc->size, desc->alignment);
-                    if (!result.ptr) ASTRA_UNLIKELY
-                        return false;
-                    slot.storage.heapPtr = result.ptr;
-                    desc->ConstructWith(slot.storage.heapPtr, data);
-                }
+                // Allocate pointer-stable heap storage and construct in place. An
+                // empty/tag resource (size 0) still gets a unique, non-null, stable
+                // one-byte address so GetByID stays non-null while it is present.
+                AllocResult result = AllocateMemory(desc->size == 0 ? 1 : desc->size, desc->alignment);
+                if (!result.ptr) ASTRA_UNLIKELY
+                    return false;
+                slot.ptr = result.ptr;
+                desc->ConstructWith(slot.ptr, data);
 
                 // Only mark the slot valid once its storage is fully established —
                 // a failed heap allocation above must leave the slot invalid so
@@ -585,7 +542,7 @@ namespace Astra
                     return false;
 
                 // Copy assign the new data
-                void* existing = slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData;
+                void* existing = slot.ptr;
                 if (desc->copyAssign)
                 {
                     desc->copyAssign(existing, data);
@@ -626,21 +583,15 @@ namespace Astra
             if (!slot.isValid)
                 return false;
 
-            // Destruct the resource (slot is valid, so its descriptor value is set)
-            if (slot.isHeap)
-            {
-                slot.descriptor.Destruct(slot.storage.heapPtr);
-                FreeMemory(slot.storage.heapPtr, slot.size);
-                slot.storage.heapPtr = nullptr;
-            }
-            else
-            {
-                slot.descriptor.Destruct(slot.storage.inlineData);
-            }
-
+            // Destruct + free the resource (slot is valid, so its descriptor value is set)
+            slot.descriptor.Destruct(slot.ptr);
+            FreeMemory(slot.ptr, slot.size);
+            slot.ptr = nullptr;
             slot.isValid = false;
 
-            // Swap-and-pop to maintain density
+            // Swap-and-pop to maintain density. This moves the surviving slot's heap
+            // POINTER (not the payload bytes), so any pointer previously returned for
+            // that resource stays valid.
             size_t lastIndex = m_resources.size() - 1;
             if (index != lastIndex)
             {
@@ -669,10 +620,7 @@ namespace Astra
             {
                 if (!slot.isValid) continue;
                 writer(slot.descriptor.hash);
-                void* data = slot.isHeap
-                    ? slot.storage.heapPtr
-                    : const_cast<void*>(static_cast<const void*>(slot.storage.inlineData));
-                slot.descriptor.serializeVersioned(writer, data);
+                slot.descriptor.serializeVersioned(writer, slot.ptr);
             }
         }
 
@@ -713,19 +661,13 @@ namespace Astra
                     slot.size = static_cast<uint16_t>(desc->size);
                     slot.descriptor = *desc;
 
-                    if (desc->size <= SBO_SIZE)
-                    {
-                        slot.isHeap = false;
-                        dst = slot.storage.inlineData;
-                    }
-                    else
-                    {
-                        slot.isHeap = true;
-                        AllocResult result = AllocateMemory(desc->size, desc->alignment);
-                        if (!result.ptr) return false;
-                        slot.storage.heapPtr = result.ptr;
-                        dst = result.ptr;
-                    }
+                    // Allocate pointer-stable heap storage. An empty/tag resource
+                    // (size 0) still gets a unique, non-null, stable one-byte address.
+                    AllocResult result = AllocateMemory(desc->size == 0 ? 1 : desc->size, desc->alignment);
+                    if (!result.ptr) return false;
+                    slot.ptr = result.ptr;
+                    dst = result.ptr;
+
                     // Only mark the slot valid once its storage is fully
                     // established — a failed heap allocation above must leave
                     // the slot invalid so teardown never frees a garbage pointer.
@@ -736,7 +678,7 @@ namespace Astra
                 else
                 {
                     auto& slot = m_resources[index];
-                    dst = slot.isHeap ? slot.storage.heapPtr : slot.storage.inlineData;
+                    dst = slot.ptr;
                 }
 
                 if (!desc->deserializeVersioned(reader, dst))
@@ -748,64 +690,49 @@ namespace Astra
     private:
         struct ResourceSlot
         {
-            union Storage
-            {
-                alignas(64) std::byte inlineData[SBO_SIZE];  // Small Buffer Optimization
-                void* heapPtr;                               // Pointer to heap allocation
-            };
-            
-            Storage storage;
+            // Pointer-stable heap allocation holding the resource payload. The
+            // dense vector may relocate this slot (growth) or swap-pop it into
+            // another index; only this pointer moves, never the payload bytes,
+            // so a T* handed back to a caller stays valid until the resource is
+            // removed.
+            void* ptr;
             ComponentDescriptor descriptor;  // Stored BY VALUE: teardown Destruct() must not
                                              // depend on the ComponentRegistry outliving this
                                              // slot, and a pointer-into-registry was a
                                              // dangling-pointer hazard across a rehash.
             ComponentID id;
             uint16_t size;      // Actual size of the resource
-            bool isHeap : 1;    // true if using heapPtr, false if using inlineData
-            bool isValid : 1;   // true if slot contains valid resource
+            bool isValid;       // true if slot contains valid resource
 
-            ResourceSlot() : descriptor{}, id(0), size(0), isHeap(false), isValid(false) {}
+            ResourceSlot() : ptr(nullptr), descriptor{}, id(0), size(0), isValid(false) {}
 
             ResourceSlot(ResourceSlot&& other) noexcept :
-                descriptor(other.descriptor), id(other.id), size(other.size),
-                isHeap(other.isHeap), isValid(other.isValid)
+                ptr(other.ptr), descriptor(other.descriptor), id(other.id),
+                size(other.size), isValid(other.isValid)
             {
-                if (isValid && !isHeap)
-                {
-                    descriptor.MoveConstruct(storage.inlineData, other.storage.inlineData);
-                    descriptor.Destruct(other.storage.inlineData);
-                }
-                else
-                {
-                    storage.heapPtr = other.storage.heapPtr;
-                }
+                // Steal the heap pointer; the payload object never moves in memory.
+                other.ptr = nullptr;
                 other.isValid = false;
-                other.storage.heapPtr = nullptr;
             }
 
             ResourceSlot& operator=(ResourceSlot&& other) noexcept
             {
                 if (this != &other)
                 {
+                    // Release any resource we already own before taking the source's.
                     if (isValid)
                     {
-                        void* mine = isHeap ? storage.heapPtr : static_cast<void*>(storage.inlineData);
-                        descriptor.Destruct(mine);
-                        if (isHeap) FreeMemory(storage.heapPtr, size);
+                        descriptor.Destruct(ptr);
+                        FreeMemory(ptr, size);
                     }
-                    descriptor = other.descriptor; id = other.id; size = other.size;
-                    isHeap = other.isHeap; isValid = other.isValid;
-                    if (isValid && !isHeap)
-                    {
-                        descriptor.MoveConstruct(storage.inlineData, other.storage.inlineData);
-                        descriptor.Destruct(other.storage.inlineData);
-                    }
-                    else
-                    {
-                        storage.heapPtr = other.storage.heapPtr;
-                    }
+                    ptr = other.ptr;
+                    descriptor = other.descriptor;
+                    id = other.id;
+                    size = other.size;
+                    isValid = other.isValid;
+                    // Steal the heap pointer; the payload object never moves in memory.
+                    other.ptr = nullptr;
                     other.isValid = false;
-                    other.storage.heapPtr = nullptr;
                 }
                 return *this;
             }

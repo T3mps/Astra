@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -191,17 +192,47 @@ namespace Astra
         {
             static_assert(std::is_same_v<BaseType<First>, Entity>, "First parameter must be Entity");
 
-            // Create view preserving const-ness of components
-            // Convert const T& to const T, and T& to T
-            auto view = registry.CreateView<
-                std::conditional_t<IsReadOnly<Components>,
-                    const BaseType<Components>,
-                        BaseType<Components>
-                >...
-            >();
-            view.ForEach(m_lambda);
+            // IM-23: build the View once (const-ness of components preserved:
+            // const T& -> const T, T& -> T) and PERSIST it across Execute()
+            // calls. The View's ctor collects matching archetypes from
+            // generation 0 (full scan + match-test + sort); creating a fresh
+            // View every frame -- as this did before -- threw that away each
+            // call. Kept, its EnsureArchetypes()/m_lastGeneration incremental
+            // refresh only appends newly-created matching archetypes (or fully
+            // rebuilds after archetype removals), matching a fresh collect. The
+            // iterated entity set is therefore identical to the old per-frame
+            // View; only the per-frame rebuild cost is removed.
+            //
+            // Rebuild if the Registry differs from the one the View was built
+            // against (the scheduler supports switching registries between
+            // Execute() calls -- see SystemScheduler::Execute's command-buffer
+            // rebind; this mirrors that pointer-identity check).
+            if (!m_view || m_viewRegistry != &registry)
+            {
+                m_view.emplace(registry.CreateView<
+                    std::conditional_t<IsReadOnly<Components>,
+                        const BaseType<Components>,
+                            BaseType<Components>
+                    >...
+                >());
+                m_viewRegistry = &registry;
+            }
+            m_view->ForEach(m_lambda);
         }
 
+        // IM-23: the View type this system iterates -- identical to what the
+        // CreateView<...> call above returns -- computed once from the lambda's
+        // component parameters so it can be held as a persistent member.
+        template<typename Tuple, size_t... Is>
+        static auto ComputeViewType(std::index_sequence<Is...>)
+            -> View<std::conditional_t<IsReadOnly<std::tuple_element_t<Is, Tuple>>,
+                        const BaseType<std::tuple_element_t<Is, Tuple>>,
+                        BaseType<std::tuple_element_t<Is, Tuple>>>...>;
+        using ViewType = decltype(ComputeViewType<ComponentArgs>(
+            std::make_index_sequence<std::tuple_size_v<ComponentArgs>>{}));
+
         Lambda m_lambda;
+        std::optional<ViewType> m_view;      // persistent View; built lazily on first Execute
+        Registry* m_viewRegistry = nullptr;  // registry m_view was built against; rebuild if it changes
     };
 }

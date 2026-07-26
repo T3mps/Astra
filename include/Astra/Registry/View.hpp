@@ -374,6 +374,22 @@ namespace Astra
          */
         ASTRA_FORCEINLINE Iterator begin()
         {
+            // Range-based for cannot honor the enableable disabled-bit filter:
+            // ViewIterator has no access to the per-chunk disabled words, so
+            // `for (auto x : view)` would visit disabled entities that
+            // ForEach()/Size() skip -- the two surfaces would silently disagree
+            // (IM-7). Refuse at compile time when a REQUIRED enableable filter is
+            // active; the body of this non-template member is only instantiated
+            // when begin() is actually used, so ForEach()/Size()-only usage of
+            // such a View still compiles. Optional-only enableable filters are
+            // NOT gated: range-for never yields optional components and the
+            // visited entity set is identical to ForEach()'s, so they do not
+            // diverge.
+            static_assert(!HasRequiredFilter,
+                "Range-based for over a View with a required enableable-component filter is not "
+                "supported: it would bypass disabled-bit filtering and disagree with ForEach()/Size(). "
+                "Use ForEach() or ParallelForEach() instead.");
+
             if (!m_archetypeManager) ASTRA_UNLIKELY
                 return Iterator(nullptr, 0);
 
@@ -386,6 +402,13 @@ namespace Astra
          */
         ASTRA_FORCEINLINE ViewSentinel end() const noexcept
         {
+            // See begin(): range-for is compile-time refused on required
+            // enableable-filtered views so it cannot silently diverge from
+            // ForEach()/Size() (IM-7).
+            static_assert(!HasRequiredFilter,
+                "Range-based for over a View with a required enableable-component filter is not "
+                "supported: it would bypass disabled-bit filtering and disagree with ForEach()/Size(). "
+                "Use ForEach() or ParallelForEach() instead.");
             return ViewSentinel{};
         }
 
@@ -588,12 +611,33 @@ namespace Astra
             InvokeEntityCallback(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{});
         }
 
+        // Empty (tag) required components have no storage, so
+        // chunk->GetComponentArray<T>() returns nullptr for them. Indexing that
+        // raw pointer (`ptr[i]`) would bind a reference to a null-derived address
+        // (UB; UBSan traps). Mirror the plain path's Archetype::GetComponentValue
+        // and hand out a shared static instance instead. For non-empty components
+        // this force-inlines to the identical `array[index]`, so the hot path is
+        // unchanged.
+        template<typename T>
+        ASTRA_FORCEINLINE static auto& RequiredElement(T* array, size_t index) noexcept
+        {
+            if constexpr (std::is_empty_v<T>)
+            {
+                static T s_emptyInstance{};
+                return s_emptyInstance;
+            }
+            else
+            {
+                return array[index];
+            }
+        }
+
         template<typename EntitiesVec, typename ReqTuple, typename OptTuple, typename Func, size_t... ReqIs, size_t... OptIs>
         ASTRA_FORCEINLINE void InvokeEntityCallback(const EntitiesVec& entities, const ReqTuple& reqPtrs, const OptTuple& optPtrs, size_t count, Func&& func, std::index_sequence<ReqIs...>, std::index_sequence<OptIs...>)
         {
             for (size_t i = 0; i < count; ++i)
             {
-                func(entities[i], std::get<ReqIs>(reqPtrs)[i]..., (std::get<OptIs>(optPtrs) ? &std::get<OptIs>(optPtrs)[i] : nullptr)...);
+                func(entities[i], RequiredElement(std::get<ReqIs>(reqPtrs), i)..., (std::get<OptIs>(optPtrs) ? &std::get<OptIs>(optPtrs)[i] : nullptr)...);
             }
         }
 
@@ -663,7 +707,7 @@ namespace Astra
         {
             for (size_t i = begin; i < end; ++i)
             {
-                func(entities[i], std::get<ReqIs>(reqPtrs)[i]..., FilteredOptionalArg<OptIs>(optPtrs, i, chunk, cm)...);
+                func(entities[i], RequiredElement(std::get<ReqIs>(reqPtrs), i)..., FilteredOptionalArg<OptIs>(optPtrs, i, chunk, cm)...);
             }
         }
 

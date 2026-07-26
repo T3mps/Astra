@@ -48,6 +48,8 @@ namespace Astra
         bool isDefaultConstructible;    // Can default construct?
         bool isCopyConstructible;       // Can copy construct?
         bool isMoveConstructible;       // Can move construct?
+        bool isCopyAssignable;          // Can copy assign?
+        bool isMoveAssignable;          // Can move assign?
 
         // ====================================================================
         // Lifecycle functions
@@ -357,7 +359,7 @@ namespace Astra
          */
         bool CopyAssign(void* dst, const void* src) const
         {
-            if (copyAssign && isCopyConstructible)
+            if (copyAssign && isCopyAssignable)
             {
                 copyAssign(dst, src);
                 return true;
@@ -373,7 +375,7 @@ namespace Astra
          */
         bool MoveAssign(void* dst, void* src) const
         {
-            if (moveAssign && isMoveConstructible)
+            if (moveAssign && isMoveAssignable)
             {
                 moveAssign(dst, src);
                 return true;
@@ -468,6 +470,8 @@ namespace Astra
                 m_meta.isDefaultConstructible = std::is_default_constructible_v<T>;
                 m_meta.isCopyConstructible = std::is_copy_constructible_v<T>;
                 m_meta.isMoveConstructible = std::is_move_constructible_v<T>;
+                m_meta.isCopyAssignable = std::is_copy_assignable_v<T>;
+                m_meta.isMoveAssignable = std::is_move_assignable_v<T>;
 
                 // Lifecycle functions
                 if constexpr (std::is_default_constructible_v<T>)
@@ -482,7 +486,14 @@ namespace Astra
                     m_meta.copyConstruct = [](void* dst, const void* src) {
                         new (dst) T(*static_cast<const T*>(src));
                     };
+                }
 
+                // Gated on is_copy_assignable, NOT is_copy_constructible: a type with a
+                // const/reference member can be copy-constructible while its implicit
+                // copy-assignment operator is deleted, which would make this lambda
+                // body ill-formed if it were instantiated under the constructible gate.
+                if constexpr (std::is_copy_assignable_v<T>)
+                {
                     m_meta.copyAssign = [](void* dst, const void* src) {
                         *static_cast<T*>(dst) = *static_cast<const T*>(src);
                     };
@@ -493,7 +504,12 @@ namespace Astra
                     m_meta.moveConstruct = [](void* dst, void* src) {
                         new (dst) T(std::move(*static_cast<T*>(src)));
                     };
+                }
 
+                // Gated on is_move_assignable, NOT is_move_constructible -- same
+                // rationale as copyAssign above.
+                if constexpr (std::is_move_assignable_v<T>)
+                {
                     m_meta.moveAssign = [](void* dst, void* src) {
                         *static_cast<T*>(dst) = std::move(*static_cast<T*>(src));
                     };

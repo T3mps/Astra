@@ -329,11 +329,10 @@ namespace Astra
                 Entity placeholder = MakePlaceholder();
 
                 size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntityPayload);
-                size_t alignedSize = 0;
-                std::byte* ptr = m_buffer.Allocate(totalSize, &alignedSize);
-                StampCommand(ptr);
+                std::byte* ptr = AllocateCommand(CommandType::CreateEntity, totalSize);
+                if (!ptr)
+                    return placeholder;  // command not recorded; Execute() reports AllocationFailed
 
-                new (ptr) CommandHeader{CommandType::CreateEntity, 0, static_cast<uint32_t>(alignedSize)};
                 new (ptr + sizeof(CommandHeader)) CreateEntityPayload{placeholder};
 
                 m_commandCount++;
@@ -349,14 +348,11 @@ namespace Astra
 
             // Write command to buffer
             size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntityPayload);
-            size_t alignedSize = 0;
-            std::byte* ptr = m_buffer.Allocate(totalSize, &alignedSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::CreateEntity, totalSize);
+            if (!ptr)
+                return entity;  // entity is tracked in m_allocatedEntities -> rolled back at Execute()
 
-            auto* header = new (ptr) CommandHeader{CommandType::CreateEntity, 0, static_cast<uint32_t>(alignedSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntityPayload{entity};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) CreateEntityPayload{entity};
 
             m_commandCount++;
             return entity;
@@ -368,14 +364,11 @@ namespace Astra
         void DestroyEntity(Entity entity)
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(DestroyEntityPayload);
-            size_t alignedSize = 0;
-            std::byte* ptr = m_buffer.Allocate(totalSize, &alignedSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::DestroyEntity, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::DestroyEntity, 0, static_cast<uint32_t>(alignedSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) DestroyEntityPayload{entity};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) DestroyEntityPayload{entity};
 
             m_commandCount++;
         }
@@ -400,10 +393,10 @@ namespace Astra
                     outEntities[i] = MakePlaceholder();
 
                 size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntitiesPayload) + count * sizeof(Entity);
-                std::byte* ptr = m_buffer.Allocate(totalSize);
-                StampCommand(ptr);
+                std::byte* ptr = AllocateCommand(CommandType::CreateEntities, totalSize);
+                if (!ptr)
+                    return;  // command not recorded; Execute() reports AllocationFailed
 
-                new (ptr) CommandHeader{CommandType::CreateEntities, 0, static_cast<uint32_t>(totalSize)};
                 auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntitiesPayload{static_cast<uint32_t>(count)};
 
                 Entity* entityDst = reinterpret_cast<Entity*>(payload + 1);
@@ -430,12 +423,11 @@ namespace Astra
 
             // Calculate total size
             size_t totalSize = sizeof(CommandHeader) + sizeof(CreateEntitiesPayload) + created * sizeof(Entity);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::CreateEntities, totalSize);
+            if (!ptr)
+                return;  // created entities are tracked in m_allocatedEntities -> rolled back at Execute()
 
-            auto* header = new (ptr) CommandHeader{CommandType::CreateEntities, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) CreateEntitiesPayload{static_cast<uint32_t>(created)};
-            (void)header;
 
             // Copy entities after payload
             Entity* entityDst = reinterpret_cast<Entity*>(payload + 1);
@@ -459,12 +451,11 @@ namespace Astra
 
             size_t count = entities.size();
             size_t totalSize = sizeof(CommandHeader) + sizeof(DestroyEntitiesPayload) + count * sizeof(Entity);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::DestroyEntities, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::DestroyEntities, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) DestroyEntitiesPayload{static_cast<uint32_t>(count)};
-            (void)header;
 
             // Copy entities after payload
             Entity* entityDst = reinterpret_cast<Entity*>(payload + 1);
@@ -509,12 +500,9 @@ namespace Astra
             size_t dataOffset = AlignUp(headerSize + payloadSize, dataAlignment);
             size_t totalSize = dataOffset + dataSize;
 
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
-
-            // Write header
-            auto* header = new (ptr) CommandHeader{CommandType::AddComponent, 0, static_cast<uint32_t>(totalSize)};
-            (void)header;
+            std::byte* ptr = AllocateCommand(CommandType::AddComponent, totalSize);
+            if (!ptr)
+                return;
 
             // Write payload
             auto* payload = new (ptr + headerSize) AddComponentPayload{
@@ -550,13 +538,11 @@ namespace Astra
         void RemoveComponent(Entity entity)
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveComponentPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::RemoveComponent, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::RemoveComponent, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveComponentPayload{entity, TypeID<T>::Value()};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) RemoveComponentPayload{entity, TypeID<T>::Value()};
 
             m_commandCount++;
         }
@@ -574,13 +560,11 @@ namespace Astra
                 "SetEnabled<T> requires an enableable component (opt in with `static constexpr bool AstraEnableable = true;`)");
 
             size_t totalSize = sizeof(CommandHeader) + sizeof(SetEnabledPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::SetEnabled, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::SetEnabled, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) SetEnabledPayload{entity, TypeID<DecayedT>::Value(), static_cast<uint8_t>(enable ? 1 : 0)};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) SetEnabledPayload{entity, TypeID<DecayedT>::Value(), static_cast<uint8_t>(enable ? 1 : 0)};
 
             m_commandCount++;
         }
@@ -620,12 +604,9 @@ namespace Astra
             size_t dataOffset = AlignUp(headerSize + payloadSize + entitiesSize, dataAlignment);
             size_t totalSize = dataOffset + dataSize;
 
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
-
-            // Write header
-            auto* header = new (ptr) CommandHeader{CommandType::AddComponentBatch, 0, static_cast<uint32_t>(totalSize)};
-            (void)header;
+            std::byte* ptr = AllocateCommand(CommandType::AddComponentBatch, totalSize);
+            if (!ptr)
+                return;
 
             // Write payload
             auto* payload = new (ptr + headerSize) AddComponentBatchPayload{
@@ -672,16 +653,15 @@ namespace Astra
 
             size_t entityCount = entities.size();
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveComponentBatchPayload) + entityCount * sizeof(Entity);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::RemoveComponentBatch, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::RemoveComponentBatch, 0, static_cast<uint32_t>(totalSize)};
             auto* payload = new (ptr + sizeof(CommandHeader)) RemoveComponentBatchPayload{
                 TypeID<T>::Value(),
                 0,  // padding
                 static_cast<uint32_t>(entityCount)
             };
-            (void)header;
 
             // Copy entities
             Entity* entityDst = payload->GetEntitiesPtr();
@@ -698,13 +678,11 @@ namespace Astra
         void SetParent(Entity child, Entity parent)
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(SetParentPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::SetParent, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::SetParent, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) SetParentPayload{child, parent};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) SetParentPayload{child, parent};
 
             m_commandCount++;
         }
@@ -723,13 +701,11 @@ namespace Astra
         void RemoveParent(Entity child)
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveParentPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::RemoveParent, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::RemoveParent, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveParentPayload{child};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) RemoveParentPayload{child};
 
             m_commandCount++;
         }
@@ -740,13 +716,11 @@ namespace Astra
         void RemoveChild(Entity parent, Entity child)
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveChildPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::RemoveChild, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::RemoveChild, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveChildPayload{parent, child};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) RemoveChildPayload{parent, child};
 
             m_commandCount++;
         }
@@ -757,13 +731,11 @@ namespace Astra
         void RemoveAllChildren(Entity parent)
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveAllChildrenPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::RemoveAllChildren, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::RemoveAllChildren, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveAllChildrenPayload{parent};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) RemoveAllChildrenPayload{parent};
 
             m_commandCount++;
         }
@@ -774,13 +746,11 @@ namespace Astra
         void AddLink(Entity a, Entity b)
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(AddLinkPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::AddLink, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::AddLink, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) AddLinkPayload{a, b};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) AddLinkPayload{a, b};
 
             m_commandCount++;
         }
@@ -791,13 +761,11 @@ namespace Astra
         void RemoveLink(Entity a, Entity b)
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveLinkPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::RemoveLink, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::RemoveLink, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveLinkPayload{a, b};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) RemoveLinkPayload{a, b};
 
             m_commandCount++;
         }
@@ -829,12 +797,9 @@ namespace Astra
             size_t dataOffset = AlignUp(headerSize + payloadSize, dataAlignment);
             size_t totalSize = dataOffset + dataSize;
 
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
-
-            // Write header
-            auto* header = new (ptr) CommandHeader{CommandType::SetResource, 0, static_cast<uint32_t>(totalSize)};
-            (void)header;
+            std::byte* ptr = AllocateCommand(CommandType::SetResource, totalSize);
+            if (!ptr)
+                return;
 
             // Write payload
             auto* payload = new (ptr + headerSize) SetResourcePayload{
@@ -869,13 +834,11 @@ namespace Astra
         void RemoveResource()
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(RemoveResourcePayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::RemoveResource, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::RemoveResource, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) RemoveResourcePayload{TypeID<T>::Value()};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) RemoveResourcePayload{TypeID<T>::Value()};
 
             m_commandCount++;
         }
@@ -886,13 +849,11 @@ namespace Astra
         void ClearResources()
         {
             size_t totalSize = sizeof(CommandHeader) + sizeof(ClearResourcesPayload);
-            std::byte* ptr = m_buffer.Allocate(totalSize);
-            StampCommand(ptr);
+            std::byte* ptr = AllocateCommand(CommandType::ClearResources, totalSize);
+            if (!ptr)
+                return;
 
-            auto* header = new (ptr) CommandHeader{CommandType::ClearResources, 0, static_cast<uint32_t>(totalSize)};
-            auto* payload = new (ptr + sizeof(CommandHeader)) ClearResourcesPayload{};
-            (void)header;
-            (void)payload;
+            new (ptr + sizeof(CommandHeader)) ClearResourcesPayload{};
 
             m_commandCount++;
         }
@@ -921,6 +882,26 @@ namespace Astra
             }
 
             m_lastExecutedCount = 0;
+
+            // CR-2: if any record method hit arena exhaustion, this buffer is
+            // INCOMPLETE (>=1 command silently dropped). Applying its partial
+            // contents would silently execute a truncated operation set, so
+            // refuse the whole flush, clean up as the partial-failure path
+            // does, and surface AllocationFailed. Checked before the walk so a
+            // partially-recorded buffer is never applied.
+            if (m_recordFailed) ASTRA_UNLIKELY
+            {
+                RollbackAllocatedEntities();
+                CleanupPendingCommands();
+                m_buffer.Clear();
+                m_commandCount = 0;
+                m_commandKeys.clear();
+                m_hasCustomSortKey = false;
+                m_autoSeq = 0;
+                m_nextPlaceholder = 0;
+                m_recordFailed = false;
+                return Result<void, ExecutionError>::Err(ExecutionError::AllocationFailed);
+            }
 
             // Deferred-mode buffers (ParallelCommandBuffer's per-worker buffers)
             // carry placeholder entities from CreateEntity/CreateEntities; a
@@ -1070,6 +1051,7 @@ namespace Astra
             m_autoSeq = 0;
             m_nextPlaceholder = 0;
             m_reportedErrors.clear();
+            m_recordFailed = false;
         }
 
         /**
@@ -1111,6 +1093,17 @@ namespace Astra
         [[nodiscard]] size_t GetStorageBlockCount() const noexcept { return m_buffer.BlockCount(); }
 
         /**
+         * True iff a record method hit arena exhaustion since the last
+         * Clear()/successful Execute() and could NOT write its command (CR-2).
+         * A buffer in this state is missing >=1 command: Execute() refuses it
+         * with AllocationFailed, and ParallelCommandBuffer::ExecuteSorted()
+         * skips applying it wholesale (see those functions). Exposed so the
+         * sorted flush -- which only touches CommandBuffer through its public
+         * API -- can detect a partially-recorded worker buffer.
+         */
+        [[nodiscard]] bool HasRecordFailure() const noexcept { return m_recordFailed; }
+
+        /**
          * Rollback all entities that were allocated but not yet added to archetypes.
          *
          * m_allocatedEntities is populated in the same order CreateEntity/CreateEntities
@@ -1146,6 +1139,49 @@ namespace Astra
             SortKey key = m_hasCustomSortKey ? m_currentSortKey : SortKey{0, 0, m_autoSeq};
             ++m_autoSeq;
             m_commandKeys.emplace_back(key, commandPtr);
+        }
+
+        /**
+         * The SINGLE funnel every record method uses to reach the byte buffer
+         * (CR-2 fix). Allocates STABLE space for one command, records its
+         * {SortKey, pointer} descriptor (StampCommand), and constructs the
+         * command's CommandHeader in place -- returning a pointer to that
+         * header.
+         *
+         * On arena exhaustion (CommandByteBuffer::Allocate returns null -- a
+         * batch that exceeds the TLSF request ceiling, or genuine OOM) it sets
+         * the sticky m_recordFailed flag and returns nullptr WITHOUT stamping a
+         * sort key or constructing anything, so no record site ever
+         * placement-news or memcpys into the null page. Every caller MUST check
+         * the result and return immediately on nullptr, before touching the
+         * (non-existent) payload region. Execute()/ExecuteSorted() then refuse
+         * to apply the partially-recorded buffer and surface AllocationFailed.
+         *
+         * The header's totalSize is stamped with the 16-aligned stride the
+         * command actually occupies. That is AlignUp-equivalent to `size`, and
+         * the only readers -- the Execute()/CleanupPendingCommands() block
+         * walks -- AlignUp it again, so this matches every prior per-site value
+         * exactly (some sites stamped `totalSize`, the create/destroy-single
+         * sites stamped `alignedSize`; both collapse to the same aligned
+         * stride).
+         *
+         * @param type The command-type tag for the header.
+         * @param size Total command size (header + payload [+ inline data]).
+         * @return Pointer to the constructed CommandHeader, or nullptr on
+         *         allocation failure (m_recordFailed set).
+         */
+        [[nodiscard]] std::byte* AllocateCommand(CommandType type, size_t size)
+        {
+            size_t alignedSize = 0;
+            std::byte* ptr = m_buffer.Allocate(size, &alignedSize);
+            if (!ptr) ASTRA_UNLIKELY
+            {
+                m_recordFailed = true;
+                return nullptr;
+            }
+            StampCommand(ptr);
+            new (ptr) CommandHeader{type, 0, static_cast<uint32_t>(alignedSize)};
+            return ptr;
         }
 
         // ============= Placeholder Entities (deferred creation, Task 5) =======
@@ -1694,6 +1730,15 @@ namespace Astra
         size_t m_commandCount = 0;
         size_t m_lastExecutedCount = 0;  // For debugging partial execution failures
 
+        // CR-2: sticky flag set by AllocateCommand() when the byte buffer's
+        // arena is exhausted and a command could NOT be recorded (single
+        // command over the ~32MB TLSF request ceiling, or genuine OOM). A set
+        // flag means the buffer is INCOMPLETE -- >=1 command silently dropped.
+        // Execute() refuses such a buffer with AllocationFailed and never
+        // applies its partial contents; ExecuteSorted() skips the whole
+        // buffer. Reset by Clear() (and the Execute() abort path).
+        bool m_recordFailed = false;
+
         // Per-entity failure count from the most recently dispatched BATCH
         // command executor (0 for non-batch commands -- reset by
         // ExecuteCommand before every dispatch). Lets ExecuteSorted() report
@@ -1807,6 +1852,12 @@ namespace Astra
          * SortKey::insertionOrder (== the recording system's insertionOrder)
          * and surfaced to the caller via GetDeferredErrors().
          *
+         * ALLOCATION FAILURE (CR-2): distinct from the above logical skips, a
+         * worker buffer that could not RECORD a command (arena exhausted) is
+         * truncated. Its whole command stream is skipped and the flush returns
+         * Err(AllocationFailed) -- see the gather loop below. Every buffer is
+         * still cleared regardless.
+         *
          * DETERMINISM PRECONDITION: the sort below is a std::stable_sort, so
          * commands with EQUAL keys fall back to their gather order, which is
          * arrival order within a buffer and worker-registration (buffer
@@ -1835,11 +1886,25 @@ namespace Astra
                 std::byte* cmd;   // stable command pointer (C1 fix)
             };
 
+            // CR-2: a worker buffer that hit arena exhaustion during recording
+            // has an INCOMPLETE command stream (>=1 command silently dropped).
+            // Unlike a logical apply failure (skip one command, continue), a
+            // truncated buffer must not be applied at all -- its remaining
+            // commands could reference entities its dropped commands were
+            // meant to create, producing inconsistent state. Skip such a
+            // buffer WHOLESALE (it is still Clear()ed below) and surface the
+            // condition as AllocationFailed after the flush completes.
+            bool anyRecordFailure = false;
             std::vector<Item> items;
             for (auto& b : m_buffers)
             {
                 if (b)
                 {
+                    if (b->HasRecordFailure()) ASTRA_UNLIKELY
+                    {
+                        anyRecordFailure = true;
+                        continue;
+                    }
                     for (const auto& [key, cmd] : b->CommandKeys())
                     {
                         items.push_back({key, b.get(), cmd});
@@ -1916,10 +1981,19 @@ namespace Astra
                 }
             }
 
+            // CR-2: if any worker buffer was truncated by arena exhaustion, the
+            // whole flush is reported as AllocationFailed. This is surfaced
+            // AFTER draining reported errors and clearing every buffer, so the
+            // contract that ExecuteSorted() always leaves buffers empty holds
+            // on this path too. Logical per-command skips (Task 4) remain a
+            // success surfaced via GetDeferredErrors(); a record-time
+            // allocation failure is a distinct, harder failure.
+            if (anyRecordFailure)
+                return Result<void, CommandBuffer::ExecutionError>::Err(CommandBuffer::ExecutionError::AllocationFailed);
+
             // Task 4: a flush that skipped some commands is still an overall
             // success -- the skips are surfaced as errors via
-            // GetDeferredErrors(), not as a Result failure. There is no
-            // remaining path that returns Err() from this function.
+            // GetDeferredErrors(), not as a Result failure.
             return Result<void, CommandBuffer::ExecutionError>::Ok();
         }
 

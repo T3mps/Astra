@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -146,22 +147,26 @@ namespace Astra::Compression
      * This handles the full LZ4 frame with header and blocks
      * @param compressedData Pointer to compressed data
      * @param compressedSize Size of compressed data
+     * @param expectedSize Known decompressed size; caps output growth to defeat
+     *        decompression-bomb amplification. Pass SIZE_MAX when unknown.
      * @return Decompressed data or error
      */
     inline Result<std::vector<uint8_t>, SerializationError> DecompressLZ4(
-        const void* compressedData, 
-        size_t compressedSize)
+        const void* compressedData,
+        size_t compressedSize,
+        size_t expectedSize = SIZE_MAX)
     {
         if (compressedData == nullptr || compressedSize == 0)
         {
             return Result<std::vector<uint8_t>, SerializationError>::Err(
                 SerializationError::CorruptedData);
         }
-        
+
         // Use our custom decoder for decompression
         return Detail::LZ4Decoder::DecompressFrame(
             static_cast<const uint8_t*>(compressedData),
-            compressedSize
+            compressedSize,
+            expectedSize
         );
     }
     
@@ -228,9 +233,11 @@ namespace Astra::Compression
                 SerializationError::CorruptedData);
         }
         
-        // Decompress
+        // Decompress. The header records the exact original size, so thread it
+        // through as the output cap -- a corrupt/crafted block cannot expand
+        // past what it claimed to decompress to (~255x amplification defense).
         const uint8_t* compressedData = static_cast<const uint8_t*>(blockData) + sizeof(BlockHeader);
-        return DecompressLZ4(compressedData, header->compressedSize);
+        return DecompressLZ4(compressedData, header->compressedSize, header->uncompressedSize);
     }
     
     /**

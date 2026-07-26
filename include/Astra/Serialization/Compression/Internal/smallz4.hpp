@@ -25,6 +25,7 @@
 
 #include <inttypes.h> // uint16_t, uint32_t, ...
 #include <cstdlib>    // size_t
+#include <cstring>    // memcpy
 #include <vector>
 
 /// LZ4 compression with optimal parsing
@@ -154,10 +155,21 @@ private:
   }
 
 
+  /// read four bytes as a uint32_t without assuming alignment
+  /** the match finder reads 32-bit words at arbitrary byte offsets into a
+      std::vector<unsigned char>; a raw pointer cast is misaligned (UBSan
+      -fsanitize=alignment) and violates strict aliasing, so go through memcpy **/
+  inline static uint32_t read32(const void* ptr)
+  {
+    uint32_t value;
+    std::memcpy(&value, ptr, sizeof(value));
+    return value;
+  }
+
   /// return true, if the four bytes at *a and *b match
   inline static bool match4(const void* const a, const void* const b)
   {
-    return *(const uint32_t*) a == *(const uint32_t*) b;
+    return read32(a) == read32(b);
   }
 
   /// simple hash function, input: 32 bits, output: HashBits bits (by default: 20)
@@ -643,7 +655,7 @@ private:
         }
 
         // read next four bytes
-        const uint32_t four = *(uint32_t*)(dataBlock + i);
+        const uint32_t four = read32(dataBlock + i);
         // convert to a shorter hash
         const uint32_t hash = getHash32(four);
 
@@ -681,7 +693,7 @@ private:
         while (true)
         {
           // read four bytes
-          currentFour = *(uint32_t*)(&data[lastHashMatch - dataZero]); // match may be found in the previous block, too
+          currentFour = read32(&data[lastHashMatch - dataZero]); // match may be found in the previous block, too
           // match chain found, first 4 bytes are identical
           if (currentFour == four)
             break;

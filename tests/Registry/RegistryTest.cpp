@@ -496,8 +496,8 @@ TEST_F(RegistryTest, InvalidEntityOperations)
     EXPECT_FALSE(registry->IsValid(invalidEntity));
     EXPECT_EQ(registry->GetComponent<Position>(invalidEntity), nullptr);
     
-    // AddComponent now returns void, verify it doesn't add to invalid entity
-    registry->EmplaceComponent<Position>(invalidEntity);
+    // EmplaceComponent returns false (graceful) for a stale/invalid handle and adds nothing.
+    EXPECT_FALSE(registry->EmplaceComponent<Position>(invalidEntity));
     EXPECT_EQ(registry->GetComponent<Position>(invalidEntity), nullptr);
     
     EXPECT_FALSE(registry->RemoveComponent<Position>(invalidEntity));

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -267,7 +268,16 @@ namespace Astra
                     validEntities.push_back(entity);
                 }
             }
-            
+
+            // IM-1: a duplicated live entity in the span would be removed twice by the
+            // archetype swap-with-last path. The first removal swaps the former tail into
+            // the freed slot; the second removal of the same (still < count) slot index
+            // evicts that swapped-in bystander -- an entity never in the destroy list --
+            // and double-frees the intended one. De-duplicate before dispatching to the
+            // archetype/graph/entity layers (also collapses duplicate signals below).
+            std::sort(validEntities.begin(), validEntities.end());
+            validEntities.erase(std::unique(validEntities.begin(), validEntities.end()), validEntities.end());
+
             if (validEntities.empty())
                 return;
 
@@ -297,28 +307,43 @@ namespace Astra
             return m_entityManager.IsValid(entity);
         }
 
+        // IM-24: a stale/destroyed handle makes ArchetypeManager return nullptr, which a
+        // void return would swallow silently -- an undetectable write to a dead handle
+        // (data loss). Report it via a bool (matching RemoveComponent/SetEnabled) rather
+        // than a silent no-op OR a Debug abort: the project's misuse policy is a graceful,
+        // testable result, never assert-and-abort. Returns true when the component is
+        // present on the live entity afterward (added, or already present, or a tag);
+        // false only for a stale/invalid handle. The bool return is not [[nodiscard]], so
+        // existing statement-style callers are unaffected.
         template<Component T>
-        void AddComponent(Entity entity, const T& component)
+        bool AddComponent(Entity entity, const T& component)
         {
-            // ArchetypeManager validates the handle (version + archetype); an invalid
-            // entity yields nullptr, so no pre-check is needed here.
+            if (!m_entityManager.IsValid(entity))
+                return false;
+
             T* newComponent = m_archetypeManager->AddComponent<T>(entity, component);
 
             if (newComponent)
             {
                 m_signalManager.Emit<Events::ComponentAdded>(entity, TypeID<T>::Value(), newComponent);
             }
+            return true;
         }
 
         template<Component T, typename... Args>
-        void EmplaceComponent(Entity entity, Args&&... args)
+        bool EmplaceComponent(Entity entity, Args&&... args)
         {
+            // See AddComponent (IM-24): stale/invalid handle -> graceful false, no abort.
+            if (!m_entityManager.IsValid(entity))
+                return false;
+
             T* component = m_archetypeManager->AddComponent<T>(entity, std::forward<Args>(args)...);
 
             if (component)
             {
                 m_signalManager.Emit<Events::ComponentAdded>(entity, TypeID<T>::Value(), component);
             }
+            return true;
         }
 
         template<Component T>
@@ -359,6 +384,11 @@ namespace Astra
                     validEntities.push_back(entity);
                 }
             }
+            // IM-1: de-duplicate before the archetype layer -- a repeated entity would be
+            // migrated twice (second move operates on a stale source slot, corrupting an
+            // unrelated entity). See DestroyEntities for the full mechanism.
+            std::sort(validEntities.begin(), validEntities.end());
+            validEntities.erase(std::unique(validEntities.begin(), validEntities.end()), validEntities.end());
             if (validEntities.empty())
                 return;
 
@@ -388,7 +418,7 @@ namespace Astra
             // Filter out invalid entities
             SmallVector<Entity, 256> validEntities;
             validEntities.reserve(entities.size());
-            
+
             for (Entity entity : entities)
             {
                 if (m_entityManager.IsValid(entity))
@@ -396,10 +426,14 @@ namespace Astra
                     validEntities.push_back(entity);
                 }
             }
-            
+
+            // IM-1: de-duplicate before the archetype layer (see DestroyEntities/AddComponents).
+            std::sort(validEntities.begin(), validEntities.end());
+            validEntities.erase(std::unique(validEntities.begin(), validEntities.end()), validEntities.end());
+
             if (validEntities.empty())
                 return;
-            
+
             // Batch add components
             m_archetypeManager->AddComponents<T>(validEntities, std::forward<Args>(args)...);
             
@@ -453,6 +487,15 @@ namespace Astra
                     }
                 }
             }
+
+            // IM-1: de-duplicate before the archetype layer -- a repeated entity would be
+            // migrated twice, the second move corrupting the bystander swapped into its
+            // freed slot. See DestroyEntities for the full mechanism. (Note: in the
+            // signal-enabled branch above, a duplicated entity still emits ComponentRemoved
+            // once per occurrence -- a cosmetic double-signal, not the corruption IM-1
+            // targets; see the follow-up flag in the report.)
+            std::sort(validEntities.begin(), validEntities.end());
+            validEntities.erase(std::unique(validEntities.begin(), validEntities.end()), validEntities.end());
 
             if (validEntities.empty())
                 return 0;

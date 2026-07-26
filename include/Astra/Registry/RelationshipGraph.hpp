@@ -750,8 +750,13 @@ namespace Astra
             cache.version = m_structureVersion.load(std::memory_order_acquire);
         }
 
-        // Get cached descendants for a root entity
-        const TraversalCache& GetDescendantsCached(Entity root) const
+        // Get cached descendants for a root entity.
+        // Returns a value snapshot copied under m_cacheMutex, never a reference into
+        // the live cache map: the caches live in a non-pointer-stable FlatMap, so a
+        // concurrent caller that inserts a new entry can rehash and dangle any
+        // reference that escaped the lock (IM-5). Copying the TraversalCache (and its
+        // owned entries vector) under the lock keeps the returned snapshot immune.
+        TraversalCache GetDescendantsCached(Entity root) const
         {
             uint32_t currentVersion = m_structureVersion.load(std::memory_order_acquire);
 
@@ -761,7 +766,7 @@ namespace Astra
                 auto it = m_descendantCaches.Find(root);
                 if (it != m_descendantCaches.end() && it->second.IsValid(currentVersion))
                 {
-                    return it->second;
+                    return it->second;  // copied under the shared lock
                 }
             }
 
@@ -774,12 +779,14 @@ namespace Astra
                 {
                     BuildDescendantCache(root, cache);
                 }
-                return cache;
+                return cache;  // copied under the exclusive lock
             }
         }
 
-        // Get cached ancestors for an entity
-        const TraversalCache& GetAncestorsCached(Entity entity) const
+        // Get cached ancestors for an entity.
+        // Returns a value snapshot copied under m_cacheMutex - see
+        // GetDescendantsCached for why a reference must never escape the lock (IM-5).
+        TraversalCache GetAncestorsCached(Entity entity) const
         {
             uint32_t currentVersion = m_structureVersion.load(std::memory_order_acquire);
 
@@ -789,7 +796,7 @@ namespace Astra
                 auto it = m_ancestorCaches.Find(entity);
                 if (it != m_ancestorCaches.end() && it->second.IsValid(currentVersion))
                 {
-                    return it->second;
+                    return it->second;  // copied under the shared lock
                 }
             }
 
@@ -802,7 +809,7 @@ namespace Astra
                 {
                     BuildAncestorCache(entity, cache);
                 }
-                return cache;
+                return cache;  // copied under the exclusive lock
             }
         }
         

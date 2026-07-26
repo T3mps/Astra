@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -297,14 +298,17 @@ namespace Astra
             uint64_t size = vec.size();
             (*this)(size);
 
-            if constexpr (std::is_trivially_copyable_v<T>)
+            // A type may be BOTH trivially copyable AND define a Serialize hook;
+            // scalar dispatch prefers the hook, so the bulk memcpy would silently
+            // bypass it. Only take the bulk path when no hook exists (IM-8).
+            if constexpr (std::is_trivially_copyable_v<T> && !HasSerializeMethod<T, BinaryWriter>)
             {
                 // Write all at once for POD types
                 WriteBytes(vec.data(), size * sizeof(T));
             }
             else
             {
-                // Write one by one for complex types
+                // Write one by one for complex types (or hook-bearing POD types)
                 for (const auto& item : vec)
                 {
                     (*this)(item);
@@ -319,14 +323,16 @@ namespace Astra
         template<typename T, size_t N>
         BinaryWriter& operator()(const std::array<T, N>& arr)
         {
-            if constexpr (std::is_trivially_copyable_v<T>)
+            // See the vector overload: a hook-bearing trivially-copyable T must
+            // route element-wise so its Serialize hook is not bypassed (IM-8).
+            if constexpr (std::is_trivially_copyable_v<T> && !HasSerializeMethod<T, BinaryWriter>)
             {
                 // Write all at once for POD types
                 WriteBytes(arr.data(), N * sizeof(T));
             }
             else
             {
-                // Write one by one for complex types
+                // Write one by one for complex types (or hook-bearing POD types)
                 for (const auto& item : arr)
                 {
                     (*this)(item);
@@ -395,9 +401,23 @@ namespace Astra
         {
             uint64_t size = map.size();
             (*this)(size);
-            for (const auto& [key, value] : map)
+            // unordered_map iterates in hash-bucket order, which is unspecified and
+            // varies with insertion history / load factor / stdlib -> non-deterministic
+            // bytes and checksum. Emit in a canonical key-sorted order (IM-10).
+            std::vector<const std::pair<const K, V>*> entries;
+            entries.reserve(map.size());
+            for (const auto& entry : map)
             {
-                (*this)(key)(value);
+                entries.push_back(&entry);
+            }
+            std::sort(entries.begin(), entries.end(),
+                [](const std::pair<const K, V>* a, const std::pair<const K, V>* b)
+                {
+                    return a->first < b->first;
+                });
+            for (const auto* entry : entries)
+            {
+                (*this)(entry->first)(entry->second);
             }
             return *this;
         }
@@ -425,9 +445,19 @@ namespace Astra
         {
             uint64_t size = set.size();
             (*this)(size);
+            // See the unordered_map overload: bucket order is non-deterministic, so
+            // emit in a canonical value-sorted order for stable bytes/checksum (IM-10).
+            std::vector<const T*> items;
+            items.reserve(set.size());
             for (const auto& item : set)
             {
-                (*this)(item);
+                items.push_back(&item);
+            }
+            std::sort(items.begin(), items.end(),
+                [](const T* a, const T* b) { return *a < *b; });
+            for (const T* item : items)
+            {
+                (*this)(*item);
             }
             return *this;
         }

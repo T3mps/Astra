@@ -48,8 +48,13 @@ namespace Astra
         Delegate(Func&& func) : m_invoker(nullptr)
         {
             using DecayedFunc = std::decay_t<Func>;
-            
-            if constexpr (sizeof(DecayedFunc) <= SMALL_BUFFER_SIZE && std::is_nothrow_move_constructible_v<DecayedFunc>)
+
+            // m_storage is only alignas(std::max_align_t); an over-aligned
+            // functor (e.g. alignas(32)) placement-new'd into it would be
+            // misaligned UB, so over-aligned functors are routed to the
+            // heap (shared_ptr) path below, where `new DecayedFunc(...)`
+            // honors extended alignment via C++17 aligned operator new.
+            if constexpr (sizeof(DecayedFunc) <= SMALL_BUFFER_SIZE && alignof(DecayedFunc) <= alignof(std::max_align_t) && std::is_nothrow_move_constructible_v<DecayedFunc>)
             {
                 new (m_storage) DecayedFunc(std::forward<Func>(func));
                 m_invoker = &InvokeSmallFunctor<DecayedFunc>;
@@ -429,6 +434,15 @@ namespace Astra
         //     delegate state - see Delegate's copy ctor) is SKIPPED for this
         //     dispatch, so handlers should be copyable to be dispatched
         //     reliably.
+        // NOTE: handlers are called with the named lvalues `args`, NOT
+        // std::forward<Args>(args). Args here are the MulticastDelegate's
+        // fixed (non-deduced) template parameters, so forwarding would
+        // static_cast to Args&& on every iteration - the first handler
+        // would move-construct its by-value parameter out of `args`,
+        // leaving every subsequent handler a moved-from value for
+        // non-trivially-movable-and-copyable by-value parameter types.
+        // Passing the lvalue makes every handler copy-construct from the
+        // same untouched source instead.
         template<typename U = R>
         std::enable_if_t<std::is_void_v<U>> Invoke(Args... args) const
         {
@@ -436,7 +450,7 @@ namespace Astra
             for (const auto& handler : handlers)
             {
                 if (handler.delegate)
-                    handler.delegate(std::forward<Args>(args)...);
+                    handler.delegate(args...);
             }
         }
 
@@ -450,7 +464,7 @@ namespace Astra
             for (const auto& handler : handlers)
             {
                 if (handler.delegate)
-                    results.push_back(handler.delegate(std::forward<Args>(args)...));
+                    results.push_back(handler.delegate(args...));
             }
 
             return results;

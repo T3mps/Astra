@@ -2,7 +2,9 @@
 
 #include <mutex>
 #include <shared_mutex>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "../Component/Component.hpp"
 #include "../Container/FlatMap.hpp"
@@ -56,6 +58,23 @@ namespace Astra
             auto it = m_types.Find(hash);
             if (it != m_types.end())
             {
+                // Hash hit: only the name is available to disambiguate here.
+                // A DIFFERENT name on the same hash is a real XXHash64
+                // collision of two distinct types -- refuse loudly rather than
+                // alias the second type onto the first's metadata. Same name =>
+                // idempotent re-registration, return the existing entry.
+                // (Reference return type: cannot signal refusal via null, so
+                // the loud log/ensure IS the refusal; mirrors TypeContext.)
+                if (it->second->typeName != name)
+                {
+                    std::string msg = "MetaRegistry: type-identity collision -- incoming type '";
+                    msg.append(name);
+                    msg += "' shares the type-hash of already-registered '";
+                    msg.append(it->second->typeName);
+                    msg += "'. The second type is refused. Give types a unique unqualified name.";
+                    ASTRA_LOG_ERROR(msg);
+                    ASTRA_ENSURE_ALWAYS(false, "MetaRegistry type-identity collision");
+                }
                 return *it->second;
             }
 
@@ -81,7 +100,29 @@ namespace Astra
             auto it = m_types.Find(hash);
             if (it != m_types.end())
             {
-                // Already registered - return existing
+                // Hash hit: compare the identity fields the TypeMeta already
+                // carries. Matching size/alignment/triviality/name => the same
+                // type re-registered (idempotent), return the existing entry.
+                // Any difference is a real type-hash collision of two distinct
+                // types -- refuse loudly and return nullptr rather than alias
+                // one onto the other (aliasing mismatched size/alignment onto
+                // an existing entry corrupts memory downstream).
+                const TypeMeta& existing = *it->second;
+                if (existing.size != meta.size
+                    || existing.alignment != meta.alignment
+                    || existing.isTrivial != meta.isTrivial
+                    || existing.typeName != meta.typeName)
+                {
+                    std::string msg = "MetaRegistry: type-identity collision -- incoming type '";
+                    msg.append(meta.typeName);
+                    msg += "' shares the type-hash of already-registered '";
+                    msg.append(existing.typeName);
+                    msg += "'. The second type is refused (nullptr). Give types a unique unqualified name.";
+                    ASTRA_LOG_ERROR(msg);
+                    ASTRA_ENSURE_ALWAYS(false, "MetaRegistry type-identity collision");
+                    return nullptr;
+                }
+                // Idempotent re-registration - return existing
                 return it->second.get();
             }
 
@@ -242,16 +283,27 @@ namespace Astra
 
         /**
          * Iterates over all registered types.
-         * Thread-safe but holds a shared lock during iteration.
+         * Thread-safe. Snapshots the entries under the lock, then releases it
+         * before invoking the callback: std::shared_mutex is NOT recursive, so
+         * a callback that re-enters any read accessor (Get/GetByName/...) while
+         * the shared lock was still held would be UB/deadlock.
          * @tparam Func Callback type
          * @param func Callback invoked for each TypeMeta
          */
         template<typename Func>
         void ForEachType(Func&& func) const
         {
-            std::shared_lock lock(m_mutex);
+            std::vector<TypeMeta*> snapshot;
+            {
+                std::shared_lock lock(m_mutex);
+                snapshot.reserve(m_types.Size());
+                for (const auto& [hash, meta] : m_types)
+                {
+                    snapshot.push_back(meta.get());
+                }
+            }
 
-            for (const auto& [hash, meta] : m_types)
+            for (TypeMeta* meta : snapshot)
             {
                 func(*meta);
             }

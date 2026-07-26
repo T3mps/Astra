@@ -216,7 +216,13 @@ namespace Astra
         // Number of segments = number of SyncPoint fences + 1.
         ASTRA_NODISCARD size_t GetSegmentCount() const noexcept { return m_currentSegment + 1; }
 
-        template<System T>
+        // IM-25: constrained by System<T> || ContextSystem<T> so a pure
+        // context system (invocable only with SystemContext&, which fails the
+        // System<T> concept) can be removed symmetrically with how it was
+        // added. The body keys purely on TypeID<T>::Hash(), so either concept
+        // is sufficient; both AddSystem overloads store under the same key.
+        template<typename T>
+        requires (System<T> || ContextSystem<T>)
         void RemoveSystem()
         {
             // Prevent modification during execution to avoid use-after-free.
@@ -251,7 +257,10 @@ namespace Astra
             m_needsRebuild = true;
         }
         
-        template<System T>
+        // IM-25: see RemoveSystem above -- relaxed to accept a context system
+        // (invocable only with SystemContext&) so add/remove/has are symmetric.
+        template<typename T>
+        requires (System<T> || ContextSystem<T>)
         ASTRA_NODISCARD bool HasSystem() const
         {
             return m_systemIndices.Contains(TypeID<T>::Hash());
@@ -321,21 +330,16 @@ namespace Astra
                 // for why that makes the flush safe.
                 ExecutionGuard guard(m_executionDepth);
 
-                // Build the shared context once (systems/metadata do not
-                // change between segments; only which groups run does).
-                SystemExecutionContext context;
-                context.registry = &registry;
-                context.commandBuffer = m_commandBuffer.get();
-                context.systems.reserve(m_systems.size());
-                context.contextSystems.reserve(m_systems.size());
-                context.metadata.reserve(m_systems.size());
-
-                for (const auto& entry : m_systems)
-                {
-                    context.systems.push_back(entry.execute);
-                    context.contextSystems.push_back(entry.executeContext);
-                    context.metadata.push_back(entry.metadata);
-                }
+                // IM-22: the frame-invariant parts of the context
+                // (systems/contextSystems/metadata) are cached in m_context and
+                // rebuilt only when the plan is rebuilt (RebuildContextCache,
+                // called from BuildExecutionPlan just above). Here we bind only
+                // this call's frame-varying state; the per-segment group slice is
+                // selected in the loop below. This avoids copying n Delegates + n
+                // SystemMetadata (each carrying std::vectors) on every Execute()
+                // -- none of which depends on frame-varying state.
+                m_context.registry = &registry;
+                m_context.commandBuffer = m_commandBuffer.get();
 
                 // Run the plan segment-by-segment. Groups are emitted in
                 // segment-major order (Task 1), so groups sharing a segment
@@ -358,11 +362,11 @@ namespace Astra
                     while (gEnd < m_executionPlan.size() && m_planGroupSegment[gEnd] == seg)
                         ++gEnd;
 
-                    context.parallelGroups.assign(m_executionPlan.begin() + g,
-                                                  m_executionPlan.begin() + gEnd);
+                    m_context.parallelGroups.assign(m_executionPlan.begin() + g,
+                                                    m_executionPlan.begin() + gEnd);
 
                     // Execute via the provided executor
-                    executor->Execute(context);
+                    executor->Execute(m_context);
 
                     // Task 3/Task 4, per segment: executor->Execute() above
                     // has just returned, so every system in this segment has
@@ -489,6 +493,20 @@ namespace Astra
             // Stale errors from a since-cleared set of systems must not
             // outlive the scheduler state that produced them.
             m_lastDeferredErrors.clear();
+
+            // IM-22: drop the cached context. Its systems/contextSystems
+            // Delegates captured raw `instance` pointers that the m_systems
+            // clear above just deleted -- they must not linger (a later
+            // Execute() early-returns on the now-empty m_systems, but keep the
+            // cache from holding dangling delegate copies regardless). A
+            // subsequent AddSystem sets m_needsRebuild, so RebuildContextCache
+            // repopulates before the next Execute() uses it.
+            m_context.systems.clear();
+            m_context.contextSystems.clear();
+            m_context.metadata.clear();
+            m_context.parallelGroups.clear();
+            m_context.registry = nullptr;
+            m_context.commandBuffer = nullptr;
 
             // M2 (Task 2 review fix): Clear() used to leave any pending-but-
             // unflushed deferred commands sitting in m_commandBuffer, so a
@@ -825,6 +843,7 @@ namespace Astra
             m_planGroupSegment.clear();
             if (m_systems.empty())
             {
+                RebuildContextCache();   // IM-22: clears the cached context (no systems)
                 m_needsRebuild = false;
                 return;
             }
@@ -911,10 +930,38 @@ namespace Astra
                 ASTRA_LOG_ERROR(msg);
             }
 
+            // IM-22: refresh the frame-invariant context cache AFTER
+            // ComputeScheduleOrder has stamped metadata.scheduleOrder above, so
+            // the cached metadata carries the current schedule order.
+            RebuildContextCache();
+
             m_needsRebuild = false;
 
             if (m_reportAmbiguities)
                 ReportAmbiguities();
+        }
+
+        // IM-22: rebuild the frame-invariant part of the shared execution
+        // context (systems/contextSystems/metadata) from m_systems. Called from
+        // BuildExecutionPlan on every plan rebuild, so Execute() only sets the
+        // frame-varying bits (registry/commandBuffer/parallelGroups). MUST run
+        // after ComputeScheduleOrder has stamped metadata.scheduleOrder. Reuses
+        // the vectors' capacity across rebuilds (clear keeps capacity). When
+        // m_systems is empty this simply clears the cache.
+        void RebuildContextCache()
+        {
+            m_context.systems.clear();
+            m_context.contextSystems.clear();
+            m_context.metadata.clear();
+            m_context.systems.reserve(m_systems.size());
+            m_context.contextSystems.reserve(m_systems.size());
+            m_context.metadata.reserve(m_systems.size());
+            for (const auto& entry : m_systems)
+            {
+                m_context.systems.push_back(entry.execute);
+                m_context.contextSystems.push_back(entry.executeContext);
+                m_context.metadata.push_back(entry.metadata);
+            }
         }
 
         // Helper to extract signature from const lambda
@@ -1057,5 +1104,14 @@ namespace Astra
         // Task 4: this scheduler's per-system error channel -- see
         // GetLastDeferredErrors().
         std::vector<DeferredCommandError> m_lastDeferredErrors;
+
+        // IM-22: frame-invariant execution context reused across Execute()
+        // calls. Its stable parts (systems/contextSystems/metadata) are rebuilt
+        // only when the plan is rebuilt (RebuildContextCache, from
+        // BuildExecutionPlan); Execute() sets registry/commandBuffer and assigns
+        // the per-segment group slice into parallelGroups. mutable to match
+        // m_executionPlan: BuildExecutionPlan is reachable from const
+        // GetExecutionPlan()/ValidateSchedule() via const_cast.
+        mutable SystemExecutionContext m_context;
     };
 } // namespace Astra

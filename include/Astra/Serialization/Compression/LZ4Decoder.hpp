@@ -134,13 +134,26 @@ namespace Astra::Compression::Detail
 
         /**
          * Decompress LZ4 frame format (with 4-byte header)
+         *
+         * The frame is decoded into a SINGLE shared output buffer that spans all
+         * blocks. smallz4 emits Block-Independence=0 frames: a match in one block
+         * may back-reference into the decompressed tail of the previous block
+         * (up to 64KB, the 16-bit offset limit). Decoding each 4MB block into its
+         * own buffer would make those cross-block matches unresolvable, so any
+         * payload >4MB (multi-block) would fail. Keeping one running buffer lets
+         * every match window reach back across block boundaries (fixes C3).
+         *
          * @param compressed Compressed data including frame header
          * @param compressedSize Total size including header
+         * @param expectedSize Known decompressed size; caps total output growth to
+         *        defeat decompression-bomb amplification (I11). Pass SIZE_MAX when
+         *        the size is unknown (leaves output uncapped).
          * @return Decompressed data or error
          */
         static Result<std::vector<uint8_t>, SerializationError> DecompressFrame(
             const uint8_t* compressed,
-            size_t compressedSize)
+            size_t compressedSize,
+            size_t expectedSize = SIZE_MAX)
         {
             if (!compressed || compressedSize < 8) // Min: 4-byte header + 4-byte size
                 return Err(SerializationError::CorruptedData);
@@ -166,13 +179,15 @@ namespace Astra::Compression::Detail
             }
 
             std::vector<uint8_t> output;
+            if (expectedSize != SIZE_MAX)
+                output.reserve(expectedSize);
             const uint8_t* srcEnd = compressed + compressedSize;
 
             // Process blocks
             while (src + 4 <= srcEnd)
             {
                 // Read block size (little-endian)
-                uint32_t blockSize = src[0] | (uint32_t(src[1]) << 8) | 
+                uint32_t blockSize = src[0] | (uint32_t(src[1]) << 8) |
                                     (uint32_t(src[2]) << 16) | (uint32_t(src[3]) << 24);
                 src += 4;
 
@@ -189,16 +204,16 @@ namespace Astra::Compression::Detail
 
                 if (isCompressed)
                 {
-                    auto blockResult = DecompressBlock(src, blockSize);
-                    if (blockResult.IsErr())
-                        return blockResult;
-                        
-                    auto& blockData = *blockResult.GetValue();
-                    output.insert(output.end(), blockData.begin(), blockData.end());
+                    // Decode straight into the shared buffer so cross-block matches
+                    // resolve against previously-decoded blocks (C3), capped (I11).
+                    if (!DecompressBlockInto(src, blockSize, output, expectedSize))
+                        return Err(SerializationError::CorruptedData);
                 }
                 else
                 {
-                    // Uncompressed block - copy directly
+                    // Uncompressed block - copy directly (still capped, I11)
+                    if (output.size() + blockSize > expectedSize)
+                        return Err(SerializationError::CorruptedData);
                     output.insert(output.end(), src, src + blockSize);
                 }
 
@@ -210,16 +225,22 @@ namespace Astra::Compression::Detail
 
     private:
         /**
-         * Decompress a single block without knowing output size
-         * Stops when input is consumed
+         * Decode a single LZ4 block, APPENDING into the running frame buffer.
+         *
+         * Matches resolve against the whole of `output` (which already holds every
+         * previously-decoded block), so back-references that reach into the prior
+         * block's tail work correctly. Total output growth is capped at
+         * `expectedSize` inside the copy/match loop, so a crafted block cannot
+         * expand unboundedly (~255x amplification) before a check fires.
+         *
+         * @return true on success, false if the block is corrupt or would overflow.
          */
-        static Result<std::vector<uint8_t>, SerializationError> DecompressBlock(
+        static bool DecompressBlockInto(
             const uint8_t* compressed,
-            size_t compressedSize)
+            size_t compressedSize,
+            std::vector<uint8_t>& output,
+            size_t expectedSize)
         {
-            std::vector<uint8_t> output;
-            output.reserve(compressedSize * 3); // Assume ~3x expansion initially
-
             const uint8_t* src = compressed;
             const uint8_t* srcEnd = compressed + compressedSize;
 
@@ -228,9 +249,9 @@ namespace Astra::Compression::Detail
                 // Read token
                 if (src >= srcEnd)
                     break; // Reached end normally
-                    
+
                 uint8_t token = *src++;
-                
+
                 // Extract literal and match lengths
                 size_t literalLength = (token >> 4) & 0x0F;
                 size_t matchLength = (token & 0x0F);
@@ -241,7 +262,7 @@ namespace Astra::Compression::Detail
                     uint8_t addLen;
                     do {
                         if (src >= srcEnd)
-                            return Err(SerializationError::CorruptedData);
+                            return false;
                         addLen = *src++;
                         literalLength += addLen;
                     } while (addLen == 255);
@@ -251,8 +272,12 @@ namespace Astra::Compression::Detail
                 if (literalLength > 0)
                 {
                     if (src + literalLength > srcEnd)
-                        return Err(SerializationError::CorruptedData);
-                        
+                        return false;
+
+                    // Cap total output growth (I11)
+                    if (output.size() + literalLength > expectedSize)
+                        return false;
+
                     output.insert(output.end(), src, src + literalLength);
                     src += literalLength;
                 }
@@ -263,13 +288,15 @@ namespace Astra::Compression::Detail
 
                 // Read match offset (little-endian 16-bit)
                 if (src + 2 > srcEnd)
-                    return Err(SerializationError::CorruptedData);
-                    
+                    return false;
+
                 uint16_t offset = src[0] | (uint16_t(src[1]) << 8);
                 src += 2;
 
+                // Match window spans previously-decoded blocks: compare against the
+                // full running buffer, not just this block (C3).
                 if (offset == 0 || offset > output.size())
-                    return Err(SerializationError::CorruptedData);
+                    return false;
 
                 // Add minimum match length
                 matchLength += 4;
@@ -280,13 +307,17 @@ namespace Astra::Compression::Detail
                     uint8_t addLen;
                     do {
                         if (src >= srcEnd)
-                            return Err(SerializationError::CorruptedData);
+                            return false;
                         addLen = *src++;
                         matchLength += addLen;
                     } while (addLen == 255);
                 }
 
-                // Copy match from back-reference
+                // Cap total output growth (I11)
+                if (output.size() + matchLength > expectedSize)
+                    return false;
+
+                // Copy match from back-reference (may overlap for RLE)
                 size_t matchPos = output.size() - offset;
                 for (size_t i = 0; i < matchLength; ++i)
                 {
@@ -294,7 +325,7 @@ namespace Astra::Compression::Detail
                 }
             }
 
-            return Ok(std::move(output));
+            return true;
         }
 
         // Helper for Result returns
