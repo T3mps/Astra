@@ -442,3 +442,252 @@ TEST(RegistrySerialization, LZ4_CompressesAndRoundTripsLargeColumn)
     fs::remove(pathLz4, ec);
     fs::remove(pathNone, ec);
 }
+
+// ================= Acceptance + edge-case tests (Task 4, spec section 6) =================
+//
+// All four tests below reuse existing shared component types from
+// tests/TestComponents.hpp (Position, Name, Player, Hierarchy) -- the suite
+// sits near the 128-component-type ceiling, so no new types are declared
+// here. Entity identity (index+version) is preserved across a Save()/Load()
+// round trip in this codebase (see UnifiedRecordRoundTripPreservesLivenessAndLocation
+// and BinarySerializationTests.cpp's EnabledBitsRoundTrip above/elsewhere), so
+// these tests index back into the loaded registry with the original Entity
+// handles rather than re-deriving identity from component content.
+
+// Step 1: a mixed world (POD component, non-trivial/std::string component, and
+// an empty/tag component) must round-trip exactly under CompressionMode::None
+// -- and the SAME world must also round-trip under LZ4, proving the tag
+// column's null-componentArray skip (`if (!componentArray) continue;` in
+// Archetype::Serialize/Deserialize) behaves identically on both branches.
+TEST(RegistrySerialization, NoneMode_RoundTripsUnchanged)
+{
+    using namespace Astra::Test;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<Position, Name, Player>();
+
+    // POD-only entities.
+    std::vector<Astra::Entity> posOnly;
+    for (int i = 0; i < 5; ++i)
+        posOnly.push_back(reg.CreateEntityWith(Position{float(i), float(i * 2), float(i * 3)}));
+
+    // Non-trivial (std::string, custom Serialize hook) entities.
+    std::vector<Astra::Entity> named;
+    std::vector<std::string> expectedNames;
+    for (int i = 0; i < 5; ++i)
+    {
+        expectedNames.push_back("entity_" + std::to_string(i));
+        named.push_back(reg.CreateEntityWith(Name{expectedNames.back()}));
+    }
+
+    // Tag/empty-component entities, combined with Position so this archetype
+    // carries both a real column AND a null-array tag column side by side.
+    std::vector<Astra::Entity> tagged;
+    for (int i = 0; i < 5; ++i)
+        tagged.push_back(reg.CreateEntityWith(Position{float(100 + i), 0.0f, 0.0f}, Player{}));
+
+    ASSERT_EQ(reg.Size(), 15u);
+
+    auto verify = [&](const std::vector<std::byte>& buffer)
+    {
+        auto componentRegistry = std::make_shared<Astra::ComponentRegistry>();
+        componentRegistry->RegisterComponents<Position, Name, Player>();
+
+        auto loadResult = Astra::Registry::Load(buffer, componentRegistry);
+        ASSERT_TRUE(loadResult.IsOk()) << "error " << static_cast<int>(*loadResult.GetError());
+        auto loaded = std::move(*loadResult.GetValue());
+
+        EXPECT_EQ(loaded->Size(), 15u);
+
+        for (int i = 0; i < 5; ++i)
+        {
+            const Position* p = loaded->GetComponent<Position>(posOnly[i]);
+            ASSERT_NE(p, nullptr) << "posOnly " << i;
+            EXPECT_FLOAT_EQ(p->x, float(i));
+            EXPECT_FLOAT_EQ(p->y, float(i * 2));
+            EXPECT_FLOAT_EQ(p->z, float(i * 3));
+            EXPECT_FALSE(loaded->HasComponent<Player>(posOnly[i]));
+        }
+
+        for (int i = 0; i < 5; ++i)
+        {
+            const Name* n = loaded->GetComponent<Name>(named[i]);
+            ASSERT_NE(n, nullptr) << "named " << i;
+            EXPECT_EQ(n->value, expectedNames[i]);
+        }
+
+        for (int i = 0; i < 5; ++i)
+        {
+            EXPECT_TRUE(loaded->HasComponent<Player>(tagged[i])) << "tagged " << i;
+            const Position* p = loaded->GetComponent<Position>(tagged[i]);
+            ASSERT_NE(p, nullptr) << "tagged pos " << i;
+            EXPECT_FLOAT_EQ(p->x, float(100 + i));
+        }
+    };
+
+    {
+        Astra::Registry::SaveConfig cfg; cfg.compressionMode = Astra::CompressionMode::None;
+        auto saveResult = reg.Save(cfg);
+        ASSERT_TRUE(saveResult.IsOk());
+        verify(*saveResult.GetValue());
+    }
+    {
+        // SaveConfig::compressionMode defaults to LZ4 -- made explicit here to
+        // document intent, per the spec Step 1 note (same world, LZ4 branch).
+        Astra::Registry::SaveConfig cfg; cfg.compressionMode = Astra::CompressionMode::LZ4;
+        auto saveResult = reg.Save(cfg);
+        ASSERT_TRUE(saveResult.IsOk());
+        verify(*saveResult.GetValue());
+    }
+}
+
+// Step 2: a non-trivial component with a custom Serialize hook (Astra::Test::Name,
+// a std::string wrapper: `template<typename Archive> void Serialize(Archive& ar) { ar(value); }`)
+// must round-trip exactly through the compressed (LZ4) path -- proving
+// compression is orthogonal to versioning: the hook still runs, unmodified,
+// against the sub-writer/sub-reader that SerializeColumn/DeserializeColumn
+// wrap per column.
+TEST(RegistrySerialization, LZ4_NonTrivialComponentRoundTrips)
+{
+    using namespace Astra::Test;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<Name>();
+
+    constexpr size_t N = 200;
+    std::vector<Astra::Entity> ents;
+    std::vector<std::string> expected;
+    ents.reserve(N);
+    expected.reserve(N);
+    for (size_t i = 0; i < N; ++i)
+    {
+        // Varying-length, per-entity-distinct content -- catches any
+        // offset/ordering bug in the compressed sub-buffer, not just a single
+        // scalar value.
+        std::string s = "component_" + std::to_string(i) + std::string(i % 37, 'x');
+        Astra::Entity e = reg.CreateEntityWith(Name{s});
+        ents.push_back(e);
+        expected.push_back(std::move(s));
+    }
+
+    Astra::Registry::SaveConfig cfg; cfg.compressionMode = Astra::CompressionMode::LZ4;
+    auto saveResult = reg.Save(cfg);
+    ASSERT_TRUE(saveResult.IsOk());
+    auto buffer = std::move(*saveResult.GetValue());
+
+    auto componentRegistry = std::make_shared<Astra::ComponentRegistry>();
+    componentRegistry->RegisterComponents<Name>();
+    auto loadResult = Astra::Registry::Load(buffer, componentRegistry);
+    ASSERT_TRUE(loadResult.IsOk()) << "error " << static_cast<int>(*loadResult.GetError());
+    auto loaded = std::move(*loadResult.GetValue());
+
+    ASSERT_EQ(loaded->Size(), N);
+    for (size_t i = 0; i < N; ++i)
+    {
+        const Name* n = loaded->GetComponent<Name>(ents[i]);
+        ASSERT_NE(n, nullptr) << "identity " << i;
+        EXPECT_EQ(n->value, expected[i]) << "identity " << i;
+    }
+}
+
+// Step 3: an enableable component (Astra::Test::Hierarchy, the suite's
+// ASTRA_ENABLEABLE type -- see RegistryTest.cpp's EnA alias) with a SUBSET of
+// entities disabled must keep that exact subset disabled after an LZ4
+// save/load. The disabled-bit section is serialized as part of the same
+// per-column sub-buffer as the component data (Archetype::Serialize's LZ4
+// branch: SerializeColumn writes data + bits into colBuf, THEN
+// WriteCompressedBlock compresses colBuf as one block) -- so this proves the
+// bits survive compression, not just the data.
+TEST(RegistrySerialization, LZ4_EnableableDisabledBitsSurvive)
+{
+    using namespace Astra::Test;
+    using EnA = Hierarchy;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponent<EnA>();
+
+    // Large enough (1000 * 16B = 16000B component data alone) to clear the
+    // default 1024-byte compression threshold, so this exercises a REAL
+    // compressed block rather than the below-threshold raw-store path
+    // (that path is Step 4's job).
+    constexpr size_t N = 1000;
+    std::vector<Astra::Entity> ents(N);
+    size_t created = reg.CreateEntitiesWith<EnA>(N, std::span{ents},
+        [](size_t) { return std::tuple{EnA{}}; });
+    ASSERT_EQ(created, N);
+
+    std::vector<bool> expectedEnabled(N, true);
+    for (size_t i = 0; i < N; ++i)
+    {
+        if ((i % 3) == 0)
+        {
+            reg.SetEnabled<EnA>(ents[i], false);
+            expectedEnabled[i] = false;
+        }
+    }
+    const size_t expectedEnabledCount = static_cast<size_t>(
+        std::count(expectedEnabled.begin(), expectedEnabled.end(), true));
+
+    Astra::Registry::SaveConfig cfg; cfg.compressionMode = Astra::CompressionMode::LZ4;
+    auto saveResult = reg.Save(cfg);
+    ASSERT_TRUE(saveResult.IsOk());
+    auto buffer = std::move(*saveResult.GetValue());
+
+    auto componentRegistry = std::make_shared<Astra::ComponentRegistry>();
+    componentRegistry->RegisterComponent<EnA>();
+    auto loadResult = Astra::Registry::Load(buffer, componentRegistry);
+    ASSERT_TRUE(loadResult.IsOk()) << "error " << static_cast<int>(*loadResult.GetError());
+    auto loaded = std::move(*loadResult.GetValue());
+
+    ASSERT_EQ(loaded->Size(), N);
+    for (size_t i = 0; i < N; ++i)
+    {
+        EXPECT_EQ(loaded->IsEnabled<EnA>(ents[i]), expectedEnabled[i]) << "identity " << i;
+    }
+
+    // The enabled-filtered default view must also reflect exactly the
+    // surviving subset (a second, independent read of the same bits).
+    size_t viewCount = 0;
+    loaded->CreateView<EnA>().ForEach([&](Astra::Entity, EnA&) { ++viewCount; });
+    EXPECT_EQ(viewCount, expectedEnabledCount);
+}
+
+// Step 4: a column whose serialized size sits below the default 1024-byte
+// compressionThreshold must still round-trip under CompressionMode::LZ4.
+// WriteCompressedBlock stores sub-threshold (or incompressible) blocks with
+// compressedSize == 0, framed but raw; the read path (Archetype::Deserialize,
+// v5+) must handle that framing correctly.
+TEST(RegistrySerialization, LZ4_SmallColumnBelowThresholdRoundTrips)
+{
+    using namespace Astra::Test;
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<Position>();
+
+    // 3 entities * 12 bytes = 36-byte column -- far below the 1024-byte
+    // default threshold.
+    std::vector<Astra::Entity> ents;
+    for (int i = 0; i < 3; ++i)
+        ents.push_back(reg.CreateEntityWith(Position{float(i), float(i * 10), float(i * 100)}));
+
+    Astra::Registry::SaveConfig cfg; cfg.compressionMode = Astra::CompressionMode::LZ4;
+    auto saveResult = reg.Save(cfg);
+    ASSERT_TRUE(saveResult.IsOk());
+    auto buffer = std::move(*saveResult.GetValue());
+
+    auto componentRegistry = std::make_shared<Astra::ComponentRegistry>();
+    componentRegistry->RegisterComponents<Position>();
+    auto loadResult = Astra::Registry::Load(buffer, componentRegistry);
+    ASSERT_TRUE(loadResult.IsOk()) << "error " << static_cast<int>(*loadResult.GetError());
+    auto loaded = std::move(*loadResult.GetValue());
+
+    ASSERT_EQ(loaded->Size(), 3u);
+    for (int i = 0; i < 3; ++i)
+    {
+        const Position* p = loaded->GetComponent<Position>(ents[i]);
+        ASSERT_NE(p, nullptr) << "identity " << i;
+        EXPECT_FLOAT_EQ(p->x, float(i));
+        EXPECT_FLOAT_EQ(p->y, float(i * 10));
+        EXPECT_FLOAT_EQ(p->z, float(i * 100));
+    }
+}
