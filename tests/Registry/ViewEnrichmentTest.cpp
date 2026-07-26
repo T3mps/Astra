@@ -102,3 +102,21 @@ TEST(ViewAccess, ConstOptionalIsRead)
     EXPECT_TRUE(Astra::ViewAccess<V>::ReadMask().Test(Astra::TypeID<Health>::Value()));
     EXPECT_FALSE(Astra::ViewAccess<V>::WriteMask().Test(Astra::TypeID<Health>::Value()));
 }
+
+// ---- Task 4: Contains + QueryError ----------------------------------------
+
+TEST(ViewContains, FilterAware)
+{
+    Astra::Registry reg;
+    auto match   = reg.CreateEntity<Position, Velocity>();
+    auto noVel   = reg.CreateEntity<Position>();
+    auto excluded= reg.CreateEntity<Position, Velocity, Name>();
+
+    auto v = reg.CreateView<Position, const Velocity, Astra::Not<Name>>();
+    EXPECT_TRUE(v.Contains(match));
+    EXPECT_FALSE(v.Contains(noVel));      // missing required Velocity
+    EXPECT_FALSE(v.Contains(excluded));   // has excluded Name
+
+    reg.DestroyEntity(match);
+    EXPECT_FALSE(v.Contains(match));      // stale handle
+}

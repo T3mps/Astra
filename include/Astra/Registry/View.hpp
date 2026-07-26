@@ -22,6 +22,8 @@
 
 namespace Astra
 {
+    enum class QueryError { NotMatched, Empty, MultipleMatched };
+
     template<typename... QueryArgs>
     class View
     {
@@ -363,6 +365,11 @@ namespace Astra
             return Size() == 0;
         }
 
+        ASTRA_NODISCARD bool Contains(Entity e) const
+        {
+            return VisibleRecord(e) != nullptr;
+        }
+
         // ============= Range-based for loop support =============
 
         /**
@@ -416,6 +423,38 @@ namespace Astra
         }
 
     private:
+        // The record iff `e` is alive AND structurally matches this view AND is
+        // enabled-visible; else nullptr. No EnsureArchetypes needed — matching is
+        // tested against the entity's OWN archetype mask.
+        ASTRA_NODISCARD const EntityRecord* VisibleRecord(Entity e) const
+        {
+            if (!m_archetypeManager) ASTRA_UNLIKELY return nullptr;
+            const EntityRecord* rec = m_archetypeManager->GetEntityRecord(e);
+            if (!rec) return nullptr;   // dead/absent (GetEntityRecord checks version + archetype)
+            if (!QueryBuilder::Matches(rec->archetype->GetMask())) return nullptr;
+            if constexpr (HasRequiredFilter)
+            {
+                if (!EnabledVisible(rec)) return nullptr;
+            }
+            return rec;
+        }
+
+        // False iff any required enableable component is DISABLED for this entity.
+        // Only instantiated when HasRequiredFilter (guarded at the call site).
+        ASTRA_NODISCARD bool EnabledVisible(const EntityRecord* rec) const
+        {
+            return EnabledVisibleImpl(rec, EnabledRequiredFilter{});
+        }
+        template<typename... Fs>
+        ASTRA_NODISCARD bool EnabledVisibleImpl(const EntityRecord* rec, std::tuple<Fs...>) const
+        {
+            const ArchetypeColumnMeta& cm = rec->archetype->GetColumnMeta();
+            const size_t idx = rec->location.GetEntityIndex();
+            bool disabled = false;
+            ((disabled = disabled || rec->chunk->IsDisabled(cm.idToColumn[TypeID<Fs>::Value()], idx)), ...);
+            return !disabled;
+        }
+
         struct ArchetypeEntityCountComparator
         {
             bool operator()(Archetype* a, Archetype* b) const
