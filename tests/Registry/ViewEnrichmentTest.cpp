@@ -198,3 +198,38 @@ TEST(ViewSingle, EmptyOneMany)
     ASSERT_TRUE(r2.IsErr());
     EXPECT_EQ(*r2.GetError(), Astra::QueryError::MultipleMatched);
 }
+
+// ---- Enableable visibility: Contains/Get/Single agree with ForEach ----------
+
+// EnA is the enableable-components suite's alias for Astra::Test::Hierarchy
+// (ViewTest.cpp). Reuse it here rather than introducing a new type.
+using EnA = Astra::Test::Hierarchy;
+
+TEST(ViewEnableableVisibility, DisabledEntityInvisibleToRandomAccess)
+{
+    Astra::Registry reg;
+    auto enabled  = reg.CreateEntity<Position, EnA>();
+    auto disabled = reg.CreateEntity<Position, EnA>();
+    reg.SetEnabled<EnA>(disabled, false);
+
+    auto v = reg.CreateView<Position, EnA>();  // required enableable => HasRequiredFilter
+
+    // ForEach visits only the enabled entity (the baseline all four must agree with)
+    size_t seen = 0; Astra::Entity seenE{};
+    v.ForEach([&](Astra::Entity e, Position&, EnA&) { ++seen; seenE = e; });
+    EXPECT_EQ(seen, 1u);
+    EXPECT_EQ(seenE, enabled);
+
+    // Contains agrees
+    EXPECT_TRUE(v.Contains(enabled));
+    EXPECT_FALSE(v.Contains(disabled));
+
+    // Get agrees (disabled -> NotMatched)
+    EXPECT_TRUE(v.Get(enabled).IsOk());
+    auto rd = v.Get(disabled);
+    ASSERT_TRUE(rd.IsErr());
+    EXPECT_EQ(*rd.GetError(), Astra::QueryError::NotMatched);
+
+    // Single: exactly one ENABLED match (the disabled one must NOT count toward MultipleMatched)
+    EXPECT_TRUE(v.Single().IsOk());
+}
