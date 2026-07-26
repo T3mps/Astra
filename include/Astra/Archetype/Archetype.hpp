@@ -933,71 +933,10 @@ namespace Astra
                 {
                     void* componentArray = chunk->GetComponentArrayByID(desc.id);
                     if (!componentArray) continue;
-                    
-                    size_t arraySize = chunkEntityCount * desc.size;
-                    
-                    // Use component's serialization function if available
-                    if (desc.serializeVersioned || desc.serialize)
-                    {
-                        // For custom serialization, we can't compress the whole array
-                        // as each component is serialized individually
-                        if (desc.serializeVersioned)
-                        {
-                            for (size_t i = 0; i < chunkEntityCount; ++i)
-                            {
-                                void* componentPtr = static_cast<char*>(componentArray) + (i * desc.size);
-                                desc.serializeVersioned(writer, componentPtr);
-                            }
-                        }
-                        else
-                        {
-                            for (size_t i = 0; i < chunkEntityCount; ++i)
-                            {
-                                void* componentPtr = static_cast<char*>(componentArray) + (i * desc.size);
-                                desc.serialize(writer, componentPtr);
-                            }
-                        }
-                    }
-                    else if (desc.is_trivially_copyable)
-                    {
-                        // For POD types, compress the entire array if beneficial
-                        // WriteCompressedBlock will automatically handle compression threshold
-                        writer.WriteCompressedBlock(componentArray, arraySize);
-                    }
-                    else
-                    {
-                        // Should not happen - components should be serializable
-                        ASTRA_ASSERT(false, "Component type is not serializable");
-                    }
 
-                    // Enableable-components (Task 4, format v4): persist this column's
-                    // per-chunk disabled-bit state immediately after its component data.
-                    // Zero-cost for non-enableable columns (invariant 1) -- the branch
-                    // below is skipped entirely unless the descriptor opted into
-                    // ASTRA_ENABLEABLE, so a zero-enableable archetype's serialized size
-                    // is unchanged by this feature (beyond the version-constant bump).
-                    if (desc.isEnableable)
-                    {
-                        // Tag components (desc.size == 0) never reach here -- their
-                        // componentArray is null and the `continue` above already
-                        // skipped them -- so this ordinal is always a real storage column.
-                        const int col = m_columnMeta.idToColumn[desc.id];
-                        writer(chunk->GetDisabledCount(col));
-
-                        const uint64_t* words = chunk->GetDisabledWords(col);
-                        // Word count mirrors the EXACT capacity Deserialize will
-                        // reconstruct this chunk at (max(1, chunkEntityCount)), not this
-                        // (possibly larger, not-yet-full) live chunk's own capacity. Any
-                        // bit at or beyond chunkEntityCount is guaranteed zero by the
-                        // disabled-bit invariant (spec 14.2), so truncating to the
-                        // reader's exact-fit word count loses no information.
-                        const size_t wordCapacity = std::max<size_t>(1, chunkEntityCount);
-                        const size_t wordCount = (wordCapacity + 63) / 64;
-                        for (size_t w = 0; w < wordCount; ++w)
-                        {
-                            writer(words[w]);
-                        }
-                    }
+                    // (componentArray null / tag columns already skipped by the
+                    //  `if (!componentArray) continue;` above)
+                    SerializeColumn(writer, chunk.get(), desc, chunkEntityCount);
                 }
             }
         }
@@ -1265,131 +1204,11 @@ namespace Astra
                     void* componentArray = chunk->GetComponentArrayByID(desc.id);
                     if (!componentArray) continue;
 
-                    size_t arraySize = chunkEntityCount * desc.size;
-
-                    if (desc.deserializeVersioned || desc.deserialize)
-                    {
-                        // For custom deserialization, components are not compressed
-                        // as they were serialized individually
-                        if (desc.deserializeVersioned)
-                        {
-                            for (uint32_t i = 0; i < chunkEntityCount; ++i)
-                            {
-                                void* componentPtr = static_cast<char*>(componentArray) + (i * desc.size);
-                                desc.deserializeVersioned(reader, componentPtr);
-                            }
-                        }
-                        else
-                        {
-                            for (uint32_t i = 0; i < chunkEntityCount; ++i)
-                            {
-                                void* componentPtr = static_cast<char*>(componentArray) + (i * desc.size);
-                                desc.deserialize(reader, componentPtr);
-                            }
-                        }
-
-                        if (reader.HasError())
-                        {
-                            return ResultType::Err(reader.GetError());
-                        }
-                    }
-                    else if (desc.is_trivially_copyable)
-                    {
-                        // POD types may be compressed - use ReadCompressedBlock
-                        auto result = reader.ReadCompressedBlock();
-                        if (result.IsErr())
-                        {
-                            // Error reading compressed block
-                            return ResultType::Err(SerializationError::CorruptedData);
-                        }
-
-                        auto& data = *result.GetValue();
-                        if (data.size() != arraySize)
-                        {
-                            // Size mismatch - data corruption
-                            return ResultType::Err(SerializationError::SizeMismatch);
-                        }
-
-                        // Copy decompressed data to component array
-                        std::memcpy(componentArray, data.data(), arraySize);
-                    }
-
-                    // Enableable-components (Task 4, format v4): mirror-image of the
-                    // write side above. When the ARCHIVE recorded a disabled-bit section
-                    // for this column (diskHasDisabledSection[di] -- the per-descriptor
-                    // flag read from the descriptor block), a disabledCount + word section
-                    // follows this column's component data. Consume it iff that flag is
-                    // set -- NOT iff THIS build marks the component enableable (IM-9):
-                    // recording presence in the stream keeps the reader byte-synchronized
-                    // even when a component's ASTRA_ENABLEABLE status differs between the
-                    // saving and loading builds. The flag is only ever set for v4+
-                    // archives (pre-v4 defaults it to 0), which subsumes the old explicit
-                    // version gate; pre-v4 archives never wrote this section for ANY
-                    // column, so the chunk's word region stays zero-init from
-                    // AppendChunk/InitializeColumns above and every entity comes back
-                    // enabled (invariant 8's "legacy loads all-enabled" contract).
-                    //
-                    // The section is always VALIDATED (refuse-not-trust, spec 14 invariant
-                    // 8): a disabledCount that doesn't match popcount(words), or any bit
-                    // set at or beyond this chunk's live entity count, is corrupted data
-                    // and fails the whole load rather than loading it silently.
-                    if (diskHasDisabledSection[di])
-                    {
-                        const size_t wordCapacity = std::max<size_t>(1, static_cast<size_t>(chunkEntityCount));
-                        const size_t wordCount = (wordCapacity + 63) / 64;
-
-                        uint32_t diskDisabledCount = 0;
-                        reader(diskDisabledCount);
-                        if (reader.HasError())
-                        {
-                            return ResultType::Err(reader.GetError());
-                        }
-
-                        // Read into a local buffer first and validate BEFORE touching the
-                        // live chunk -- a rejected section must not leave the chunk's real
-                        // word region partially written (the archetype is discarded on Err
-                        // either way, but this keeps the write atomic/all-or-nothing,
-                        // matching the compressed-block read above).
-                        std::vector<uint64_t> diskWords(wordCount, 0);
-                        uint32_t popcount = 0;
-                        for (size_t w = 0; w < wordCount; ++w)
-                        {
-                            reader(diskWords[w]);
-                            popcount += static_cast<uint32_t>(std::popcount(diskWords[w]));
-                        }
-                        if (reader.HasError())
-                        {
-                            return ResultType::Err(reader.GetError());
-                        }
-
-                        if (diskDisabledCount != popcount)
-                        {
-                            return ResultType::Err(SerializationError::CorruptedData);
-                        }
-
-                        for (size_t i = static_cast<size_t>(chunkEntityCount); i < wordCount * 64; ++i)
-                        {
-                            if ((diskWords[i >> 6] >> (i & 63)) & 1ull)
-                            {
-                                return ResultType::Err(SerializationError::CorruptedData);
-                            }
-                        }
-
-                        if (desc.isEnableable)
-                        {
-                            // This build still stores per-entity disabled bits for the
-                            // type -- apply the validated section to the live chunk.
-                            const int col = archetype->m_columnMeta.idToColumn[desc.id];
-                            uint64_t* liveWords = chunk->GetDisabledWords(col);
-                            std::memcpy(liveWords, diskWords.data(), wordCount * sizeof(uint64_t));
-                            chunk->m_columns[col].disabledCount = diskDisabledCount;
-                        }
-                        // else: the archive carried disabled bits, but THIS build no
-                        // longer marks the component ASTRA_ENABLEABLE. The bytes are
-                        // consumed and validated (stream stays in sync) then dropped;
-                        // every entity of this type loads enabled -- graceful schema
-                        // evolution for a column that lost ASTRA_ENABLEABLE.
-                    }
+                    auto colResult = DeserializeColumn(reader, chunk, archetype.get(), desc,
+                                                       static_cast<size_t>(chunkEntityCount),
+                                                       diskHasDisabledSection[di]);
+                    if (colResult.IsErr())
+                        return colResult;
                 }
 
                 // AppendChunk already installed the chunk in archetype->m_chunks.
@@ -1596,6 +1415,229 @@ namespace Astra
         }
 
     private:
+        // Writes one component column's per-chunk data: custom serialize
+        // (versioned or plain) or a compressed trivially-copyable block,
+        // followed by the column's disabled-bit section iff it is enableable.
+        // Extracted verbatim from Serialize()'s per-column loop body (Task 2 of
+        // the LZ4 per-column compression plan, NO behavior change) so Task 3's
+        // compressed-column path can reuse it. Caller guarantees
+        // chunk->GetComponentArrayByID(desc.id) is non-null (null/tag columns
+        // are skipped before calling).
+        void SerializeColumn(BinaryWriter& w, ArchetypeChunk* chunk, const ComponentDescriptor& desc, size_t chunkEntityCount) const
+        {
+            void* componentArray = chunk->GetComponentArrayByID(desc.id);
+            size_t arraySize = chunkEntityCount * desc.size;
+
+            // Use component's serialization function if available
+            if (desc.serializeVersioned || desc.serialize)
+            {
+                // For custom serialization, we can't compress the whole array
+                // as each component is serialized individually
+                if (desc.serializeVersioned)
+                {
+                    for (size_t i = 0; i < chunkEntityCount; ++i)
+                    {
+                        void* componentPtr = static_cast<char*>(componentArray) + (i * desc.size);
+                        desc.serializeVersioned(w, componentPtr);
+                    }
+                }
+                else
+                {
+                    for (size_t i = 0; i < chunkEntityCount; ++i)
+                    {
+                        void* componentPtr = static_cast<char*>(componentArray) + (i * desc.size);
+                        desc.serialize(w, componentPtr);
+                    }
+                }
+            }
+            else if (desc.is_trivially_copyable)
+            {
+                // For POD types, compress the entire array if beneficial
+                // WriteCompressedBlock will automatically handle compression threshold
+                w.WriteCompressedBlock(componentArray, arraySize);
+            }
+            else
+            {
+                // Should not happen - components should be serializable
+                ASTRA_ASSERT(false, "Component type is not serializable");
+            }
+
+            // Enableable-components (Task 4, format v4): persist this column's
+            // per-chunk disabled-bit state immediately after its component data.
+            // Zero-cost for non-enableable columns (invariant 1) -- the branch
+            // below is skipped entirely unless the descriptor opted into
+            // ASTRA_ENABLEABLE, so a zero-enableable archetype's serialized size
+            // is unchanged by this feature (beyond the version-constant bump).
+            if (desc.isEnableable)
+            {
+                // Tag components (desc.size == 0) never reach here -- their
+                // componentArray is null and the caller's null-skip already
+                // skipped them -- so this ordinal is always a real storage column.
+                const int col = m_columnMeta.idToColumn[desc.id];
+                w(chunk->GetDisabledCount(col));
+
+                const uint64_t* words = chunk->GetDisabledWords(col);
+                // Word count mirrors the EXACT capacity Deserialize will
+                // reconstruct this chunk at (max(1, chunkEntityCount)), not this
+                // (possibly larger, not-yet-full) live chunk's own capacity. Any
+                // bit at or beyond chunkEntityCount is guaranteed zero by the
+                // disabled-bit invariant (spec 14.2), so truncating to the
+                // reader's exact-fit word count loses no information.
+                const size_t wordCapacity = std::max<size_t>(1, chunkEntityCount);
+                const size_t wordCount = (wordCapacity + 63) / 64;
+                for (size_t wi = 0; wi < wordCount; ++wi)
+                {
+                    w(words[wi]);
+                }
+            }
+        }
+
+        // Reads one component column's per-chunk data (custom deserialize,
+        // versioned or plain, or a compressed trivially-copyable block) into
+        // the chunk's component array, then (iff hasDisabledSection) reads,
+        // validates, and applies the column's disabled-bit section. Extracted
+        // verbatim from Deserialize()'s per-column loop body (Task 2 of the LZ4
+        // per-column compression plan, NO behavior change) so Task 3's
+        // compressed-column path can reuse it. Caller guarantees
+        // chunk->GetComponentArrayByID(desc.id) is non-null (null/tag columns
+        // are skipped before calling); hasDisabledSection is the per-descriptor
+        // disk flag (diskHasDisabledSection[di], IM-9), not this build's
+        // desc.isEnableable. Static (like Deserialize itself): archetype is
+        // passed explicitly rather than accessed via `this`.
+        static Result<std::unique_ptr<Archetype>, SerializationError> DeserializeColumn(BinaryReader& r, ArchetypeChunk* chunk, Archetype* archetype, const ComponentDescriptor& desc, size_t chunkEntityCount, bool hasDisabledSection)
+        {
+            using ResultType = Result<std::unique_ptr<Archetype>, SerializationError>;
+
+            void* componentArray = chunk->GetComponentArrayByID(desc.id);
+            size_t arraySize = chunkEntityCount * desc.size;
+
+            if (desc.deserializeVersioned || desc.deserialize)
+            {
+                // For custom deserialization, components are not compressed
+                // as they were serialized individually
+                if (desc.deserializeVersioned)
+                {
+                    for (uint32_t i = 0; i < chunkEntityCount; ++i)
+                    {
+                        void* componentPtr = static_cast<char*>(componentArray) + (i * desc.size);
+                        desc.deserializeVersioned(r, componentPtr);
+                    }
+                }
+                else
+                {
+                    for (uint32_t i = 0; i < chunkEntityCount; ++i)
+                    {
+                        void* componentPtr = static_cast<char*>(componentArray) + (i * desc.size);
+                        desc.deserialize(r, componentPtr);
+                    }
+                }
+
+                if (r.HasError())
+                {
+                    return ResultType::Err(r.GetError());
+                }
+            }
+            else if (desc.is_trivially_copyable)
+            {
+                // POD types may be compressed - use ReadCompressedBlock
+                auto result = r.ReadCompressedBlock();
+                if (result.IsErr())
+                {
+                    // Error reading compressed block
+                    return ResultType::Err(SerializationError::CorruptedData);
+                }
+
+                auto& data = *result.GetValue();
+                if (data.size() != arraySize)
+                {
+                    // Size mismatch - data corruption
+                    return ResultType::Err(SerializationError::SizeMismatch);
+                }
+
+                // Copy decompressed data to component array
+                std::memcpy(componentArray, data.data(), arraySize);
+            }
+
+            // Enableable-components (Task 4, format v4): mirror-image of the
+            // write side above. When the ARCHIVE recorded a disabled-bit section
+            // for this column (hasDisabledSection -- the per-descriptor flag read
+            // from the descriptor block), a disabledCount + word section follows
+            // this column's component data. Consume it iff that flag is set --
+            // NOT iff THIS build marks the component enableable (IM-9):
+            // recording presence in the stream keeps the reader byte-synchronized
+            // even when a component's ASTRA_ENABLEABLE status differs between the
+            // saving and loading builds. The flag is only ever set for v4+
+            // archives (pre-v4 defaults it to 0), which subsumes the old explicit
+            // version gate; pre-v4 archives never wrote this section for ANY
+            // column, so the chunk's word region stays zero-init from
+            // AppendChunk/InitializeColumns above and every entity comes back
+            // enabled (invariant 8's "legacy loads all-enabled" contract).
+            //
+            // The section is always VALIDATED (refuse-not-trust, spec 14 invariant
+            // 8): a disabledCount that doesn't match popcount(words), or any bit
+            // set at or beyond this chunk's live entity count, is corrupted data
+            // and fails the whole load rather than loading it silently.
+            if (hasDisabledSection)
+            {
+                const size_t wordCapacity = std::max<size_t>(1, static_cast<size_t>(chunkEntityCount));
+                const size_t wordCount = (wordCapacity + 63) / 64;
+
+                uint32_t diskDisabledCount = 0;
+                r(diskDisabledCount);
+                if (r.HasError())
+                {
+                    return ResultType::Err(r.GetError());
+                }
+
+                // Read into a local buffer first and validate BEFORE touching the
+                // live chunk -- a rejected section must not leave the chunk's real
+                // word region partially written (the archetype is discarded on Err
+                // either way, but this keeps the write atomic/all-or-nothing,
+                // matching the compressed-block read above).
+                std::vector<uint64_t> diskWords(wordCount, 0);
+                uint32_t popcount = 0;
+                for (size_t w = 0; w < wordCount; ++w)
+                {
+                    r(diskWords[w]);
+                    popcount += static_cast<uint32_t>(std::popcount(diskWords[w]));
+                }
+                if (r.HasError())
+                {
+                    return ResultType::Err(r.GetError());
+                }
+
+                if (diskDisabledCount != popcount)
+                {
+                    return ResultType::Err(SerializationError::CorruptedData);
+                }
+
+                for (size_t i = static_cast<size_t>(chunkEntityCount); i < wordCount * 64; ++i)
+                {
+                    if ((diskWords[i >> 6] >> (i & 63)) & 1ull)
+                    {
+                        return ResultType::Err(SerializationError::CorruptedData);
+                    }
+                }
+
+                if (desc.isEnableable)
+                {
+                    // This build still stores per-entity disabled bits for the
+                    // type -- apply the validated section to the live chunk.
+                    const int col = archetype->m_columnMeta.idToColumn[desc.id];
+                    uint64_t* liveWords = chunk->GetDisabledWords(col);
+                    std::memcpy(liveWords, diskWords.data(), wordCount * sizeof(uint64_t));
+                    chunk->m_columns[col].disabledCount = diskDisabledCount;
+                }
+                // else: the archive carried disabled bits, but THIS build no
+                // longer marks the component ASTRA_ENABLEABLE. The bytes are
+                // consumed and validated (stream stays in sync) then dropped;
+                // every entity of this type loads enabled -- graceful schema
+                // evolution for a column that lost ASTRA_ENABLEABLE.
+            }
+
+            return ResultType::Ok(nullptr);
+        }
+
         static constexpr size_t INVALID_CHUNK_INDEX = std::numeric_limits<size_t>::max();
 
         template<typename AddFunc>
