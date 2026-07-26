@@ -1486,6 +1486,12 @@ namespace Astra
             // per-column wrapper (compression is now orthogonal to versioning and lives
             // in Serialize()'s column loop, never here) -- it silently skipped
             // versioning for POD columns and never actually ran anyway.
+            // Every registered component gets both serialize hooks set unconditionally
+            // (ComponentRegistry), so the branch below always runs. Assert the precondition
+            // in Debug: a descriptor with neither hook would silently write zero bytes for
+            // chunkEntityCount elements -- a stream desync with no other trip.
+            ASTRA_ASSERT(desc.serializeVersioned || desc.serialize,
+                "SerializeColumn: component descriptor has no serialize hook");
             if (desc.serializeVersioned || desc.serialize)
             {
                 // For custom serialization, we can't compress the whole array
@@ -1560,6 +1566,10 @@ namespace Astra
             // `is_trivially_copyable -> ReadCompressedBlock` arm was REMOVED with the
             // LZ4 per-column wrapper: decompression now happens once, in Deserialize()'s
             // column loop, which hands this helper the already-decompressed plain bytes.
+            // Mirror of SerializeColumn's precondition assert: a hookless descriptor would
+            // silently read zero bytes for chunkEntityCount elements -> stream desync.
+            ASTRA_ASSERT(desc.deserializeVersioned || desc.deserialize,
+                "DeserializeColumn: component descriptor has no deserialize hook");
             if (desc.deserializeVersioned || desc.deserialize)
             {
                 // For custom deserialization, components are not compressed
