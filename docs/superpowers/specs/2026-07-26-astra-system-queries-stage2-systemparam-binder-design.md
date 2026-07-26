@@ -195,7 +195,7 @@ private:
   - `ResMut<T>`: `ResMut<T>{ static_cast<T*>(resPtrs[…]) }`.
   - `Commands`: `Commands{ ctx }`.
 - **Registry rebind** — identical to `LambdaSystemWrapper::ExtractAndExecute`: if `m_viewRegistry != &reg`, reset every view slot and set `m_viewRegistry = &reg`.
-- **Resource pointers fetched once** — the gate (§6) fetches each `Res`/`ResMut` pointer a single time into a small local structure and `BuildParam` reads from it, so there is no double `GetResource` per frame.
+- **Resource presence gate** — before invoking, a `constexpr` fold calls `reg.GetResource<T>()` for each `Res`/`ResMut` param to confirm non-null (see §6). `BuildParam` re-calls `GetResource<T>()` when constructing each handle; `GetResource` is an O(1) sparse lookup, so the extra call per resource per frame is negligible and no pointer caching is attempted (this keeps reference-preservation for the `View<…>&` param straightforward — the alternative of building all params into a tuple before the null-check would decay or dangle the view reference).
 
 ### 4.3 Leaf wrappers
 
@@ -310,9 +310,9 @@ then it stores `.executeContext = [instance](SystemContext& ctx){ (*instance)(ct
 **Decision:** when a param-system declares `Res<T>`/`ResMut<T>` but the resource is absent from the Registry at `Execute()` time, the binder **skips invoking that system for the frame and logs once**. Rationale: matches Astra's uniform-graceful-misuse policy (log, never abort); the common case (resources set at startup) never hits it; and skipping means the body never observes a null resource, so `Res`/`ResMut` deref is always valid.
 
 Mechanics in `SystemParamBinder::Run`:
-1. `constexpr` fold over `Params`: for each `Res<T>`/`ResMut<T>`, fetch `reg.GetResource<T>()` once into a local; `allPresent = (ptr != nullptr && …)`. Non-resource params contribute `true`.
+1. `constexpr` fold over `Params`: for each `Res<T>`/`ResMut<T>`, `allPresent = (reg.GetResource<T>() != nullptr && …)`. Non-resource params contribute `true`.
 2. If `!allPresent`: if `!m_loggedMissing`, `ASTRA_LOG_ERROR("param-system skipped: resource … absent")` and set `m_loggedMissing = true`; **return without invoking**.
-3. If `allPresent`: clear `m_loggedMissing` (so a later disappearance logs again), build all params (resource params reuse the fetched pointers), invoke the target.
+3. If `allPresent`: clear `m_loggedMissing` (so a later disappearance logs again), build all params (`BuildParam` re-calls `GetResource<T>()` — O(1)), invoke the target.
 
 The latch keeps a persistently-missing resource from spamming the log every frame while still reporting the first occurrence and any recurrence after recovery. The system's declared access is still registered, so its scheduling slot/grouping is unaffected by a skipped frame.
 
