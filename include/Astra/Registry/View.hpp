@@ -480,6 +480,24 @@ namespace Astra
                                 std::make_index_sequence<std::tuple_size_v<OptionalTypes>>{}));
         }
 
+        /**
+         * Filter-aware exactly-one-match accessor: Err(Empty) if no entity
+         * matches this view, Err(MultipleMatched) if more than one does,
+         * otherwise Ok(Get(the one match)). Non-const because it reuses
+         * ForEach (which calls EnsureArchetypes()).
+         */
+        ASTRA_NODISCARD Result<AccessTuple, QueryError> Single()
+        {
+            Entity found{};
+            size_t count = 0;
+            ForEach([&](Entity e, auto&&...) { if (count == 0) found = e; ++count; });
+            if (count == 0) ASTRA_UNLIKELY
+                return Result<AccessTuple, QueryError>::Err(QueryError::Empty);
+            if (count > 1) ASTRA_UNLIKELY
+                return Result<AccessTuple, QueryError>::Err(QueryError::MultipleMatched);
+            return Get(found);   // exactly one visible match; Get re-validates and materializes
+        }
+
     private:
         // The record iff `e` is alive AND structurally matches this view AND is
         // enabled-visible; else nullptr. No EnsureArchetypes needed — matching is

@@ -172,3 +172,29 @@ TEST(ViewGet, OptionalPresentIsNonNull)
     ASSERT_NE(health, nullptr);
     EXPECT_EQ(health, reg.GetComponent<Health>(e));
 }
+
+// ---- Task 6: Single -------------------------------------------------------
+
+TEST(ViewSingle, EmptyOneMany)
+{
+    Astra::Registry reg;
+    auto v = reg.CreateView<Position, const Velocity>();
+
+    EXPECT_TRUE(v.Single().IsErr());
+    EXPECT_EQ(*v.Single().GetError(), Astra::QueryError::Empty);
+
+    auto only = reg.CreateEntity<Position, Velocity>();
+    reg.GetComponent<Position>(only)->x = 7.0f;
+    {
+        auto r = v.Single();
+        ASSERT_TRUE(r.IsOk());
+        auto [pos, vel] = *r.GetValue();   // Position*, const Velocity*  (POINTERS, not refs)
+        (void)vel;
+        EXPECT_FLOAT_EQ(pos->x, 7.0f);     // deref with ->
+    }
+
+    reg.CreateEntity<Position, Velocity>();   // now two
+    auto r2 = v.Single();
+    ASSERT_TRUE(r2.IsErr());
+    EXPECT_EQ(*r2.GetError(), Astra::QueryError::MultipleMatched);
+}
