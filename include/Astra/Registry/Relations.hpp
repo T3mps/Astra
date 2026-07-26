@@ -37,7 +37,11 @@ namespace Astra
         using ExcludedTuple = typename Classifier::ExcludedComponents;
         using AnyGroups = typename Classifier::AnyGroups;
         using OneOfGroups = typename Classifier::OneOfGroups;
-        
+
+        static_assert(std::tuple_size_v<typename Classifier::WithComponents> == 0,
+            "With<T> is not yet supported in Relations queries (it would be silently ignored). "
+            "Use a plain required component, or filter after the relation query.");
+
     public:
         Relations(std::shared_ptr<ArchetypeManager> manager, Entity entity,
                   std::shared_ptr<const RelationshipGraph> graph,

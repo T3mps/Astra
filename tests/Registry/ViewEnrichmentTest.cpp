@@ -233,3 +233,24 @@ TEST(ViewEnableableVisibility, DisabledEntityInvisibleToRandomAccess)
     // Single: exactly one ENABLED match (the disabled one must NOT count toward MultipleMatched)
     EXPECT_TRUE(v.Single().IsOk());
 }
+
+TEST(ViewEnableableVisibility, DisabledEnableableOptionalYieldsNull)
+{
+    Astra::Registry reg;
+    auto e = reg.CreateEntity<Position, EnA>();
+    reg.SetEnabled<EnA>(e, false);
+
+    auto v = reg.CreateView<Position, Astra::Optional<EnA>>();
+
+    // ForEach yields a null optional pointer for the disabled component (baseline)
+    bool feNull = false;
+    v.ForEach([&](Position&, EnA* opt) { feNull = (opt == nullptr); });
+    EXPECT_TRUE(feNull);
+
+    // Get must AGREE: the optional pointer is null
+    auto r = v.Get(e);
+    ASSERT_TRUE(r.IsOk());               // entity still matches (optional never removes it)
+    auto [pos, opt] = *r.GetValue();
+    (void)pos;
+    EXPECT_EQ(opt, nullptr);
+}

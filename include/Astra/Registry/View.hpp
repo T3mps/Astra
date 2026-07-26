@@ -88,7 +88,8 @@ namespace Astra
         }
 
         /**
-         * Invoke func(Entity, Components&...) for every entity matching this View.
+         * Invoke func(Entity, Components&...) -- or func(Components&...) (the
+         * leading Entity is optional) -- for every entity matching this View.
          *
          * CONTRACT: structural mutation is NOT supported during this call. Do not
          * create or destroy entities, or add/remove components, from within func --
@@ -442,9 +443,15 @@ namespace Astra
         ASTRA_FORCEINLINE O* BindOptional(const EntityRecord* rec) const
         {
             using Bare = std::remove_const_t<O>;
-            return rec->archetype->template HasComponent<Bare>()
-                 ? rec->archetype->template GetComponent<Bare>(rec->location)
-                 : nullptr;
+            if (!rec->archetype->template HasComponent<Bare>())
+                return nullptr;
+            if constexpr (IsEnableableV<Bare>)
+            {
+                const ArchetypeColumnMeta& cm = rec->archetype->GetColumnMeta();
+                if (rec->chunk->IsDisabled(cm.idToColumn[TypeID<Bare>::Value()], rec->location.GetEntityIndex()))
+                    return nullptr;
+            }
+            return rec->archetype->template GetComponent<Bare>(rec->location);
         }
 
         template<typename... R, typename... O, size_t... Ri, size_t... Oi>
