@@ -466,7 +466,8 @@ namespace Astra
             }
 
             auto archetypes = m_archetypeManager->GetArchetypes();
-            const size_t queryComponentCount = QueryBuilder::GetRequiredMask().Count();
+            const size_t queryComponentCount =
+                (QueryBuilder::GetRequiredMask() | QueryBuilder::GetWithMask()).Count();
 
             m_archetypes.reserve(archetypes.size());
 

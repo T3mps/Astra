@@ -19,6 +19,7 @@ namespace Astra
     template<typename T> struct IncludeDisabled;
     template<typename... Ts> struct Any;
     template<typename... Ts> struct OneOf;
+    template<typename T> struct With;
 
     namespace Detail
     {
@@ -43,7 +44,10 @@ namespace Astra
         
         template<typename... Ts>
         struct IsModifier<OneOf<Ts...>> : std::true_type {};
-        
+
+        template<typename T>
+        struct IsModifier<With<T>> : std::true_type {};
+
         template<typename T>
         inline constexpr bool IsModifier_v = IsModifier<T>::value;
         
@@ -68,6 +72,12 @@ namespace Astra
 
         template<typename T>
         struct ExtractComponent<IncludeDisabled<T>>
+        {
+            using type = T;
+        };
+
+        template<typename T>
+        struct ExtractComponent<With<T>>
         {
             using type = T;
         };
@@ -222,6 +232,7 @@ namespace Astra
             using ExcludedComponents = typename FilterByModifier<Not, QueryArgs...>::type;
             using AnyGroups = typename FilterByModifier<Any, QueryArgs...>::type;
             using OneOfGroups = typename FilterByModifier<OneOf, QueryArgs...>::type;
+            using WithComponents     = typename FilterByModifier<With, QueryArgs...>::type;
         };
 
         // ============ Enableable-components query-filter type sets (spec §5) ============
@@ -272,6 +283,15 @@ namespace Astra
     struct Not
     {
         static_assert(Component<T>, "Not can only be used with valid components");
+    };
+
+    // Match-only filter: T must be present on the archetype for a match, but T is
+    // NOT yielded to the callback and carries zero access footprint for scheduling
+    // (ViewAccess ignores it). The positive twin of Not<T>.
+    template<typename T>
+    struct With
+    {
+        static_assert(Component<T>, "With can only be used with valid components");
     };
 
     // View modifier: opt a REQUIRED enableable component OUT of enabled-only
@@ -336,7 +356,13 @@ namespace Astra
         {
             return MakeMaskFromTuple<typename Classifier::ExcludedComponents>();
         }
-        
+
+        // Match-only components (With<T>): required for matching, never yielded.
+        static ComponentMask GetWithMask()
+        {
+            return MakeMaskFromTuple<typename Classifier::WithComponents>();
+        }
+
         // Handle Any groups - must have at least one component from each group
         template<typename Tuple, size_t... Is>
         static bool CheckAnyGroups(const ComponentMask& archetypeMask, std::index_sequence<Is...>)
@@ -387,8 +413,8 @@ namespace Astra
         // Check if archetype matches this query
         static bool Matches(const ComponentMask& archetypeMask)
         {
-            // Must have all required components
-            if (!archetypeMask.HasAll(GetRequiredMask()))
+            // Must have all required AND all With components
+            if (!archetypeMask.HasAll(GetRequiredMask() | GetWithMask()))
                 return false;
             
             // Must NOT have any excluded components
