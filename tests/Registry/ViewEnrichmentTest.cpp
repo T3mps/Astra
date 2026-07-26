@@ -39,3 +39,33 @@ TEST(ViewWith, CombinesWithNotAndRequired)
     v.ForEach([&](Astra::Entity, Position&) { ++n; });
     EXPECT_EQ(n, 1u);   // only `ok`
 }
+
+// ---- Task 2: entity-optional iteration ------------------------------------
+
+TEST(ViewEntityOptional, ForEachWithAndWithoutEntityVisitSameSet)
+{
+    Astra::Registry reg;
+    reg.CreateEntity<Position, Velocity>();
+    reg.CreateEntity<Position, Velocity>();
+    reg.CreateEntity<Position>();   // no Velocity: excluded from the view below
+
+    auto v = reg.CreateView<Position, const Velocity>();
+
+    size_t withEntity = 0, withoutEntity = 0;
+    v.ForEach([&](Astra::Entity, Position&, const Velocity&) { ++withEntity; });
+    v.ForEach([&](Position&, const Velocity&)               { ++withoutEntity; });
+
+    EXPECT_EQ(withEntity, 2u);
+    EXPECT_EQ(withoutEntity, withEntity);
+}
+
+TEST(ViewEntityOptional, ParallelForEachAcceptsEntityless)
+{
+    Astra::Registry reg;
+    for (int i = 0; i < 10; ++i) reg.CreateEntity<Position, Velocity>();
+
+    auto v = reg.CreateView<Position, const Velocity>();
+    std::atomic<size_t> n{0};
+    v.ParallelForEach([&](Position&, const Velocity&) { n.fetch_add(1, std::memory_order_relaxed); });
+    EXPECT_EQ(n.load(), 10u);   // sequential fallback (no scheduler injected) still runs the body
+}

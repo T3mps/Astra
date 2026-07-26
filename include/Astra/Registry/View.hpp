@@ -124,9 +124,10 @@ namespace Astra
             if (m_archetypes.empty()) ASTRA_UNLIKELY
                 return;
 
+            auto adapted = MakeEntityOptionalAdapter(func);
             for (Archetype* archetype : m_archetypes)
             {
-                ForEachImpl(archetype, std::forward<Func>(func), RequiredTypes{}, OptionalTypes{});
+                ForEachImpl(archetype, adapted, RequiredTypes{}, OptionalTypes{});
             }
 
 #ifdef ASTRA_BUILD_DEBUG
@@ -146,7 +147,9 @@ namespace Astra
             
             if (m_archetypes.empty()) ASTRA_UNLIKELY
                 return;
-            
+
+            auto adapted = MakeEntityOptionalAdapter(func);
+
             // Quick check: if we have very few matching entities, don't even try parallel
             size_t quickCount = 0;
             for (Archetype* archetype : m_archetypes)
@@ -156,12 +159,12 @@ namespace Astra
 
             if (quickCount < MIN_ENTITIES_QUICK_CHECK)
             {
-                return ForEach(std::forward<Func>(func));
+                return ForEach(adapted);
             }
 
             // No scheduler injected: Astra spawns no threads — run sequentially inline.
             if (!m_scheduler)
-                return ForEach(std::forward<Func>(func));
+                return ForEach(adapted);
 
             std::vector<std::pair<Archetype*, size_t>> chunkWork;
             // Better estimation based on typical entities per 16KB chunk
@@ -186,7 +189,7 @@ namespace Astra
             // Fall back to sequential for tiny workloads
             if (chunkWork.empty() || totalMatchingEntities < MIN_ENTITIES_FOR_PARALLEL || chunkWork.size() < MIN_CHUNKS_FOR_PARALLEL)
             {
-                return ForEach(std::forward<Func>(func));
+                return ForEach(adapted);
             }
 
             m_scheduler->ParallelFor(chunkWork.size(), MIN_CHUNKS_PER_THREAD,
@@ -195,7 +198,7 @@ namespace Astra
                     for (size_t w = begin; w < end; ++w)
                     {
                         auto [archetype, chunkIndex] = chunkWork[w];
-                        ParallelForEachChunkImpl(archetype, chunkIndex, func, RequiredTypes{}, OptionalTypes{});
+                        ParallelForEachChunkImpl(archetype, chunkIndex, adapted, RequiredTypes{}, OptionalTypes{});
                     }
                 });
         }
@@ -487,6 +490,27 @@ namespace Astra
             }
 
             std::sort(m_archetypes.begin(), m_archetypes.end(), ArchetypeEntityCountComparator{});
+        }
+
+        // Wrap a user callback so it can be invoked as (Entity, Comps&...): if the
+        // callback also accepts the leading Entity, forward it; otherwise drop it.
+        // Additive: an existing (Entity, Comps...) body hits the first branch and is
+        // called identically. Resolves once per fixed component pack (per view type).
+        template<typename Func>
+        ASTRA_FORCEINLINE static auto MakeEntityOptionalAdapter(Func&& func)
+        {
+            return [&func](Astra::Entity e, auto&&... comps)
+            {
+                if constexpr (std::is_invocable_v<Func&, Astra::Entity, decltype(comps)...>)
+                    func(e, std::forward<decltype(comps)>(comps)...);
+                else if constexpr (std::is_invocable_v<Func&, decltype(comps)...>)
+                    func(std::forward<decltype(comps)>(comps)...);
+                else
+                    static_assert(sizeof(Func) == 0,
+                        "View callback must be invocable as (Entity, Comps&...) or (Comps&...). "
+                        "Component params must be 'T&' (write) or 'const T&' (read); "
+                        "Optional<T> supplies a 'T*' argument.");
+            };
         }
 
         template<typename Func, typename... Required, typename... Optional>
