@@ -932,7 +932,12 @@ TEST_F(BinarySerializationTests, LegacyFormatLoadsAllEnabled)
     std::vector<std::byte> buf;
     {
         Astra::BinaryHeader header;             // ctor stamps magic/endianness/current version...
-        header.version = Astra::BINARY_FORMAT_VERSION - 1;   // ...override to the pre-bits format
+        header.version = 3;   // ...override to the pre-bits format (v3: last version before the
+                               // IM-9 disabled-bit section, added at v4; the Archetype::Deserialize
+                               // gate is a fixed `>= 4`, not relative to BINARY_FORMAT_VERSION, so
+                               // this must be a hardcoded version-3 stamp -- not BINARY_FORMAT_VERSION
+                               // - 1, which would drift onto v4 (which DOES carry the section) on
+                               // the next format bump)
         const auto* raw = reinterpret_cast<const std::byte*>(&header);
         buf.insert(buf.end(), raw, raw + sizeof(header));
 
@@ -979,7 +984,7 @@ TEST_F(BinarySerializationTests, LegacyFormatLoadsAllEnabled)
 
     Astra::BinaryReader reader{std::span<const std::byte>(buf)};
     ASSERT_TRUE(reader.ReadHeader().IsOk());
-    ASSERT_EQ(reader.GetVersion(), static_cast<uint16_t>(Astra::BINARY_FORMAT_VERSION - 1));  // confirm the legacy branch is driven
+    ASSERT_EQ(reader.GetVersion(), static_cast<uint16_t>(3));  // confirm the legacy (pre-bits) branch is driven
 
     Astra::ArchetypeChunkPool pool;
     auto result = Astra::Archetype::Deserialize(reader, registryDescriptors, &pool);

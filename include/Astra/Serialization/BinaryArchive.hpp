@@ -88,8 +88,13 @@ namespace Astra
      *     Pre-v4 archives never wrote this section; Deserialize skips reading
      *     it for them, so every enableable component loads enabled (chunks
      *     are already zero-init/all-enabled from construction).
+     * v5: Per-column block compression when the header's compressionMode is
+     *     LZ4 (each chunk-column becomes a WriteCompressedBlock/ReadCompressedBlock
+     *     frame), orthogonal to per-element versioning. v5 archives written with
+     *     compressionMode == None are layout-identical to v4 (inline per-element
+     *     columns, uncompressed).
      */
-    inline constexpr uint16_t BINARY_FORMAT_VERSION = 4;
+    inline constexpr uint16_t BINARY_FORMAT_VERSION = 5;
     inline constexpr char BINARY_MAGIC[6] = "ASTRA";
     
     /**
