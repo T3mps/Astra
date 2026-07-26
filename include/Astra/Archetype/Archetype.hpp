@@ -1234,7 +1234,13 @@ namespace Astra
                     // DeserializeColumn consume the plain bytes. None archives feed
                     // the main reader directly -- byte-identical to the old format.
                     ResultType colResult = ResultType::Ok(nullptr);
-                    if (reader.GetCompressionMode() == CompressionMode::LZ4)
+                    // Compressed columns exist only in v5+ archives. A v<=4 file predates
+                    // per-column compression, so its columns are always plain -- even when
+                    // its header carries a CompressionMode::LZ4 flag (the flag was written
+                    // but never acted on before v5, so last-build v4 "LZ4" files hold plain
+                    // columns). Gate on version AND mode so those legacy files read as raw
+                    // (spec 4), never misparsed through ReadCompressedBlock.
+                    if (reader.GetVersion() >= 5 && reader.GetCompressionMode() == CompressionMode::LZ4)
                     {
                         auto blk = reader.ReadCompressedBlock();
                         if (blk.IsErr())
