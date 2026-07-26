@@ -61,3 +61,44 @@ jobs:
         run: make config=debug AstraTest -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.compiler }}
       - name: Test (Debug)
         run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+
+  sanitize-asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Download premake
+        run: |
+          curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
+      - name: Generate (ASan+UBSan)
+        run: ./premake5 gmake2 --sanitize=address
+      - name: Build (Debug, AstraTest)
+        run: make config=debug AstraTest -j"$(nproc)" CC=clang CXX=clang++
+      - name: Test (ASan+UBSan)
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1:abort_on_error=1
+        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+
+  sanitize-tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Download premake
+        run: |
+          curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
+      - name: Generate (TSan)
+        run: ./premake5 gmake2 --sanitize=thread
+      - name: Build (Debug, AstraTest)
+        run: make config=debug AstraTest -j"$(nproc)" CC=clang CXX=clang++
+      - name: Test (TSan)
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1:suppressions=ci/tsan-suppressions.txt
+        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
