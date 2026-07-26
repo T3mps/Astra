@@ -270,6 +270,39 @@ namespace Astra
         };
         template<typename Tuple>
         using FilterEnableable_t = typename FilterEnableable<Tuple>::type;
+
+        // Per-query-arg read/write classification for ViewAccess.
+        // Default (bare data arg): const T -> read, T -> write.
+        template<typename Arg>
+        struct ArgAccess
+        {
+            using Read  = std::conditional_t<std::is_const_v<Arg>, std::tuple<std::remove_const_t<Arg>>, std::tuple<>>;
+            using Write = std::conditional_t<std::is_const_v<Arg>, std::tuple<>, std::tuple<Arg>>;
+        };
+        // Optional<T>: yields a pointer; const T -> read, T -> write.
+        template<typename T>
+        struct ArgAccess<Optional<T>>
+        {
+            using Read  = std::conditional_t<std::is_const_v<T>, std::tuple<std::remove_const_t<T>>, std::tuple<>>;
+            using Write = std::conditional_t<std::is_const_v<T>, std::tuple<>, std::tuple<T>>;
+        };
+        // IncludeDisabled<T>: yielded mutable (see GetRequired) -> write.
+        template<typename T>
+        struct ArgAccess<IncludeDisabled<T>>
+        {
+            using Read  = std::tuple<>;
+            using Write = std::tuple<T>;
+        };
+        // Match-only / grouping modifiers: zero access footprint.
+        template<typename T>    struct ArgAccess<With<T>> { using Read = std::tuple<>; using Write = std::tuple<>; };
+        template<typename T>    struct ArgAccess<Not<T>>  { using Read = std::tuple<>; using Write = std::tuple<>; };
+        template<typename... T> struct ArgAccess<Any<T...>>   { using Read = std::tuple<>; using Write = std::tuple<>; };
+        template<typename... T> struct ArgAccess<OneOf<T...>> { using Read = std::tuple<>; using Write = std::tuple<>; };
+
+        template<typename... Args>
+        struct AccessReads  { using type = decltype(std::tuple_cat(std::declval<typename ArgAccess<Args>::Read>()...)); };
+        template<typename... Args>
+        struct AccessWrites { using type = decltype(std::tuple_cat(std::declval<typename ArgAccess<Args>::Write>()...)); };
     }
     
     // Query modifier types

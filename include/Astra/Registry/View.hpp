@@ -836,4 +836,24 @@ namespace Astra
         uint32_t m_lastGeneration = 0;
         uint32_t m_lastRemovalCounter = 0;
     };
+
+    // Compile-time read/write access sets of a View's type args, for the scheduler
+    // (Stage 2). With<T>/Not<T>/Any/OneOf contribute nothing (match-only). Masks are
+    // built at runtime from the type-lists, mirroring how SystemScheduler harvests
+    // component masks today.
+    template<typename V> struct ViewAccess;
+
+    template<typename... Args>
+    struct ViewAccess<View<Args...>>
+    {
+        using Reads  = typename Detail::AccessReads<Args...>::type;
+        using Writes = typename Detail::AccessWrites<Args...>::type;
+
+        static ComponentMask ReadMask()  { return MaskOf(static_cast<Reads*>(nullptr)); }
+        static ComponentMask WriteMask() { return MaskOf(static_cast<Writes*>(nullptr)); }
+
+    private:
+        template<typename... Ts>
+        static ComponentMask MaskOf(std::tuple<Ts...>*) { return MakeComponentMask<Ts...>(); }
+    };
 } // namespace Astra

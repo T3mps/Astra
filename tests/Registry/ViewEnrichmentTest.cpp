@@ -69,3 +69,36 @@ TEST(ViewEntityOptional, ParallelForEachAcceptsEntityless)
     v.ParallelForEach([&](Position&, const Velocity&) { n.fetch_add(1, std::memory_order_relaxed); });
     EXPECT_EQ(n.load(), 10u);   // sequential fallback (no scheduler injected) still runs the body
 }
+
+// ---- Task 3: ViewAccess harvesting ----------------------------------------
+
+TEST(ViewAccess, HarvestsReadsWritesAndIgnoresFilters)
+{
+    // Force ID assignment so both expected and actual masks reference the same ids.
+    (void)Astra::MakeComponentMask<Position, Velocity, Health, Transform, Name>();
+
+    using V = Astra::View<Position, const Velocity, Astra::With<Transform>,
+                          Astra::Not<Name>, Astra::Optional<Health>>;
+
+    const auto reads  = Astra::ViewAccess<V>::ReadMask();
+    const auto writes = Astra::ViewAccess<V>::WriteMask();
+
+    // Reads = Velocity (const data) + Health (Optional non-const is a WRITE though) ...
+    // Health here is Optional<Health> (non-const) -> write. So reads = {Velocity}.
+    EXPECT_EQ(reads,  (Astra::MakeComponentMask<Velocity>()));
+    EXPECT_EQ(writes, (Astra::MakeComponentMask<Position, Health>()));
+
+    // With<Transform> and Not<Name> contribute to NEITHER set.
+    EXPECT_FALSE(reads.Test(Astra::TypeID<Transform>::Value()));
+    EXPECT_FALSE(writes.Test(Astra::TypeID<Transform>::Value()));
+    EXPECT_FALSE(reads.Test(Astra::TypeID<Name>::Value()));
+    EXPECT_FALSE(writes.Test(Astra::TypeID<Name>::Value()));
+}
+
+TEST(ViewAccess, ConstOptionalIsRead)
+{
+    (void)Astra::MakeComponentMask<Position, Health>();
+    using V = Astra::View<Position, Astra::Optional<const Health>>;
+    EXPECT_TRUE(Astra::ViewAccess<V>::ReadMask().Test(Astra::TypeID<Health>::Value()));
+    EXPECT_FALSE(Astra::ViewAccess<V>::WriteMask().Test(Astra::TypeID<Health>::Value()));
+}
