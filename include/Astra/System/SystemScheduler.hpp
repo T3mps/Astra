@@ -291,6 +291,13 @@ namespace Astra
                 "Reentrant SystemScheduler::Execute is unsupported; if a system must "
                 "re-run systems, do it from an Astra::Exclusive system. (The depth "
                 "counter keeps this safe, but nesting is almost always a design error.)");
+            // IM-22 made m_context shared member state, so a reentrant Execute() would
+            // clobber the outer call's context mid-iteration in Release (where the assert
+            // above is compiled out). Reentrancy is unsupported regardless -- refuse it
+            // gracefully in all configs (a no-op, per the project's graceful-misuse policy)
+            // rather than corrupt the in-flight context.
+            if (m_executionDepth.load(std::memory_order_acquire) != 0) ASTRA_UNLIKELY
+                return;
 
             if (m_needsRebuild)
             {
@@ -381,12 +388,20 @@ namespace Astra
                     // ParallelCommandBuffer::ExecuteSorted()'s documented
                     // precondition.
                     auto flushResult = m_commandBuffer->ExecuteSorted();
-                    // ExecuteSorted() itself always returns Ok() now -- a
-                    // skipped command is reported, not treated as a flush
-                    // failure -- so flushResult carries no additional
-                    // information; kept only so a future genuine flush-level
-                    // failure mode has somewhere to be checked.
-                    (void)flushResult;
+                    // CR-2: ExecuteSorted() now returns Err(AllocationFailed) when a worker
+                    // buffer was truncated by a record-time allocation failure (a single
+                    // command exceeding the command arena's ~32MB ceiling, or OOM). The
+                    // buffer is skipped wholesale so state stays consistent, but the dropped
+                    // structural changes must not vanish silently -- surface it in ALL build
+                    // configs (the Debug-only Allocate() assert compiles out in Release). A
+                    // programmatic failure channel is a follow-up (the uniform
+                    // failure-reporting convention noted for IM-24).
+                    if (flushResult.IsErr()) ASTRA_UNLIKELY
+                    {
+                        ASTRA_LOG_ERROR("SystemScheduler::Execute: a deferred command buffer was "
+                            "dropped due to a record-time allocation failure; those structural "
+                            "changes were NOT applied this frame.");
+                    }
 
                     // Surface this segment's deferred-command errors (commands
                     // skipped because their target entity/component state no

@@ -180,7 +180,16 @@ namespace Astra::Compression::Detail
 
             std::vector<uint8_t> output;
             if (expectedSize != SIZE_MAX)
-                output.reserve(expectedSize);
+            {
+                // I11: expectedSize comes from an on-disk uint32 (untrusted). Reserving it
+                // outright lets a ~30-byte crafted block claim ~4GB and pre-commit it -- a
+                // memory bomb (and a bad_alloc under -fno-exceptions is std::terminate). A
+                // valid LZ4 frame cannot expand more than ~255x its compressed bytes, so
+                // clamp the reservation to that bound: for a legitimate stream this equals
+                // expectedSize (no perf loss); a bomb is capped to the real input size. The
+                // per-loop expectedSize cap below remains the exactness/correctness guard.
+                output.reserve(std::min<size_t>(expectedSize, static_cast<size_t>(compressedSize) * 256));
+            }
             const uint8_t* srcEnd = compressed + compressedSize;
 
             // Process blocks
@@ -317,11 +326,15 @@ namespace Astra::Compression::Detail
                 if (output.size() + matchLength > expectedSize)
                     return false;
 
-                // Copy match from back-reference (may overlap for RLE)
+                // Copy match from back-reference (may overlap for RLE). Read each byte into
+                // a local BEFORE push_back: binding a reference into `output` across a
+                // reallocating push_back is UB (the reference is invalidated). matchPos + i
+                // is recomputed each iteration, so overlapping/RLE matches decode correctly.
                 size_t matchPos = output.size() - offset;
                 for (size_t i = 0; i < matchLength; ++i)
                 {
-                    output.push_back(output[matchPos + i]);
+                    const uint8_t b = output[matchPos + i];
+                    output.push_back(b);
                 }
             }
 
