@@ -5,6 +5,8 @@
 #include <imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
 
+#include "StudioApp.hpp"
+
 int main()
 {
     glfwSetErrorCallback([](int code, const char* desc)
@@ -27,6 +29,8 @@ int main()
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
+    Studio::StudioApp app;
+
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
@@ -35,7 +39,7 @@ int main()
         ImGui::NewFrame();
 
         ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
-        ImGui::ShowDemoWindow();   // Task 3 replaces this with StudioApp panels
+        app.RenderFrame();
 
         ImGui::Render();
         int w, h;
