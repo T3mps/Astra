@@ -10,6 +10,7 @@
 #include <Astra/Debug/Inspector.hpp>
 
 #include "Components.hpp"
+#include "WorkloadRunner.hpp"
 
 namespace Studio
 {
@@ -18,16 +19,16 @@ namespace Studio
     public:
         StudioApp()
         {
-            // Seed so panels show real data before any workload runs (Task 4
-            // replaces this fixed seed with interactive spawning).
-            for (int i = 0; i < 500; ++i) (void)m_registry.CreateEntity<Position, Velocity>();
-            for (int i = 0; i < 200; ++i) (void)m_registry.CreateEntity<Position, Velocity, Health>();
-            for (int i = 0; i < 50;  ++i) (void)m_registry.CreateEntity<Position, Sprite, Frozen>();
+            // Seed so panels show real data before any interaction (the rest of
+            // the workload is spawned/cleared/stepped live via the Workload panel).
+            m_runner.Spawn(Preset::Mixed, 300);
         }
 
         void RenderFrame()
         {
+            if (m_autoStep) m_runner.Step(ImGui::GetIO().DeltaTime);
             m_snapshot = Astra::Debug::Capture(m_registry);
+            DrawWorkloadPanel();
             DrawRegistryPanel();
             DrawArchetypesPanel();
         }
@@ -40,6 +41,24 @@ namespace Studio
             else if (b >= 1024)   std::snprintf(buf, sizeof(buf), "%.1f KB", double(b) / 1024.0);
             else                  std::snprintf(buf, sizeof(buf), "%zu B", b);
             return buf;
+        }
+
+        void DrawWorkloadPanel()
+        {
+            ImGui::Begin("Workload");
+            ImGui::Combo("Preset", &m_presetIndex, PresetNames, IM_ARRAYSIZE(PresetNames));
+            ImGui::SliderInt("Count", &m_spawnCount, 100, 100000, "%d", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::Button("Spawn")) m_runner.Spawn(Preset(m_presetIndex), m_spawnCount);
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) m_runner.Clear();
+            ImGui::SameLine();
+            if (ImGui::Button("Step")) m_runner.Step(1.0f / 60.0f);
+            ImGui::Checkbox("Auto-step (per frame)", &m_autoStep);
+            ImGui::Text("Spawned: %zu   Steps: %llu",
+                m_runner.Spawned(), (unsigned long long)m_runner.StepsRun());
+            ImGui::Text("Frame: %.2f ms (%.0f FPS)",
+                1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+            ImGui::End();
         }
 
         void DrawRegistryPanel()
@@ -165,7 +184,11 @@ namespace Studio
         }
 
         Astra::Registry m_registry;
+        WorkloadRunner m_runner{m_registry};
         Astra::Debug::InspectorSnapshot m_snapshot;
         int m_selectedArchetype = -1;
+        int m_presetIndex = int(Preset::Mixed);
+        int m_spawnCount = 1000;
+        bool m_autoStep = false;
     };
 }
