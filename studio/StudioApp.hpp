@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include <imgui.h>
 #include <Astra/Astra.hpp>
@@ -71,8 +73,51 @@ namespace Studio
                 ImGui::TableSetupColumn("Occupancy");
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableHeadersRow();
-                for (int i = 0; i < int(m_snapshot.archetypes.size()); ++i)
+
+                // Display order is a per-frame index indirection into
+                // m_snapshot.archetypes; the snapshot itself is never reordered
+                // (Capture output stays canonical) and m_selectedArchetype keeps
+                // storing the underlying snapshot index, not the display row.
+                std::vector<int> order(m_snapshot.archetypes.size());
+                for (int i = 0; i < int(order.size()); ++i) order[size_t(i)] = i;
+
+                if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs())
                 {
+                    if (specs->SpecsCount > 0)
+                    {
+                        const ImGuiTableColumnSortSpecs& spec = specs->Specs[0];
+                        const int column = spec.ColumnIndex;
+                        const bool ascending = spec.SortDirection != ImGuiSortDirection_Descending;
+                        auto occupancy = [](const Astra::Debug::ArchetypeInfo& a)
+                        {
+                            return a.bytesAllocated ? double(a.bytesUsed) / double(a.bytesAllocated) : 0.0;
+                        };
+                        auto less = [&](int lhs, int rhs)
+                        {
+                            const auto& a = m_snapshot.archetypes[size_t(lhs)];
+                            const auto& b = m_snapshot.archetypes[size_t(rhs)];
+                            switch (column)
+                            {
+                                case 0:  return a.signature < b.signature;
+                                case 1:  return a.entityCount < b.entityCount;
+                                case 2:  return a.chunkCount < b.chunkCount;
+                                case 3:  return a.bytesAllocated < b.bytesAllocated;
+                                case 4:  return occupancy(a) < occupancy(b);
+                                default: return false;
+                            }
+                        };
+                        // Rows are few at MVP scale; re-sort every frame rather
+                        // than tracking SpecsDirty.
+                        std::sort(order.begin(), order.end(), [&](int lhs, int rhs)
+                        {
+                            return ascending ? less(lhs, rhs) : less(rhs, lhs);
+                        });
+                    }
+                }
+
+                for (int row = 0; row < int(order.size()); ++row)
+                {
+                    const int i = order[size_t(row)];
                     const auto& a = m_snapshot.archetypes[size_t(i)];
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
