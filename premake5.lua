@@ -19,6 +19,8 @@ workspace "Astra"
     IncludeDir = {}
     IncludeDir["Astra"] = "include"
     IncludeDir["Mosaic"] = "vendor/Mosaic/include"
+    IncludeDir["ImGui"] = "vendor/imgui"
+    IncludeDir["GLFW"] = "vendor/glfw/include"
     IncludeDir["GoogleTest"] = "vendor/GoogleTest/googletest/include"
     IncludeDir["GoogleMock"] = "vendor/GoogleTest/googlemock/include"
     IncludeDir["GoogleBenchmark"] = "vendor/GoogleBenchmark/include"
@@ -26,6 +28,8 @@ workspace "Astra"
     group "Dependencies"
         include "vendor/GoogleTest"
         include "vendor/GoogleBenchmark"
+        include "vendor/imgui"
+        include "vendor/glfw"
     group ""
     
     group "Astra"
@@ -282,6 +286,51 @@ workspace "Astra"
                 filter { "configurations:Dist", "system:linux or system:macosx" }
                     buildoptions { "-O3", "-flto", "-fomit-frame-pointer" }
                     linkoptions { "-flto", "-s" }  -- -s strips symbols
+
+        project "AstraStudio"
+            kind "ConsoleApp"
+            language "C++"
+            cppdialect "C++20"
+            staticruntime "on"
+            location "ide"
+            targetdir ("bin/" .. outputdir .. "/%{prj.name}")
+            objdir ("bin-int/" .. outputdir .. "/%{prj.name}")
+            files { "studio/**.hpp", "studio/**.cpp" }
+            includedirs {
+                "%{IncludeDir.Astra}", "%{IncludeDir.Mosaic}",
+                "%{IncludeDir.ImGui}", "%{IncludeDir.ImGui}/backends", "%{IncludeDir.GLFW}"
+            }
+            links { "ImGui", "GLFW" }
+            filter "system:windows"
+                systemversion "latest"
+                links { "opengl32", "gdi32" }
+                buildoptions { "/Zc:__cplusplus", "/arch:AVX", "/bigobj", "/fp:fast" }
+                defines { "__SSE2__", "__SSE4_2__" }
+            filter "system:linux"
+                links { "GL", "X11", "pthread", "dl" }
+                buildoptions { "-mavx" }
+            filter "configurations:Debug"
+                runtime "Debug"
+                symbols "on"
+                optimize "off"
+                exceptionhandling "off"
+                rtti "off"
+                defines { "ASTRA_BUILD_DEBUG", "_DEBUG" }
+            filter "configurations:Release"
+                runtime "Release"
+                optimize "speed"
+                symbols "on"
+                exceptionhandling "off"
+                rtti "off"
+                defines { "ASTRA_BUILD_RELEASE", "NDEBUG" }
+            filter "configurations:Dist"
+                runtime "Release"
+                optimize "full"
+                symbols "off"
+                exceptionhandling "off"
+                rtti "off"
+                defines { "ASTRA_BUILD_DIST", "NDEBUG" }
+            filter {}
 
         -- Compile checks: alternate entity widths must keep building.
         local function astraCompileCheck(name, sourceFile)
