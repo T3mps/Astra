@@ -6,6 +6,7 @@
 // touch is CaptureChunkDetail for the selected chunk (O(one chunk)/frame).
 
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -416,9 +417,130 @@ namespace Studio
             }
             ImGui::EndChild();
         }
-        void DrawEntities(const Astra::Debug::ArchetypeInfo&, const Astra::Debug::ChunkInfo&)
+
+        void DrawEntities(const Astra::Debug::ArchetypeInfo& a, const Astra::Debug::ChunkInfo& ch)
         {
-            ImGui::TextDisabled("Entities view: Task 7");
+            const float labelW = 170.0f, bytesW = 110.0f, laneH = 20.0f, gapY = 4.0f;
+            ImGui::BeginChild("lanes", ImVec2(0, 0));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 org = ImGui::GetCursorScreenPos();
+            const float trackW = std::max(50.0f, ImGui::GetContentRegionAvail().x - labelW - bytesW - 16.0f);
+            const float scale = trackW * m_entZoom / float(ch.capacity);   // px per entity
+            m_entPan = std::clamp(m_entPan, 0.0f, std::max(0.0f, trackW * (m_entZoom - 1.0f)));
+            const float x0 = org.x + labelW;
+            const auto entX = [&](float i) { return x0 + i * scale - m_entPan; };
+
+            int hoverRow = -1;
+            for (size_t c = 0; c < a.columns.size(); ++c)
+            {
+                const float y = org.y + float(c) * (laneH + gapY);
+                const uint32_t stride = a.columns[c].stride;
+
+                char label[96];
+                std::snprintf(label, sizeof(label), "%s  %u B", a.columns[c].name.c_str(), stride);
+                dl->AddText(ImVec2(org.x, y + 3.0f), IM_COL32(0xC3, 0xC2, 0xB7, 255), label);
+
+                dl->PushClipRect(ImVec2(x0, y), ImVec2(x0 + trackW, y + laneH), true);
+                dl->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + trackW, y + laneH), kCellBase, 3.0f);
+                dl->AddRectFilled(ImVec2(entX(0), y), ImVec2(entX(float(ch.count)), y + laneH), Series(c));
+                dl->AddRectFilled(ImVec2(entX(float(ch.count)), y), ImVec2(entX(float(ch.capacity)), y + laneH),
+                                  Mix(kCellBase, Series(c), 0.20f));
+
+                const float step = 64.0f / float(stride);          // entities per cache line
+                if (step * scale >= 3.0f)
+                    for (float t = step; t < float(ch.capacity); t += step)
+                        dl->AddLine(ImVec2(entX(t), y), ImVec2(entX(t), y + laneH),
+                                    IM_COL32(0, 0, 0, 115), 1.0f);
+
+                if (m_hasDetail && c < m_detail.disabledWords.size() && !m_detail.disabledWords[c].empty())
+                {
+                    const auto& words = m_detail.disabledWords[c];
+                    for (size_t w = 0; w < words.size(); ++w)
+                        for (uint64_t bits = words[w]; bits; bits &= bits - 1)
+                        {
+                            const size_t idx = w * 64 + size_t(std::countr_zero(bits));
+                            if (idx >= ch.count) break;
+                            dl->AddRectFilled(ImVec2(entX(float(idx)), y),
+                                              ImVec2(entX(float(idx)) + std::max(2.0f, scale * 0.6f), y + laneH),
+                                              IM_COL32(0x12, 0x12, 0x12, 255), 1.0f);
+                        }
+                }
+                dl->PopClipRect();
+
+                char bytesLbl[64];
+                std::snprintf(bytesLbl, sizeof(bytesLbl), "%s%s%u off",
+                              FormatBytes(ch.columns[c].bytes).c_str(),
+                              ch.columns[c].disabledCount ? " | " : "",
+                              ch.columns[c].disabledCount);
+                if (!ch.columns[c].disabledCount)
+                    std::snprintf(bytesLbl, sizeof(bytesLbl), "%s", FormatBytes(ch.columns[c].bytes).c_str());
+                dl->AddText(ImVec2(x0 + trackW + 8.0f, y + 3.0f), IM_COL32(0x89, 0x87, 0x81, 255), bytesLbl);
+            }
+
+            const float lanesBottom = org.y + float(a.columns.size()) * (laneH + gapY);
+            if (m_probe >= 0)
+            {
+                const float px = entX(float(m_probe) + 0.5f);
+                if (px >= x0 && px <= x0 + trackW)
+                {
+                    dl->AddRectFilled(ImVec2(px - 1.0f, org.y - 2.0f), ImVec2(px + 1.0f, lanesBottom), kProbeCol);
+                    char flag[32];
+                    std::snprintf(flag, sizeof(flag), "row %d", m_probe);
+                    dl->AddText(ImVec2(px - 20.0f, lanesBottom + 2.0f), kProbeCol, flag);
+                }
+            }
+            ImGui::Dummy(ImVec2(labelW + trackW + bytesW, lanesBottom - org.y + 18.0f));
+
+            // -------- interaction --------
+            if (ImGui::IsWindowHovered())
+            {
+                ImGuiIO& io = ImGui::GetIO();
+                const ImVec2 m = ImGui::GetMousePos();
+                const bool onTracks = m.x >= x0 && m.x <= x0 + trackW && m.y >= org.y && m.y < lanesBottom;
+                if (io.KeyCtrl && io.MouseWheel != 0.0f && onTracks)
+                {
+                    const float entUnder = (m.x - x0 + m_entPan) / scale;
+                    m_entZoom = std::clamp(m_entZoom * (1.0f + 0.15f * io.MouseWheel), 1.0f, 64.0f);
+                    const float newScale = trackW * m_entZoom / float(ch.capacity);
+                    m_entPan = std::max(0.0f, entUnder * newScale - (m.x - x0));
+                }
+                else if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) && onTracks)
+                {
+                    m_entPan = std::max(0.0f, m_entPan - io.MouseDelta.x);
+                }
+                if (onTracks)
+                {
+                    const int lane = int((m.y - org.y) / (laneH + gapY));
+                    const int row = int((m.x - x0 + m_entPan) / scale);
+                    if (lane >= 0 && lane < int(a.columns.size()) && row >= 0 && row < int(ch.capacity))
+                    {
+                        hoverRow = row;
+                        const size_t c = size_t(lane);
+                        const uint32_t stride = a.columns[c].stride;
+                        ImGui::BeginTooltip();
+                        ImGui::Text("%s | row %d%s", a.columns[c].name.c_str(), row,
+                                    row < int(ch.count) ? "" : " (no entity)");
+                        ImGui::Text("byte +%zu | cache line %zu",
+                                    ch.columns[c].offset + size_t(row) * stride,
+                                    (ch.columns[c].offset + size_t(row) * stride) / 64);
+                        if (m_hasDetail && row < int(m_detail.entities.size()))
+                        {
+                            ImGui::Text("entity %u v%u",
+                                        unsigned(m_detail.entities[size_t(row)].GetID()),
+                                        unsigned(m_detail.entities[size_t(row)].GetVersion()));
+                            if (c < m_detail.disabledWords.size() && !m_detail.disabledWords[c].empty())
+                                ImGui::Text("%s", ((m_detail.disabledWords[c][size_t(row) / 64] >>
+                                                    (size_t(row) % 64)) & 1u) ? "DISABLED" : "enabled");
+                        }
+                        ImGui::EndTooltip();
+                        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                            ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x == 0.0f)
+                            m_probe = row < int(ch.count) ? row : -1;
+                    }
+                }
+            }
+            (void)hoverRow;
+            ImGui::EndChild();
         }
 
         int m_mode = 0;                 // 0 Bytes, 1 Entities
