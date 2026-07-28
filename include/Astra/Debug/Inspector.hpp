@@ -213,7 +213,7 @@ namespace Astra::Debug
 
     // Same-thread, same-frame as Capture, so snapshot indices stay consistent.
     // archetypeIndex counts non-null archetypes exactly as Capture does.
-    inline bool CaptureChunkDetail(Registry& registry, size_t archetypeIndex,
+    ASTRA_NODISCARD inline bool CaptureChunkDetail(Registry& registry, size_t archetypeIndex,
                                    size_t chunkIndex, ChunkDetail& out)
     {
         out.entities.clear();

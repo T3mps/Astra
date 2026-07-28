@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -47,6 +48,12 @@ namespace Studio
                 return;
             }
 
+            if (selectedArchetype != m_lastArchetype)
+            {
+                m_lastArchetype = selectedArchetype;
+                m_chunk = 0;
+                m_probe = -1;
+            }
             m_chunk = std::clamp(m_chunk, 0, int(a.chunks.size()) - 1);
             const auto& ch = a.chunks[size_t(m_chunk)];
             m_hasDetail = Astra::Debug::CaptureChunkDetail(
@@ -545,6 +552,7 @@ namespace Studio
 
         int m_mode = 0;                 // 0 Bytes, 1 Entities
         int m_chunk = 0;
+        int m_lastArchetype = -1;
         float m_zoom = 14.0f;           // Bytes: px per cache-line cell, clamp [1, 32]
         float m_entZoom = 1.0f;         // Entities: x scale, clamp [1, 64]
         float m_entPan = 0.0f;          // Entities: pan px
