@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Additive only.** Do NOT modify `ViewAccess` (`View.hpp`), `SystemContext.hpp`, `SystemExecutor.hpp`, `SystemMetadata.hpp`, or `ExtractSystemTraits`/`BuildExecutionPlan`/`Conflicts` in `SystemScheduler.hpp`. The only edits to existing files are: `System.hpp` (+1 `LambdaLike` clause, +1 include), `SystemScheduler.hpp` (+2 `AddSystem` overloads, +1 deduction helper, +1 internal), `Astra.hpp` (+1 include).
+- **Additive, with one approved refactor.** Do NOT modify `ViewAccess` (`View.hpp`), `SystemContext.hpp`, `SystemExecutor.hpp`, `SystemMetadata.hpp`, or `ExtractSystemTraits`/`BuildExecutionPlan`/`Conflicts` in `SystemScheduler.hpp`. Edits to existing files: `System.hpp` (+1 `LambdaLike` clause, +1 include), `Astra.hpp` (+1 include), and `SystemScheduler.hpp` (+2 `AddSystem` overloads + deduction helpers, and **the PF1 refactor — user-approved 2026-07-28**: extract the shared registration body into one private `RegisterSystemImpl` and rewrite the existing `AddSystemInternal` + `AddContextSystemInternal` to call it; the param wrappers reuse `AddContextSystemInternal` rather than adding a third near-duplicate internal). This is a deliberate, user-chosen deviation from strict additive-only, scoped to those two internals; the class-typed public `AddSystem<System T>`/`AddSystem<ContextSystem T>` overloads are OUT of scope and unchanged. **Behavior must be byte-for-byte preserved for existing systems — the full `SystemScheduler.*`/`SystemContext.*` suites are the guardrail.**
 - **TypeID ceiling (128).** The test binary sits near the ceiling. Tests MUST reuse `Astra::Test::*` types from `tests/TestComponents.hpp` — `Position`/`Velocity` as components, `Health`/`Physics` as resource payloads. Do NOT mint new component/resource types. A type used as a resource consumes the SAME `TypeID<T>::Value()` it uses as a component, so reusing already-registered test types costs zero new IDs.
 - **Systems keyed by `TypeID<Wrapper>::Hash()`.** Free functions must be registered as a non-type template argument (`AddSystem<Fn>()`), never by value, so two same-signature free functions get distinct wrapper types.
 - **`Commands`'s ctor is `explicit`.** This keeps `ContextSystem` and `ParamFunctor` disjoint (a `(Commands)` lambda must not be implicitly convertible from `SystemContext&`).
@@ -786,46 +786,61 @@ Add the private helpers next to `AddLambdaSystemImpl` (~line 984):
 
 ```cpp
         // Deduce Params from a const operator() (the common lambda case).
+        // Param wrappers are context systems (they need the per-worker
+        // CommandBuffer for a Commands param), so they register through the
+        // refactored AddContextSystemInternal below -- which now harvests
+        // SystemTraits via the shared RegisterSystemImpl (a wrapper HAS traits;
+        // a raw context lambda does not, so it stays a no-op there). No separate
+        // param internal (PF1).
         template<typename Fn, typename Ret, typename Class, typename... Params>
         ASTRA_NODISCARD Result<void, SystemError> AddParamSystemImpl(Fn&& fn, Ret(Class::*)(Params...) const)
         {
             using Wrapper = FunctionSystemWrapper<std::decay_t<Fn>, Params...>;
-            return AddParamSystemInternal<Wrapper>(Wrapper{std::forward<Fn>(fn)});
+            return AddContextSystemInternal<Wrapper>(Wrapper{std::forward<Fn>(fn)});
         }
         // Deduce Params from a non-const (mutable) operator().
         template<typename Fn, typename Ret, typename Class, typename... Params>
         ASTRA_NODISCARD Result<void, SystemError> AddParamSystemImpl(Fn&& fn, Ret(Class::*)(Params...))
         {
             using Wrapper = FunctionSystemWrapper<std::decay_t<Fn>, Params...>;
-            return AddParamSystemInternal<Wrapper>(Wrapper{std::forward<Fn>(fn)});
+            return AddContextSystemInternal<Wrapper>(Wrapper{std::forward<Fn>(fn)});
         }
         // Deduce Params from the free-function pointer type; build the NTTP wrapper.
         template<auto FnPtr, typename Ret, typename... Params>
         ASTRA_NODISCARD Result<void, SystemError> AddFreeFnParamSystemImpl(Ret(*)(Params...))
         {
             using Wrapper = FreeFunctionSystemWrapper<FnPtr, Params...>;
-            return AddParamSystemInternal<Wrapper>(Wrapper{});
+            return AddContextSystemInternal<Wrapper>(Wrapper{});
         }
 ```
 
-Add the internal next to `AddContextSystemInternal` (~line 1060). It is `AddContextSystemInternal` **plus** the `ExtractSystemTraits` line:
+**PF1 refactor (user-approved 2026-07-28) — the three near-duplicate registration bodies become one shared core + two thin factories.** Introduce `RegisterSystemImpl` (new private helper) and REWRITE the existing `AddSystemInternal` (currently ~:998-1050) and `AddContextSystemInternal` (currently ~:1052-1099) to delegate to it. No separate `AddParamSystemInternal` — the param overloads above call `AddContextSystemInternal`, which now harvests traits through the shared core (a no-op for trait-less raw context lambdas; active for param wrappers). Replace both existing internals with exactly:
 
 ```cpp
-        // Registers a param-system wrapper as a context system (it needs the
-        // per-worker CommandBuffer for its Commands param), harvesting its
-        // derived access via ExtractSystemTraits -- the one line the plain
-        // context-lambda internal omits (design §5.4).
-        template<typename Wrapper>
-        ASTRA_NODISCARD Result<void, SystemError> AddParamSystemInternal(Wrapper wrapper)
+        // Shared registration core (PF1): duplicate-key/allocation/metadata/
+        // trait-harvest/exclusive handling in ONE place. `makeEntry(instance,
+        // metadata)` is the only per-caller variation -- it builds the SystemEntry
+        // with the right execution delegate (execute vs executeContext). The
+        // `if constexpr HasSystemTraits_v` + RequiresExclusive scans are correct for
+        // ALL callers: a plain view-lambda wrapper / param wrapper HAS traits; a raw
+        // void(SystemContext&) closure has neither member, so both `if constexpr`
+        // arms are skipped -- byte-identical to the pre-refactor behavior.
+        template<typename SystemType, typename MakeEntry>
+        ASTRA_NODISCARD Result<void, SystemError> RegisterSystemImpl(SystemType system, MakeEntry makeEntry)
         {
+            // Uniform-graceful misuse policy (decision 2026-07-13): NO ASTRA_ASSERT
+            // here -- the Result channel below IS the contract.
             if (IsExecuting())
                 return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
 
-            const uint64_t typeId = TypeID<Wrapper>::Hash();
+            // Systems are keyed by TypeID::Hash() (64-bit). A collision would make a
+            // DISTINCT type look already-registered; astronomically unlikely, but it
+            // is a hash, not a dense unique id.
+            const uint64_t typeId = TypeID<SystemType>::Hash();
             if (m_systemIndices.Contains(typeId))
                 return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
 
-            Wrapper* instance = new (std::nothrow) Wrapper(std::move(wrapper));
+            SystemType* instance = new (std::nothrow) SystemType(std::move(system));
             if (!instance)
                 return Result<void, SystemError>::Err(SystemError::AllocationFailed);
 
@@ -841,21 +856,54 @@ Add the internal next to `AddContextSystemInternal` (~line 1060). It is `AddCont
                 .requiresExclusive = false,
                 .segmentIndex = m_currentSegment
             };
-            if constexpr (HasSystemTraits_v<Wrapper>)
-                ExtractSystemTraits<Wrapper>(metadata);
+            if constexpr (HasSystemTraits_v<SystemType>)
+                ExtractSystemTraits<SystemType>(metadata);
+            if constexpr (requires { SystemType::RequiresExclusive; })
+                metadata.requiresExclusive = SystemType::RequiresExclusive;
 
-            m_systems.emplace_back(SystemEntry
-            {
-                .instance = std::unique_ptr<void, void(*)(void*)>(instance,
-                    [](void* ptr) { delete static_cast<Wrapper*>(ptr); }),
-                .metadata = metadata,
-                .executeContext = [instance](SystemContext& ctx) { (*instance)(ctx); },
-            });
-
+            m_systems.emplace_back(makeEntry(instance, std::move(metadata)));
             m_needsRebuild = true;
             return Result<void, SystemError>::Ok();
         }
+
+        // void(Registry&) systems (traditional + view-lambda wrappers): execute delegate.
+        template<typename SystemType>
+        ASTRA_NODISCARD Result<void, SystemError> AddSystemInternal(SystemType system)
+        {
+            return RegisterSystemImpl<SystemType>(std::move(system),
+                [](SystemType* instance, SystemMetadata metadata)
+                {
+                    return SystemEntry
+                    {
+                        .instance = std::unique_ptr<void, void(*)(void*)>(instance,
+                            [](void* ptr) { delete static_cast<SystemType*>(ptr); }),
+                        .execute = [instance](Registry& reg) { (*instance)(reg); },
+                        .metadata = std::move(metadata)
+                    };
+                });
+        }
+
+        // void(SystemContext&) systems (raw context lambdas AND param wrappers):
+        // executeContext delegate. Trait harvest happens in RegisterSystemImpl --
+        // inert for a trait-less closure, active for a param wrapper.
+        template<typename SystemType>
+        ASTRA_NODISCARD Result<void, SystemError> AddContextSystemInternal(SystemType system)
+        {
+            return RegisterSystemImpl<SystemType>(std::move(system),
+                [](SystemType* instance, SystemMetadata metadata)
+                {
+                    return SystemEntry
+                    {
+                        .instance = std::unique_ptr<void, void(*)(void*)>(instance,
+                            [](void* ptr) { delete static_cast<SystemType*>(ptr); }),
+                        .metadata = std::move(metadata),
+                        .executeContext = [instance](SystemContext& ctx) { (*instance)(ctx); }
+                    };
+                });
+        }
 ```
+
+**Preservation note for the implementer:** the ONLY behavioral change is that `AddContextSystemInternal` now runs the `if constexpr (HasSystemTraits_v<SystemType>)` harvest — a no-op for the existing raw-context-lambda callers (closures expose no `ReadsComponents`/`HasTraits`), so existing `SystemContext.*` tests must stay green unchanged. Verify the SystemEntry designated-initializer field order matches the `SystemEntry` struct declaration (`instance, execute, metadata, executeContext`) — the context factory intentionally skips `execute` (defaulted) and must keep initializers in declaration order.
 
 - [ ] **Step 6: Run to verify it passes**
 
@@ -1014,6 +1062,6 @@ git commit -m "test(system-param): scheduling/disambiguation/collision/edge regr
 
 **Placeholder scan:** none — every step has complete code or an exact command.
 
-**Type consistency:** `SystemParamBinder<Params...>`, `FunctionSystemWrapper<Fn, Params...>`, `FreeFunctionSystemWrapper<auto FnPtr, Params...>`, `ParamAccess::{Reads,Writes,ResReads,ResWrites}`, `IsSystemParam_v`, `ParamFunctor`, `IsParamFreeFunction_v`, `AddParamSystemImpl`, `AddFreeFnParamSystemImpl`, `AddParamSystemInternal` — names are identical across all tasks and match the spec.
+**Type consistency:** `SystemParamBinder<Params...>`, `FunctionSystemWrapper<Fn, Params...>`, `FreeFunctionSystemWrapper<auto FnPtr, Params...>`, `ParamAccess::{Reads,Writes,ResReads,ResWrites}`, `IsSystemParam_v`, `ParamFunctor`, `IsParamFreeFunction_v`, `AddParamSystemImpl`, `AddFreeFnParamSystemImpl`, and (PF1) `RegisterSystemImpl` shared core with the param overloads reusing `AddContextSystemInternal` — names are identical across all tasks and match the spec.
 
 **Known risk (flagged in spec §9):** the `System.hpp` → `SystemParam.hpp` include order. Task 1 Step 1 verifies no cycle before any code is written; Task 5 Step 4 adds the include. If a cycle surfaces, the fallback is to hoist just the `ParamFunctor` concept (and its `Detail` deps) into a tiny `SystemParamFwd.hpp` that `System.hpp` includes, leaving the wrappers in `SystemParam.hpp`.
