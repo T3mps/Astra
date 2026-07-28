@@ -69,3 +69,35 @@ TEST(Inspector, SnapshotReportsArchetypesEntitiesAndColumns)
     EXPECT_EQ(pp->columns.size(), 1u);   // Position only; Player is empty/tag
     EXPECT_EQ(pp->componentCount, 2u);   // mask counts both
 }
+
+TEST(Inspector, ChunkColumnOffsetsAlignedAscendingWithinArena)
+{
+    Astra::Registry reg;
+    for (int i = 0; i < 100; ++i) (void)reg.CreateEntity<Position, Velocity>();
+
+    Astra::ArchetypeManager* mgr = reg.GetArchetypeManager();
+    ASSERT_NE(mgr, nullptr);
+    bool sawChunk = false;
+    for (Astra::Archetype* a : mgr->GetArchetypes())
+    {
+        if (!a || a->GetEntityCount() == 0) continue;
+        const Astra::ArchetypeColumnMeta& meta = a->GetColumnMeta();
+        for (const auto& chunk : a->GetChunks())
+        {
+            sawChunk = true;
+            size_t prevEnd = 0;
+            for (uint16_t c = 0; c < meta.columnCount; ++c)
+            {
+                const size_t off = chunk->GetColumnOffset(c);
+                EXPECT_EQ(off % Astra::CACHE_LINE_SIZE, 0u);   // cache-line aligned base
+                EXPECT_GE(off, prevEnd);                        // ascending, non-overlapping
+                if (c == 0) EXPECT_EQ(off, 0u);                 // first column at arena start
+                prevEnd = off + size_t(meta.columns[c].stride) * chunk->GetCapacity();
+                EXPECT_LE(prevEnd, chunk->GetChunkBytes());
+                // Position/Velocity are not enableable: sentinel expected.
+                EXPECT_EQ(chunk->GetDisabledWordsOffset(c), SIZE_MAX);
+            }
+        }
+    }
+    EXPECT_TRUE(sawChunk);
+}

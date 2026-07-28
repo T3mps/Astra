@@ -527,6 +527,26 @@ namespace Astra
         // share a single size (Phase 2), so memory accounting must sum this
         // per chunk instead of multiplying a chunk count by the pool's size.
         ASTRA_NODISCARD size_t GetChunkBytes() const noexcept { return m_chunkSize; }
+
+        // Debug/inspection accessors (Inspector facade): byte offsets within the
+        // chunk arena. Kept here so tools never re-derive InitializeColumns' layout.
+        ASTRA_NODISCARD size_t GetColumnOffset(uint16_t column) const
+        {
+            ASTRA_ASSERT(column < m_meta->columnCount, "Column ordinal out of bounds");
+            return static_cast<size_t>(static_cast<const std::byte*>(m_columns[column].base) -
+                                       static_cast<const std::byte*>(m_memory));
+        }
+
+        // Offset of the column's disabled-bit words, or size_t max if not enableable.
+        ASTRA_NODISCARD size_t GetDisabledWordsOffset(uint16_t column) const
+        {
+            ASTRA_ASSERT(column < m_meta->columnCount, "Column ordinal out of bounds");
+            const uint64_t* words = m_columns[column].disabledWords;
+            if (!words) return std::numeric_limits<size_t>::max();
+            return static_cast<size_t>(reinterpret_cast<const std::byte*>(words) -
+                                       static_cast<const std::byte*>(m_memory));
+        }
+
         ASTRA_NODISCARD bool IsEmpty() const noexcept { return m_count == 0; }
         ASTRA_NODISCARD size_t GetCount() const noexcept { return m_count; }
         ASTRA_NODISCARD size_t GetCapacity() const noexcept { return m_capacity; }
