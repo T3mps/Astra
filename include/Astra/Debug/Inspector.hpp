@@ -202,4 +202,56 @@ namespace Astra::Debug
         Capture(registry, snap);
         return snap;
     }
+
+    // Per-entity data for ONE chunk -- the panel's selected chunk only, so the
+    // per-frame cost is O(one chunk's capacity), never O(total entities).
+    struct ChunkDetail
+    {
+        std::vector<Entity> entities;                       // row -> Entity
+        std::vector<std::vector<uint64_t>> disabledWords;   // by column ordinal; empty = not enableable
+    };
+
+    // Same-thread, same-frame as Capture, so snapshot indices stay consistent.
+    // archetypeIndex counts non-null archetypes exactly as Capture does.
+    inline bool CaptureChunkDetail(Registry& registry, size_t archetypeIndex,
+                                   size_t chunkIndex, ChunkDetail& out)
+    {
+        out.entities.clear();
+        out.disabledWords.clear();
+
+        ArchetypeManager* manager = registry.GetArchetypeManager();
+        if (!manager)
+            return false;
+
+        Archetype* target = nullptr;
+        size_t index = 0;
+        for (Archetype* archetype : manager->GetArchetypes())
+        {
+            if (!archetype)
+                continue;
+            if (index++ == archetypeIndex) { target = archetype; break; }
+        }
+        if (!target)
+            return false;
+
+        const auto& chunks = target->GetChunks();
+        if (chunkIndex >= chunks.size())
+            return false;
+        const auto& chunk = chunks[chunkIndex];
+
+        out.entities = chunk->GetEntities();
+
+        const ArchetypeColumnMeta& meta = target->GetColumnMeta();
+        out.disabledWords.resize(meta.columnCount);
+        // ArchetypeChunk::WordsForCapacity is private; mirror its formula inline,
+        // matching the existing duplication in Capture() above.
+        const size_t words = (chunk->GetCapacity() + 63) / 64;
+        for (uint16_t e = 0; e < meta.enableableColumnCount; ++e)
+        {
+            const uint16_t c = meta.enableableColumns[e];
+            const uint64_t* w = chunk->GetDisabledWords(int(c));
+            if (w) out.disabledWords[c].assign(w, w + words);
+        }
+        return true;
+    }
 } // namespace Astra::Debug

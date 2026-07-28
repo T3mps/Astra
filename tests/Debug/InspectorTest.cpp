@@ -220,3 +220,70 @@ TEST(Inspector, ChunkAccountingWithEnableableColumns)
         EXPECT_EQ(ch.columnBytes + ch.padBytes + ch.bitsBytes + ch.slackBytes, ch.chunkBytes);
     }
 }
+
+TEST(Inspector, ChunkDetailEntitiesAndDisabledBits)
+{
+    Astra::Registry reg;
+    std::vector<Astra::Entity> es;
+    for (int i = 0; i < 100; ++i) es.push_back(reg.CreateEntity<Position, Timer>());
+    for (int i = 0; i < 100; i += 10) ASSERT_TRUE(reg.SetEnabled<Timer>(es[size_t(i)], false));
+
+    auto snap = Astra::Debug::Capture(reg);
+    const auto* at = FindBySignature(snap, "Timer");
+    ASSERT_NE(at, nullptr);
+    const size_t archIdx = size_t(at - snap.archetypes.data());
+
+    // Locate the Timer column ordinal by name.
+    size_t timerCol = SIZE_MAX;
+    for (size_t c = 0; c < at->columns.size(); ++c)
+        if (at->columns[c].name.find("Timer") != std::string::npos) timerCol = c;
+    ASSERT_NE(timerCol, SIZE_MAX);
+    EXPECT_TRUE(at->columns[timerCol].isEnableable);
+
+    size_t disabledTotal = 0, rowsSeen = 0;
+    Astra::Debug::ChunkDetail det;
+    for (size_t ci = 0; ci < at->chunks.size(); ++ci)
+    {
+        const auto& ch = at->chunks[ci];
+        EXPECT_NE(ch.columns[timerCol].disabledOffset, SIZE_MAX);
+        EXPECT_GT(ch.columns[timerCol].disabledBytes, 0u);
+
+        ASSERT_TRUE(Astra::Debug::CaptureChunkDetail(reg, archIdx, ci, det));
+        ASSERT_EQ(det.entities.size(), ch.count);
+        ASSERT_EQ(det.disabledWords.size(), ch.columns.size());
+        const auto& words = det.disabledWords[timerCol];
+        ASSERT_FALSE(words.empty());
+
+        size_t popcount = 0;
+        for (size_t r = 0; r < ch.count; ++r)
+        {
+            const bool bit = (words[r / 64] >> (r % 64)) & 1u;
+            if (bit) ++popcount;
+            // Bit state must agree with the Registry's own view of that entity.
+            EXPECT_EQ(reg.IsEnabled<Timer>(det.entities[r]), !bit);
+            ++rowsSeen;
+        }
+        EXPECT_EQ(popcount, size_t(ch.columns[timerCol].disabledCount));
+        disabledTotal += popcount;
+    }
+    EXPECT_EQ(rowsSeen, 100u);
+    EXPECT_EQ(disabledTotal, 10u);
+}
+
+TEST(Inspector, ChunkDetailRejectsStaleIndices)
+{
+    Astra::Registry reg;
+    for (int i = 0; i < 10; ++i) (void)reg.CreateEntity<Position>();
+    auto snap = Astra::Debug::Capture(reg);
+
+    Astra::Debug::ChunkDetail det;
+    EXPECT_FALSE(Astra::Debug::CaptureChunkDetail(reg, snap.archetypes.size() + 5, 0, det));
+    EXPECT_TRUE(det.entities.empty());
+
+    const auto* p = FindBySignature(snap, "Position");
+    ASSERT_NE(p, nullptr);
+    const size_t archIdx = size_t(p - snap.archetypes.data());
+    EXPECT_FALSE(Astra::Debug::CaptureChunkDetail(reg, archIdx, 999, det));
+    EXPECT_TRUE(Astra::Debug::CaptureChunkDetail(reg, archIdx, 0, det));
+    EXPECT_EQ(det.entities.size(), 10u);
+}
