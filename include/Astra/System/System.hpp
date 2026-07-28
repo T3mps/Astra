@@ -10,6 +10,7 @@
 #include "../Core/Base.hpp"
 #include "../Registry/Registry.hpp"
 #include "SystemContext.hpp"
+#include "SystemParam.hpp"
 
 namespace Astra
 {
@@ -109,7 +110,8 @@ namespace Astra
     {
         &T::operator();  // Has operator()
     } && !std::invocable<T, Registry&>    // But not a traditional system
-      && !ContextSystem<T>;               // ...and not a void(SystemContext&) context system
+      && !ContextSystem<T>                // ...and not a void(SystemContext&) context system
+      && !ParamFunctor<T>;                // ...and not a View/Res/ResMut/Commands param-function
 
     template<typename Lambda, typename... Args>
     class LambdaSystemWrapper

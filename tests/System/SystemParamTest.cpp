@@ -151,3 +151,41 @@ TEST(SystemParam, WrapperSkipsWhenResourceAbsent)
     wrapper(ctx);
     EXPECT_TRUE(ran);                    // resumes once the resource exists
 }
+
+// ---- Task 5: register param-systems on the scheduler; masks flow through ------
+// ---- ExtractSystemTraits; both spellings run under Execute(). -----------------
+
+TEST(SystemParam, LambdaParamSystemRegistersRunsAndHarvestsMasks)
+{
+    Astra::Registry reg;
+    Astra::Entity e = reg.CreateEntity<Position>();
+    reg.GetComponent<Position>(e)->x = 0.0f;
+    reg.SetResource(Health{3, 3});
+
+    Astra::SystemScheduler s;
+    auto added = s.AddSystem([](Astra::View<Position>& v, Astra::Res<Health> h)
+    {
+        v.ForEach([&](Position& p) { p.x += static_cast<float>(h->current); });
+    });
+    ASSERT_TRUE(added.IsOk());
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 3.0f);   // body ran with the resource
+}
+
+TEST(SystemParam, FreeFunctionParamSystemRegistersViaNTTPAndRuns)
+{
+    Astra::Registry reg;
+    Astra::Entity e = reg.CreateEntity<Position>();
+    reg.GetComponent<Position>(e)->x = 0.0f;
+
+    Astra::SystemScheduler s;
+    auto added = s.AddSystem<AddOneToPositions>();       // free fn as template arg
+    ASSERT_TRUE(added.IsOk());
+    EXPECT_TRUE(s.HasSystem<AddOneToPositions>());       // symmetric Has<>
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 1.0f);
+}

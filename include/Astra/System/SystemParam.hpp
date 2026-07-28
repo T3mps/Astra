@@ -111,7 +111,43 @@ namespace Astra
 
         template<typename P> struct ViewSlot { using type = std::monostate; };   // per-param cache slot
         template<typename... A> struct ViewSlot<View<A...>&> { using type = std::optional<View<A...>>; };
+
+        // ---- Callable-signature deduction for the registration concepts -----
+        template<typename> struct FnSignature;                                   // undefined base
+        template<typename R, typename C, typename... A>
+        struct FnSignature<R(C::*)(A...)>       { using Params = std::tuple<A...>; };
+        template<typename R, typename C, typename... A>
+        struct FnSignature<R(C::*)(A...) const> { using Params = std::tuple<A...>; };
+        template<typename R, typename... A>
+        struct FnSignature<R(*)(A...)>          { using Params = std::tuple<A...>; };
+
+        // Non-empty and every element is a SystemParam.
+        template<typename Tuple> struct AllParams : std::false_type {};
+        template<typename... A> struct AllParams<std::tuple<A...>>
+            : std::bool_constant<(sizeof...(A) > 0) && (IsSystemParam_v<A> && ...)> {};
+
+        // Functor whose operator() params are all SystemParams.
+        template<typename Fn, typename = void>
+        struct IsParamFunctor : std::false_type {};
+        template<typename Fn>
+        struct IsParamFunctor<Fn, std::void_t<decltype(&Fn::operator())>>
+            : AllParams<typename FnSignature<decltype(&Fn::operator())>::Params> {};
+        template<typename Fn> inline constexpr bool IsParamFunctor_v = IsParamFunctor<Fn>::value;
+
+        // Free-function pointer type whose params are all SystemParams. Only the
+        // R(*)(A...) partial specialization is truthy; anything else is false
+        // (no hard error on non-function types).
+        template<typename FnType> struct IsParamFreeFunction : std::false_type {};
+        template<typename R, typename... A>
+        struct IsParamFreeFunction<R(*)(A...)> : AllParams<std::tuple<A...>> {};
+        template<typename FnType> inline constexpr bool IsParamFreeFunction_v = IsParamFreeFunction<FnType>::value;
     }
+
+    // A callable whose operator() parameters are all SystemParams (View&/Res/
+    // ResMut/Commands), non-empty. Disjoint from ContextSystem (whose lone
+    // SystemContext& arg is not a SystemParam) and from view-lambdas.
+    template<typename T>
+    concept ParamFunctor = Detail::IsParamFunctor_v<std::decay_t<T>>;
 
     // Shared machinery for a parameter-function system (design §4.2). Task 3
     // added the harvested-access typedefs; this task adds Run/BuildParam and

@@ -194,6 +194,26 @@ namespace Astra
             return AddContextSystemInternal<SystemType>(SystemType(std::forward<Lambda>(lambda)));
         }
 
+        // Param-function system: a lambda/functor whose params are
+        // View<...>&/Res<T>/ResMut<T>/Commands. Access is derived from the
+        // params (design §5). Deduces the param pack off operator().
+        template<typename Fn>
+        requires ParamFunctor<Fn>
+        ASTRA_NODISCARD Result<void, SystemError> AddSystem(Fn&& fn)
+        {
+            return AddParamSystemImpl(std::forward<Fn>(fn), &std::decay_t<Fn>::operator());
+        }
+
+        // Param-function system registered as a free function (non-type template
+        // argument), so two same-signature free functions get distinct wrapper
+        // types. Deduces the param pack off decltype(FnPtr).
+        template<auto FnPtr>
+        requires Detail::IsParamFreeFunction_v<decltype(FnPtr)>
+        ASTRA_NODISCARD Result<void, SystemError> AddSystem()
+        {
+            return AddFreeFnParamSystemImpl<FnPtr>(FnPtr);
+        }
+
         // Insert a sync-point fence at the current end of the registration
         // sequence (Phase E). Systems registered after it are in a later segment
         // and never reorder/group across it; all deferred structural commands
@@ -264,6 +284,18 @@ namespace Astra
         ASTRA_NODISCARD bool HasSystem() const
         {
             return m_systemIndices.Contains(TypeID<T>::Hash());
+        }
+
+        // Symmetric with AddSystem<FnPtr>() (free-function param-system
+        // registration, task 5): FnPtr is a non-type template argument (a
+        // function, not a type), so it cannot go through the template<typename T>
+        // overload above. Reconstruct the identical FreeFunctionSystemWrapper via
+        // HasFreeFnParamSystemImpl and key-check it the same way.
+        template<auto FnPtr>
+        requires Detail::IsParamFreeFunction_v<decltype(FnPtr)>
+        ASTRA_NODISCARD bool HasSystem() const
+        {
+            return HasFreeFnParamSystemImpl<FnPtr>(FnPtr);
         }
 
         void Execute(Registry& registry)
@@ -995,26 +1027,65 @@ namespace Astra
             return AddSystemInternal<Wrapper>(Wrapper{std::forward<Lambda>(lambda)});
         }
 
-        template<typename SystemType>
-        ASTRA_NODISCARD Result<void, SystemError> AddSystemInternal(SystemType system)
+        // Deduce Params from a const operator() (the common lambda case).
+        // Param wrappers are context systems (they need the per-worker
+        // CommandBuffer for a Commands param), so they register through the
+        // refactored AddContextSystemInternal below -- which now harvests
+        // SystemTraits via the shared RegisterSystemImpl (a wrapper HAS traits;
+        // a raw context lambda does not, so it stays a no-op there). No separate
+        // param internal (PF1).
+        template<typename Fn, typename Ret, typename Class, typename... Params>
+        ASTRA_NODISCARD Result<void, SystemError> AddParamSystemImpl(Fn&& fn, Ret(Class::*)(Params...) const)
         {
-            // Uniform-graceful misuse policy (decision 2026-07-13): NO
-            // ASTRA_ASSERT here — the Result channel below IS the contract, so
-            // asserting-and-aborting on the same condition would make the error
-            // unreachable/untestable in Debug. Return the typed error instead.
+            using Wrapper = FunctionSystemWrapper<std::decay_t<Fn>, Params...>;
+            return AddContextSystemInternal<Wrapper>(Wrapper{std::forward<Fn>(fn)});
+        }
+        // Deduce Params from a non-const (mutable) operator().
+        template<typename Fn, typename Ret, typename Class, typename... Params>
+        ASTRA_NODISCARD Result<void, SystemError> AddParamSystemImpl(Fn&& fn, Ret(Class::*)(Params...))
+        {
+            using Wrapper = FunctionSystemWrapper<std::decay_t<Fn>, Params...>;
+            return AddContextSystemInternal<Wrapper>(Wrapper{std::forward<Fn>(fn)});
+        }
+        // Deduce Params from the free-function pointer type; build the NTTP wrapper.
+        template<auto FnPtr, typename Ret, typename... Params>
+        ASTRA_NODISCARD Result<void, SystemError> AddFreeFnParamSystemImpl(Ret(*)(Params...))
+        {
+            using Wrapper = FreeFunctionSystemWrapper<FnPtr, Params...>;
+            return AddContextSystemInternal<Wrapper>(Wrapper{});
+        }
+        // Symmetric with AddFreeFnParamSystemImpl above: reconstruct the same
+        // FreeFunctionSystemWrapper<FnPtr, Params...> type from decltype(FnPtr)
+        // to compute the identical TypeID::Hash() key for HasSystem<FnPtr>().
+        template<auto FnPtr, typename Ret, typename... Params>
+        ASTRA_NODISCARD bool HasFreeFnParamSystemImpl(Ret(*)(Params...)) const
+        {
+            using Wrapper = FreeFunctionSystemWrapper<FnPtr, Params...>;
+            return m_systemIndices.Contains(TypeID<Wrapper>::Hash());
+        }
+
+        // Shared registration core (PF1): duplicate-key/allocation/metadata/
+        // trait-harvest/exclusive handling in ONE place. `makeEntry(instance,
+        // metadata)` is the only per-caller variation -- it builds the SystemEntry
+        // with the right execution delegate (execute vs executeContext). The
+        // `if constexpr HasSystemTraits_v` + RequiresExclusive scans are correct for
+        // ALL callers: a plain view-lambda wrapper / param wrapper HAS traits; a raw
+        // void(SystemContext&) closure has neither member, so both `if constexpr`
+        // arms are skipped -- byte-identical to the pre-refactor behavior.
+        template<typename SystemType, typename MakeEntry>
+        ASTRA_NODISCARD Result<void, SystemError> RegisterSystemImpl(SystemType system, MakeEntry makeEntry)
+        {
+            // Uniform-graceful misuse policy (decision 2026-07-13): NO ASTRA_ASSERT
+            // here -- the Result channel below IS the contract.
             if (IsExecuting())
                 return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
 
-            // Systems are keyed by TypeID::Hash() (64-bit). A hash collision
-            // would make a DISTINCT type look already-registered and be dropped;
-            // astronomically unlikely, but it is a hash, not a dense unique id.
+            // Systems are keyed by TypeID::Hash() (64-bit). A collision would make a
+            // DISTINCT type look already-registered; astronomically unlikely, but it
+            // is a hash, not a dense unique id.
             const uint64_t typeId = TypeID<SystemType>::Hash();
             if (m_systemIndices.Contains(typeId))
-            {
-                // No ASTRA_ASSERT — duplicate registration is a handleable
-                // runtime error (uniform-graceful policy, decision 2026-07-13).
                 return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
-            }
 
             SystemType* instance = new (std::nothrow) SystemType(std::move(system));
             if (!instance)
@@ -1037,65 +1108,45 @@ namespace Astra
             if constexpr (requires { SystemType::RequiresExclusive; })
                 metadata.requiresExclusive = SystemType::RequiresExclusive;
 
-            m_systems.emplace_back(SystemEntry
-            {
-                .instance = std::unique_ptr<void, void(*)(void*)>(instance,
-                    [](void* ptr) { delete static_cast<SystemType*>(ptr); }),
-                .execute = [instance](Registry& reg) { (*instance)(reg); },
-                .metadata = metadata
-            });
-
+            m_systems.emplace_back(makeEntry(instance, std::move(metadata)));
             m_needsRebuild = true;
             return Result<void, SystemError>::Ok();
         }
 
-        // Registers a lambda-typed void(SystemContext&) system directly (no
-        // view/component-extraction wrapper -- unlike AddSystemInternal
-        // above, SystemType IS the thunk here). Mirrors AddSystemInternal's
-        // Result/uniqueness/allocation handling; SystemType is a raw lambda
-        // closure type, so it has no SystemTraits to scan (see the
-        // ContextSystem-lambda AddSystem overload for why that's fine: no
-        // traits => BuildExecutionPlan gives it a safe solo group).
+        // void(Registry&) systems (traditional + view-lambda wrappers): execute delegate.
+        template<typename SystemType>
+        ASTRA_NODISCARD Result<void, SystemError> AddSystemInternal(SystemType system)
+        {
+            return RegisterSystemImpl<SystemType>(std::move(system),
+                [](SystemType* instance, SystemMetadata metadata)
+                {
+                    return SystemEntry
+                    {
+                        .instance = std::unique_ptr<void, void(*)(void*)>(instance,
+                            [](void* ptr) { delete static_cast<SystemType*>(ptr); }),
+                        .execute = [instance](Registry& reg) { (*instance)(reg); },
+                        .metadata = std::move(metadata)
+                    };
+                });
+        }
+
+        // void(SystemContext&) systems (raw context lambdas AND param wrappers):
+        // executeContext delegate. Trait harvest happens in RegisterSystemImpl --
+        // inert for a trait-less closure, active for a param wrapper.
         template<typename SystemType>
         ASTRA_NODISCARD Result<void, SystemError> AddContextSystemInternal(SystemType system)
         {
-            // Uniform-graceful misuse policy (decision 2026-07-13): see
-            // AddSystemInternal above.
-            if (IsExecuting())
-                return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
-
-            // See AddSystemInternal above re: TypeID::Hash() collisions.
-            const uint64_t typeId = TypeID<SystemType>::Hash();
-            if (m_systemIndices.Contains(typeId))
-                return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
-
-            SystemType* instance = new (std::nothrow) SystemType(std::move(system));
-            if (!instance)
-                return Result<void, SystemError>::Err(SystemError::AllocationFailed);
-
-            const size_t index = m_systems.size();
-            m_systemIndices[typeId] = index;
-
-            SystemMetadata metadata
-            {
-                .reads = ComponentMask{},
-                .writes = ComponentMask{},
-                .typeId = static_cast<size_t>(typeId),
-                .insertionOrder = index,
-                .requiresExclusive = false,
-                .segmentIndex = m_currentSegment
-            };
-
-            m_systems.emplace_back(SystemEntry
-            {
-                .instance = std::unique_ptr<void, void(*)(void*)>(instance,
-                    [](void* ptr) { delete static_cast<SystemType*>(ptr); }),
-                .metadata = metadata,
-                .executeContext = [instance](SystemContext& ctx) { (*instance)(ctx); },
-            });
-
-            m_needsRebuild = true;
-            return Result<void, SystemError>::Ok();
+            return RegisterSystemImpl<SystemType>(std::move(system),
+                [](SystemType* instance, SystemMetadata metadata)
+                {
+                    return SystemEntry
+                    {
+                        .instance = std::unique_ptr<void, void(*)(void*)>(instance,
+                            [](void* ptr) { delete static_cast<SystemType*>(ptr); }),
+                        .metadata = std::move(metadata),
+                        .executeContext = [instance](SystemContext& ctx) { (*instance)(ctx); }
+                    };
+                });
         }
 
         std::vector<SystemEntry> m_systems;                             // All registered systems
