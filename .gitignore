@@ -30,6 +30,9 @@ Makefile
 .idea/
 cmake-build-*/
 
+# Brainstorming visual-companion sessions (mockups/state)
+.superpowers/
+
 # Compiled files
 *.o
 *.obj
