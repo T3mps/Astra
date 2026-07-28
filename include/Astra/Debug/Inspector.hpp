@@ -6,6 +6,7 @@
 // sanctioned place that walks ArchetypeManager/Archetype/ColumnMeta for
 // inspection; keep tool code out of engine internals.
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -23,10 +24,24 @@ namespace Astra::Debug
         bool isEnableable = false;
     };
 
+    // Physical placement of one storage column inside one chunk's arena.
+    struct ChunkColumnLayout
+    {
+        size_t offset = 0;                    // cache-line-aligned base offset
+        size_t bytes = 0;                     // stride * capacity
+        size_t disabledOffset = SIZE_MAX;     // disabled-bit words region, or SIZE_MAX
+        size_t disabledBytes = 0;
+        uint32_t disabledCount = 0;
+    };
+
     struct ChunkInfo
     {
         size_t count = 0;
         size_t capacity = 0;
+        size_t chunkBytes = 0;                       // arena size
+        std::vector<ChunkColumnLayout> columns;      // parallel to ArchetypeInfo::columns
+        // Accounting; invariant: the four sum exactly to chunkBytes.
+        size_t columnBytes = 0, padBytes = 0, bitsBytes = 0, slackBytes = 0;
     };
 
     struct ArchetypeInfo
@@ -38,8 +53,9 @@ namespace Astra::Debug
         std::vector<ChunkInfo> chunks;
         size_t entityCount = 0;
         size_t chunkCount = 0;
-        size_t bytesUsed = 0;               // layout-derived: sum(count * rowStride) per chunk
-        size_t bytesAllocated = 0;          // layout-derived: sum(capacity * rowStride) per chunk
+        size_t bytesUsed = 0;                // layout-derived (unchanged semantics)
+        size_t bytesAllocated = 0;           // layout-derived (unchanged semantics)
+        size_t bytesReserved = 0;            // true arena footprint: sum of chunkBytes
     };
 
     struct RegistrySnapshot
@@ -49,23 +65,29 @@ namespace Astra::Debug
         size_t chunkCount = 0;
         size_t bytesUsed = 0;
         size_t bytesAllocated = 0;
+        size_t bytesReserved = 0;
     };
 
     struct InspectorSnapshot
     {
         RegistrySnapshot registry;
         std::vector<ArchetypeInfo> archetypes;
+        size_t cacheLineBytes = 0;           // so panels never include engine internals
     };
 
-    // Read-only walk. Takes Registry& (not const) only because
-    // ArchetypeManager::GetArchetypes() is non-const today.
-    inline InspectorSnapshot Capture(Registry& registry)
+    // Capture-into: clears and refills `out`, retaining outer vector capacity.
+    // Runs every studio frame -- O(archetypes x columns + chunks) POD work only;
+    // per-entity copies live in CaptureChunkDetail (selected chunk only).
+    inline void Capture(Registry& registry, InspectorSnapshot& out)
     {
-        InspectorSnapshot snap;
+        out.registry = RegistrySnapshot{};
+        out.archetypes.clear();
+        out.cacheLineBytes = CACHE_LINE_SIZE;
+
         ArchetypeManager* manager = registry.GetArchetypeManager();
         const ComponentRegistry* components = registry.GetComponentRegistry();
         if (!manager || !components)
-            return snap;
+            return;
 
         for (Archetype* archetype : manager->GetArchetypes())
         {
@@ -122,18 +144,62 @@ namespace Astra::Debug
                 ChunkInfo ch;
                 ch.count = chunk->GetCount();
                 ch.capacity = chunk->GetCapacity();
+                ch.chunkBytes = chunk->GetChunkBytes();
+
+                // Columns first (ascending offsets), then their disabled-bit
+                // regions (carved after all columns, in enableable-ordinal order,
+                // which is also ascending) -- cursor walk yields pad as the gaps.
+                size_t cursor = 0;
+                ch.columns.reserve(meta.columnCount);
+                for (uint16_t c = 0; c < meta.columnCount; ++c)
+                {
+                    ChunkColumnLayout cl;
+                    cl.offset = chunk->GetColumnOffset(c);
+                    cl.bytes = size_t(meta.columns[c].stride) * ch.capacity;
+                    cl.disabledOffset = chunk->GetDisabledWordsOffset(c);
+                    if (cl.disabledOffset != SIZE_MAX)
+                    {
+                        // ArchetypeChunk::WordsForCapacity is private; mirror its formula
+                        // inline, matching the existing duplication in Archetype.hpp's
+                        // own capacity math (ComputeLayoutBytesForCapacity et al.).
+                        cl.disabledBytes = ((ch.capacity + 63) / 64) * 8;
+                        cl.disabledCount = chunk->GetDisabledCount(int(c));
+                    }
+                    ch.columnBytes += cl.bytes;
+                    ch.padBytes += cl.offset - cursor;
+                    cursor = cl.offset + cl.bytes;
+                    ch.columns.push_back(cl);
+                }
+                for (const ChunkColumnLayout& cl : ch.columns)
+                {
+                    if (cl.disabledOffset == SIZE_MAX)
+                        continue;
+                    ch.padBytes += cl.disabledOffset - cursor;
+                    ch.bitsBytes += cl.disabledBytes;
+                    cursor = cl.disabledOffset + cl.disabledBytes;
+                }
+                ch.slackBytes = ch.chunkBytes - cursor;
+
                 info.bytesUsed += ch.count * rowStride;
                 info.bytesAllocated += ch.capacity * rowStride;
-                info.chunks.push_back(ch);
+                info.bytesReserved += ch.chunkBytes;
+                info.chunks.push_back(std::move(ch));
             }
 
-            snap.registry.entityCount += info.entityCount;
-            snap.registry.chunkCount += info.chunkCount;
-            snap.registry.bytesUsed += info.bytesUsed;
-            snap.registry.bytesAllocated += info.bytesAllocated;
-            snap.archetypes.push_back(std::move(info));
+            out.registry.entityCount += info.entityCount;
+            out.registry.chunkCount += info.chunkCount;
+            out.registry.bytesUsed += info.bytesUsed;
+            out.registry.bytesAllocated += info.bytesAllocated;
+            out.registry.bytesReserved += info.bytesReserved;
+            out.archetypes.push_back(std::move(info));
         }
-        snap.registry.archetypeCount = snap.archetypes.size();
+        out.registry.archetypeCount = out.archetypes.size();
+    }
+
+    ASTRA_NODISCARD inline InspectorSnapshot Capture(Registry& registry)
+    {
+        InspectorSnapshot snap;
+        Capture(registry, snap);
         return snap;
     }
 } // namespace Astra::Debug

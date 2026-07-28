@@ -101,3 +101,68 @@ TEST(Inspector, ChunkColumnOffsetsAlignedAscendingWithinArena)
     }
     EXPECT_TRUE(sawChunk);
 }
+
+TEST(Inspector, ChunkAccountingSumsToChunkBytes)
+{
+    Astra::Registry reg;
+    for (int i = 0; i < 100; ++i) (void)reg.CreateEntity<Position, Velocity>();
+
+    auto snap = Astra::Debug::Capture(reg);
+    EXPECT_EQ(snap.cacheLineBytes, Astra::CACHE_LINE_SIZE);
+
+    const auto* pv = FindBySignature(snap, "Velocity");
+    ASSERT_NE(pv, nullptr);
+    EXPECT_GT(pv->bytesReserved, 0u);
+    EXPECT_GE(pv->bytesReserved, pv->bytesAllocated);   // arena >= layout-derived
+
+    size_t reserved = 0;
+    for (const auto& a : snap.archetypes) reserved += a.bytesReserved;
+    EXPECT_EQ(snap.registry.bytesReserved, reserved);
+
+    for (const auto& ch : pv->chunks)
+    {
+        ASSERT_EQ(ch.columns.size(), pv->columns.size());   // parallel arrays
+        EXPECT_GT(ch.chunkBytes, 0u);
+        size_t prevEnd = 0, cols = 0;
+        for (size_t c = 0; c < ch.columns.size(); ++c)
+        {
+            const auto& cl = ch.columns[c];
+            EXPECT_EQ(cl.offset % snap.cacheLineBytes, 0u);
+            EXPECT_GE(cl.offset, prevEnd);
+            EXPECT_EQ(cl.bytes, size_t(pv->columns[c].stride) * ch.capacity);
+            EXPECT_EQ(cl.disabledOffset, SIZE_MAX);          // not enableable
+            EXPECT_EQ(cl.disabledBytes, 0u);
+            EXPECT_EQ(cl.disabledCount, 0u);
+            prevEnd = cl.offset + cl.bytes;
+            cols += cl.bytes;
+        }
+        EXPECT_EQ(ch.columnBytes, cols);
+        EXPECT_EQ(ch.bitsBytes, 0u);
+        EXPECT_EQ(ch.columnBytes + ch.padBytes + ch.bitsBytes + ch.slackBytes, ch.chunkBytes);
+    }
+}
+
+TEST(Inspector, CaptureIntoMatchesByValueAndRefills)
+{
+    Astra::Registry reg;
+    for (int i = 0; i < 50; ++i) (void)reg.CreateEntity<Position, Velocity>();
+
+    Astra::Debug::InspectorSnapshot byValue = Astra::Debug::Capture(reg);
+    Astra::Debug::InspectorSnapshot into;
+    Astra::Debug::Capture(reg, into);
+
+    EXPECT_EQ(into.registry.entityCount, byValue.registry.entityCount);
+    EXPECT_EQ(into.registry.bytesReserved, byValue.registry.bytesReserved);
+    ASSERT_EQ(into.archetypes.size(), byValue.archetypes.size());
+    for (size_t i = 0; i < into.archetypes.size(); ++i)
+    {
+        EXPECT_EQ(into.archetypes[i].signature, byValue.archetypes[i].signature);
+        EXPECT_EQ(into.archetypes[i].entityCount, byValue.archetypes[i].entityCount);
+        EXPECT_EQ(into.archetypes[i].chunks.size(), byValue.archetypes[i].chunks.size());
+    }
+
+    // Refill the same object after mutation: results track the registry, no stale rows.
+    for (int i = 0; i < 50; ++i) (void)reg.CreateEntity<Position>();
+    Astra::Debug::Capture(reg, into);
+    EXPECT_EQ(into.registry.entityCount, 100u);
+}
