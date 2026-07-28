@@ -189,3 +189,96 @@ TEST(SystemParam, FreeFunctionParamSystemRegistersViaNTTPAndRuns)
     s.Execute(reg, &exec);
     EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 1.0f);
 }
+
+// ---- Task 6: derived access drives grouping; disambiguation intact; free-fn ---
+// ---- NTTP collision-free; multi-view / no-view / skip-under-scheduler. --------
+
+namespace
+{
+    inline void MovePlayers(Astra::View<Position>& v) { v.ForEach([](Position& p){ p.x += 1.0f; }); }
+    inline void MoveEnemies(Astra::View<Position>& v) { v.ForEach([](Position& p){ p.x += 1.0f; }); }  // same signature as MovePlayers
+    inline void ReadsHealthRes(Astra::Res<Health>)        {}   // resource reader
+    inline void WritesHealthRes(Astra::ResMut<Health>)    {}   // resource writer (conflicts with reader)
+}
+
+TEST(SystemParam, DisjointParamSystemsShareAGroupConflictingOnesDoNot)
+{
+    // Two systems touching different resources -> same parallel group.
+    Astra::SystemScheduler s1;
+    ASSERT_TRUE(s1.AddSystem<ReadsHealthRes>().IsOk());
+    ASSERT_TRUE(s1.AddSystem([](Astra::Res<Physics>){}).IsOk());   // different resource
+    const auto& plan1 = s1.GetExecutionPlan();
+    ASSERT_EQ(plan1.size(), 1u);
+    EXPECT_EQ(plan1[0].size(), 2u);                                 // grouped together
+
+    // A resource reader + writer of the SAME resource -> serialized (2 groups).
+    Astra::SystemScheduler s2;
+    ASSERT_TRUE(s2.AddSystem<ReadsHealthRes>().IsOk());
+    ASSERT_TRUE(s2.AddSystem<WritesHealthRes>().IsOk());
+    const auto& plan2 = s2.GetExecutionPlan();
+    EXPECT_EQ(plan2.size(), 2u);                                    // separate groups
+}
+
+TEST(SystemParam, TwoSameSignatureFreeFunctionsBothRegisterAndRun)
+{
+    Astra::Registry reg;
+    Astra::Entity e = reg.CreateEntity<Position>();
+    reg.GetComponent<Position>(e)->x = 0.0f;
+
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<MovePlayers>().IsOk());
+    ASSERT_TRUE(s.AddSystem<MoveEnemies>().IsOk());   // MUST NOT be AlreadyRegistered
+    EXPECT_EQ(s.Size(), 2u);
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 2.0f);   // both ran
+
+    s.RemoveSystem<MovePlayers>();
+    EXPECT_FALSE(s.HasSystem<MovePlayers>());
+    EXPECT_TRUE(s.HasSystem<MoveEnemies>());
+}
+
+TEST(SystemParam, DisambiguationViewLambdaAndContextLambdaStillRoute)
+{
+    // A view-lambda, a context lambda, and a param-system coexist and each runs.
+    Astra::Registry reg;
+    Astra::Entity e = reg.CreateEntity<Position>();
+    reg.GetComponent<Position>(e)->x = 0.0f;
+
+    Astra::SystemScheduler s;
+    int viewRuns = 0, ctxRuns = 0;
+    ASSERT_TRUE(s.AddSystem([&](Astra::Entity, Position& p){ p.x += 1.0f; ++viewRuns; }).IsOk());   // view-lambda
+    ASSERT_TRUE(s.AddSystem([&](Astra::SystemContext&){ ++ctxRuns; }).IsOk());                       // context lambda
+    ASSERT_TRUE(s.AddSystem([](Astra::View<Position>& v){ v.ForEach([](Position& p){ p.x += 10.0f; }); }).IsOk()); // param-system
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+    EXPECT_EQ(viewRuns, 1);
+    EXPECT_EQ(ctxRuns, 1);
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 11.0f);   // view-lambda +1, param-system +10
+}
+
+TEST(SystemParam, MultiViewAndNoViewSystemsCompileAndRun)
+{
+    Astra::Registry reg;
+    Astra::Entity a = reg.CreateEntity<Position>();
+    Astra::Entity b = reg.CreateEntity<Velocity>();
+    reg.SetResource(Health{0, 0});
+
+    Astra::SystemScheduler s;
+    // Two views in one system.
+    ASSERT_TRUE(s.AddSystem([](Astra::View<Position>& vp, Astra::View<Velocity>& vv)
+    {
+        vp.ForEach([](Position& p){ p.x += 1.0f; });
+        vv.ForEach([](Velocity& v){ v.dx += 1.0f; });
+    }).IsOk());
+    // No view at all: pure resource + commands.
+    ASSERT_TRUE(s.AddSystem([](Astra::ResMut<Health> h, Astra::Commands){ h->current += 5; }).IsOk());
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(a)->x, 1.0f);
+    EXPECT_FLOAT_EQ(reg.GetComponent<Velocity>(b)->dx, 1.0f);
+    EXPECT_EQ(reg.GetResource<Health>()->current, 5);
+}

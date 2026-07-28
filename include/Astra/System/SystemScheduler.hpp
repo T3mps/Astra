@@ -276,7 +276,23 @@ namespace Astra
 
             m_needsRebuild = true;
         }
-        
+
+        // Symmetric with AddSystem<FnPtr>() / HasSystem<FnPtr>() (free-function
+        // param-system registration, task 5): FnPtr is a non-type template
+        // argument (a function, not a type), so it cannot go through the
+        // template<typename T> overload above. Reconstruct the identical
+        // FreeFunctionSystemWrapper via RemoveFreeFnParamSystemImpl and erase it
+        // by that key, using the exact same erase/reindex logic as the
+        // type-based RemoveSystem<T>() above (including the same "no assert,
+        // graceful no-op mid-Execute" policy).
+        template<auto FnPtr>
+        requires Detail::IsParamFreeFunction_v<decltype(FnPtr)>
+        void RemoveSystem()
+        {
+            if (IsExecuting()) return;
+            RemoveFreeFnParamSystemImpl<FnPtr>(FnPtr);
+        }
+
         // IM-25: see RemoveSystem above -- relaxed to accept a context system
         // (invocable only with SystemContext&) so add/remove/has are symmetric.
         template<typename T>
@@ -1062,6 +1078,41 @@ namespace Astra
         {
             using Wrapper = FreeFunctionSystemWrapper<FnPtr, Params...>;
             return m_systemIndices.Contains(TypeID<Wrapper>::Hash());
+        }
+        // Symmetric with HasFreeFnParamSystemImpl above: reconstruct the same
+        // FreeFunctionSystemWrapper<FnPtr, Params...> type from decltype(FnPtr)
+        // to compute the identical TypeID::Hash() key, then erase it using the
+        // exact same erase/reindex logic as the type-based RemoveSystem<T>()
+        // (public section above): drop the entry, drop the index, shift every
+        // later index down by one, and re-stamp insertionOrder so it stays
+        // consistent with vector position (metadata is exposed via
+        // SystemExecutionContext). Caller (RemoveSystem<FnPtr>()) already
+        // guarded IsExecuting().
+        template<auto FnPtr, typename Ret, typename... Params>
+        void RemoveFreeFnParamSystemImpl(Ret(*)(Params...))
+        {
+            using Wrapper = FreeFunctionSystemWrapper<FnPtr, Params...>;
+            uint64_t typeId = TypeID<Wrapper>::Hash();
+            auto it = m_systemIndices.Find(typeId);
+            if (it == m_systemIndices.end())
+                return;
+
+            size_t index = it->second;
+            m_systems.erase(m_systems.begin() + index);
+            m_systemIndices.Erase(it);
+
+            for (auto& [tid, idx] : m_systemIndices)
+            {
+                if (idx > index)
+                {
+                    --idx;
+                }
+            }
+
+            for (size_t idx = 0; idx < m_systems.size(); ++idx)
+                m_systems[idx].metadata.insertionOrder = idx;
+
+            m_needsRebuild = true;
         }
 
         // Shared registration core (PF1): duplicate-key/allocation/metadata/
