@@ -34,6 +34,9 @@ namespace Studio
                 case Preset::Fighters:
                     e = m_registry.CreateEntityWith(
                         Position{frand(), frand(), 0}, Velocity{-1, 2, 0}, Health{});
+                    // ~8% disabled so the Memory panel's bit layers show real data.
+                    if (e.IsValid() && (i % 13) == 0)
+                        (void)m_registry.SetEnabled<Health>(e, false);
                     break;
                 default:
                     e = m_registry.CreateEntityWith(

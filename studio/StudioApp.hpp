@@ -11,6 +11,7 @@
 
 #include "Components.hpp"
 #include "WorkloadRunner.hpp"
+#include "MemoryPanel.hpp"
 
 namespace Studio
 {
@@ -31,6 +32,7 @@ namespace Studio
             DrawWorkloadPanel();
             DrawRegistryPanel();
             DrawArchetypesPanel();
+            m_memoryPanel.Draw(m_snapshot, m_selectedArchetype, m_registry);
         }
 
     protected:
@@ -185,6 +187,7 @@ namespace Studio
 
         Astra::Registry m_registry;
         WorkloadRunner m_runner{m_registry};
+        MemoryPanel m_memoryPanel;
         Astra::Debug::InspectorSnapshot m_snapshot;
         int m_selectedArchetype = -1;
         int m_presetIndex = int(Preset::Mixed);
