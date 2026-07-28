@@ -112,4 +112,20 @@ namespace Astra
         template<typename P> struct ViewSlot { using type = std::monostate; };   // per-param cache slot
         template<typename... A> struct ViewSlot<View<A...>&> { using type = std::optional<View<A...>>; };
     }
+
+    // Shared machinery for a parameter-function system (design §4.2). This task
+    // adds only the harvested-access typedefs; Task 4 adds Run/BuildParam and
+    // the per-View cache. The typedefs make HasSystemTraits_v<Wrapper> true so
+    // the existing ExtractSystemTraits fills the scheduler's masks unchanged.
+    template<typename... Params>
+    class SystemParamBinder
+    {
+    public:
+        using ReadsComponents     = decltype(std::tuple_cat(std::declval<typename Detail::ParamAccess<Params>::Reads>()...));
+        using WritesComponents    = decltype(std::tuple_cat(std::declval<typename Detail::ParamAccess<Params>::Writes>()...));
+        using ReadsResourceTypes  = decltype(std::tuple_cat(std::declval<typename Detail::ParamAccess<Params>::ResReads>()...));
+        using WritesResourceTypes = decltype(std::tuple_cat(std::declval<typename Detail::ParamAccess<Params>::ResWrites>()...));
+        static constexpr bool HasTraits = true;
+        static constexpr bool RequiresExclusive = false;
+    };
 }

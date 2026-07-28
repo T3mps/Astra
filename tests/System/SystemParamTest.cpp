@@ -58,3 +58,25 @@ TEST(SystemParam, ParamAccessClassifiesComponentsAndResources)
     EXPECT_FALSE((Astra::Detail::IsSystemParam_v<Position>));            // bare component: NOT a param
     EXPECT_FALSE((Astra::Detail::IsSystemParam_v<Astra::View<Position>>)); // by-value View: NOT a param (must be &)
 }
+
+// ---- Task 3: SystemParamBinder unions each parameter's access into the -------
+// ---- typedefs ExtractSystemTraits harvests. ----------------------------------
+
+TEST(SystemParam, BinderHarvestsUnionedAccess)
+{
+    using Binder = Astra::SystemParamBinder<
+        Astra::View<Position, const Velocity>&,   // write Position, read Velocity
+        Astra::Res<Health>,                        // read resource Health
+        Astra::ResMut<Physics>,                    // write resource Physics
+        Astra::Commands>;                          // nothing
+
+    EXPECT_TRUE((std::is_same_v<Binder::WritesComponents,    std::tuple<Position>>));
+    EXPECT_TRUE((std::is_same_v<Binder::ReadsComponents,     std::tuple<Velocity>>));
+    EXPECT_TRUE((std::is_same_v<Binder::ReadsResourceTypes,  std::tuple<Health>>));
+    EXPECT_TRUE((std::is_same_v<Binder::WritesResourceTypes, std::tuple<Physics>>));
+    EXPECT_TRUE(Binder::HasTraits);
+    EXPECT_FALSE(Binder::RequiresExclusive);
+
+    // The binder must satisfy the trait-detection gate the scheduler uses.
+    EXPECT_TRUE((Astra::HasSystemTraits_v<Binder>));
+}
