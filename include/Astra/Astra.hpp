@@ -59,6 +59,7 @@
 #include "System/SystemContext.hpp"
 #include "System/SystemExecutor.hpp"
 #include "System/SystemMetadata.hpp"
+#include "System/SystemParam.hpp"
 #include "System/SystemScheduler.hpp"
 
 // Serialization
