@@ -282,6 +282,171 @@ TEST(LoadRobustness, EntityMapChunkIndexOutOfRangeIsRejected)
     EXPECT_FALSE(ok);   // must fail cleanly -- no OOB store, no crash
 }
 
+// ArchetypeManager::Deserialize's entity-to-archetype-map loop (2026-07-27
+// review P0) used to pass the raw wire entity id straight to
+// EntityTable::GetOrCreateRecord -- a CREATING accessor -- even though the
+// loop's own comment states segments already exist by this point (EntityManager
+// restored versions first). A crafted mapping id far outside anything
+// EntityManager actually restored drives GetOrCreateSegment's
+// `m_segmentIndex.resize(segIdx + 1, ...)` with an attacker-controlled segIdx:
+// bounded-but-real memory amplification (and a silently-successful load on
+// corrupt data) on the default 32-bit-id build, and an unbounded resize ->
+// uncaught std::bad_alloc (process termination, since Astra builds with
+// exceptions off) on 64-bit-id builds. The fix (spec §2) swaps in the
+// existing non-creating, allocation-free EntityTable::GetRecord and rejects
+// the load when it returns null.
+//
+// Rationale for how this is built: same self-contained-wire-format reasoning
+// as EntityMapChunkIndexOutOfRangeIsRejected directly above -- a minimal
+// single-archetype (root/empty mask), single-chunk, single-entity buffer,
+// hand-built with BinaryWriter mirroring ArchetypeManager::Serialize's field
+// order. archetypeIndex/chunkIndex/entityIndex are all left VALID here (unlike
+// the sibling test) so control reaches the entity-id guard under test; only
+// the mapping row's entity id is corrupted, to Entity::ID_MASK -- the largest
+// id GetID() can ever yield (id is masked to ID_MASK bits by the Entity
+// constructor, so this is "huge" in the sense of "maximum representable", not
+// merely large) -- against a freshly-constructed EntityTable that has never
+// created any segment. segIdx for that id is far beyond the empty table's
+// zero-length segment index, so GetRecord's bounds-checked GetSegment must
+// return null and reject the load; GetOrCreateRecord would instead resize and
+// allocate a segment for it and let the load "succeed" on corrupt input.
+TEST(LoadRobustness, EntityMapHugeEntityIdIsRejected)
+{
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+
+        writer(static_cast<uint32_t>(1));   // archetypeCount = 1 (root only)
+        writer(static_cast<uint32_t>(1));   // entityCount = 1
+
+        // Archetype record 0: the root archetype (empty mask), one chunk,
+        // one entity, no components.
+        writer(static_cast<uint32_t>(0));   // archetype index
+
+        Astra::ComponentMask mask;          // default-constructed -> all-zero (empty) mask
+        for (size_t i = 0; i < Astra::ComponentMask::WORD_COUNT; ++i)
+        {
+            writer(mask.Data()[i]);
+        }
+
+        writer(static_cast<uint64_t>(1));   // archetype entityCount
+        writer(static_cast<uint64_t>(4));   // entitiesPerChunk (real chunk capacity)
+        writer(static_cast<uint32_t>(1));   // chunkCount = 1
+
+        writer(static_cast<uint32_t>(0));   // descriptorCount = 0 (no components)
+
+        // Chunk 0: one entity, no component arrays to follow (descriptorCount == 0).
+        writer(static_cast<uint32_t>(1));   // chunkEntityCount
+        writer(Astra::Entity(1, 1));        // entities[0]
+
+        // Trailing per-archetype entity count (ArchetypeManager::Serialize
+        // writes this immediately after Archetype::Serialize returns).
+        writer(static_cast<uint64_t>(1));
+
+        // Entity-to-archetype mapping: valid archetypeIndex/chunkIndex/entityIndex
+        // (0,0,0) -- unlike the sibling test above, those all pass their guards
+        // here so control actually reaches the entity-id guard under test --
+        // but the mapping entity's id is corrupted to Entity::ID_MASK, the
+        // largest id value GetID() can ever produce.
+        writer(Astra::Entity(Astra::Entity::ID_MASK, 1));   // entity -- corrupted id
+        writer(static_cast<uint32_t>(0));                    // archetypeIndex - valid
+        writer(static_cast<uint32_t>(0));                    // chunkIndex - valid
+        writer(static_cast<uint32_t>(0));                    // entityIndex - valid
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    // Fresh table: no segment has ever been created, so ANY id's segIdx is
+    // out of range of the (empty) segment index -- GetRecord must return null.
+    Astra::EntityTable table;
+    Astra::ArchetypeManager manager(cr, Astra::ArchetypeChunkPool::Config{}, &table);
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    const bool ok = manager.Deserialize(reader);
+    EXPECT_FALSE(ok);   // must fail cleanly -- no segment-index resize, no silent success
+}
+
+// Same guard as EntityMapHugeEntityIdIsRejected, but for a mapping id whose
+// segment DOES exist (so GetRecord's segment lookup alone would not catch
+// it) yet whose slot was never restored as alive -- i.e. version == 0
+// (EntityTable::NULL_VERSION, the dead/empty marker). This is the "mapping
+// references an entity EntityManager never restored" half of the guard the
+// spec calls out (§2's "aliveness cross-check"): a null segment isn't the
+// only way a mapping id can be bogus, a dead slot within an otherwise-real
+// segment is another, and the version-based half of the predicate is what
+// catches it. On current code, GetOrCreateRecord happily returns that dead
+// slot's pointer (segment already exists) and SetRecordLocation writes an
+// archetype/location into it -- WITHOUT ever touching rec->version (see the
+// "NEVER assign rec->version" convention at every other GetOrCreateRecord call
+// site in this file) -- so the entity ends up "located" while still formally
+// dead: the load silently succeeds on corrupt data instead of being rejected.
+//
+// Rationale for how this is built: same minimal hand-built
+// ArchetypeManager::Deserialize buffer as EntityMapHugeEntityIdIsRejected.
+// The EntityTable is pre-populated with EntityTable::SetVersion for entity id
+// 0 first, which forces GetOrCreateSegment to create the segment covering ids
+// [0, entitiesPerSegment) (1024 by default) -- id 5 falls in that same
+// segment but its slot's version was never touched, so it is still 0 (dead).
+// The mapping row then targets id 5 with a non-zero wire version (1), so
+// there is no ambiguity between "id 5's version legitimately restored as 0"
+// (which can't happen -- 0 is never a live version) and "id 5's slot is dead".
+TEST(LoadRobustness, EntityMapDeadEntityIdIsRejected)
+{
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+
+    std::vector<std::byte> buf;
+    {
+        Astra::BinaryWriter writer(buf);
+
+        writer(static_cast<uint32_t>(1));   // archetypeCount = 1 (root only)
+        writer(static_cast<uint32_t>(1));   // entityCount = 1
+
+        writer(static_cast<uint32_t>(0));   // archetype index
+
+        Astra::ComponentMask mask;
+        for (size_t i = 0; i < Astra::ComponentMask::WORD_COUNT; ++i)
+        {
+            writer(mask.Data()[i]);
+        }
+
+        writer(static_cast<uint64_t>(1));   // archetype entityCount
+        writer(static_cast<uint64_t>(4));   // entitiesPerChunk (real chunk capacity)
+        writer(static_cast<uint32_t>(1));   // chunkCount = 1
+
+        writer(static_cast<uint32_t>(0));   // descriptorCount = 0 (no components)
+
+        writer(static_cast<uint32_t>(1));   // chunkEntityCount
+        writer(Astra::Entity(1, 1));        // entities[0]
+
+        writer(static_cast<uint64_t>(1));   // trailing per-archetype entity count
+
+        // Entity-to-archetype mapping: valid archetypeIndex/chunkIndex/entityIndex,
+        // but the mapping's entity id (5) is a slot within a real, already-
+        // created segment (see the table setup below) whose version was never
+        // restored -- it is still EntityTable::NULL_VERSION (dead).
+        writer(Astra::Entity(5, 1));        // entity -- id 5, wire version 1
+        writer(static_cast<uint32_t>(0));   // archetypeIndex - valid
+        writer(static_cast<uint32_t>(0));   // chunkIndex - valid
+        writer(static_cast<uint32_t>(0));   // entityIndex - valid
+
+        ASSERT_FALSE(writer.HasError());
+    }
+
+    // Force segment creation for the range containing id 5 by giving a
+    // DIFFERENT id (0) in the same segment a real version first. Id 5's own
+    // slot is left untouched -- still version 0 (dead) -- even though its
+    // segment now exists.
+    Astra::EntityTable table;
+    table.SetVersion(static_cast<Astra::EntityTable::IDType>(0), static_cast<Astra::EntityTable::VersionType>(1));
+    ASSERT_EQ(table.GetVersion(static_cast<Astra::EntityTable::IDType>(5)), 0u);   // id 5's slot is dead, not out of range
+
+    Astra::ArchetypeManager manager(cr, Astra::ArchetypeChunkPool::Config{}, &table);
+    Astra::BinaryReader reader{std::span<const std::byte>(buf)};
+    const bool ok = manager.Deserialize(reader);
+    EXPECT_FALSE(ok);   // must fail cleanly -- dead slot must not be given a location
+}
+
 // EntityManager::Deserialize must not let a corrupted recycledCount drive a
 // multi-GB std::vector::reserve.
 //

@@ -1027,9 +1027,17 @@ namespace Astra
                     entityIndex >= arch->GetChunkEntityCount(chunkIndex))
                     return false;
 
-                // Segments already exist (EntityManager restored versions first).
-                // Write archetype/location only; never touch rec->version.
-                EntityRecord* rec = m_records->GetOrCreateRecord(entity.GetID());
+                // Wire entity ids are untrusted. EntityManager::Deserialize restored every
+                // live entity's segment+version BEFORE this runs (see the invariant note
+                // above), so a legitimate mapping's record must already exist AND carry the
+                // same version. GetRecord is non-creating and allocation-free for ANY id --
+                // GetSegment bounds-checks segIdx against the existing segment index
+                // (EntityTable.hpp:563) -- so a crafted huge id (the 64-bit unbounded-resize
+                // DoS) and a mapping to a dead/never-restored entity both fail the load
+                // instead of allocating or silently corrupting (2026-07-27 review P0).
+                EntityRecord* rec = m_records->GetRecord(entity.GetID());
+                if (!rec || rec->version == 0 || rec->version != entity.GetVersion())
+                    return false;
                 SetRecordLocation(rec, arch, EntityLocation::Create(chunkIndex, entityIndex));
             }
             
