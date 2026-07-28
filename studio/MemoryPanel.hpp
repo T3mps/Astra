@@ -270,9 +270,151 @@ namespace Studio
                     ImGui::SetTooltip("byte %zu | %s", byte, what);
             }
         }
-        void DrawBytes(const Astra::Debug::ArchetypeInfo&, const Astra::Debug::ChunkInfo&)
+
+        void DrawBytes(const Astra::Debug::ArchetypeInfo& a, const Astra::Debug::ChunkInfo& ch)
         {
-            ImGui::TextDisabled("Bytes view: Task 6");
+            const size_t lineB = 64;   // snapshot cacheLineBytes is fixed 64 on x64; grid math local
+            const float pitch = m_zoom + 2.0f;
+            const size_t lines = (ch.chunkBytes + lineB - 1) / lineB;
+            const size_t rows = (lines + kLinesPerRow - 1) / kLinesPerRow;
+
+            ImGui::BeginChild("bytes", ImVec2(0, 0), ImGuiChildFlags_None,
+                              ImGuiWindowFlags_HorizontalScrollbar);
+            if (m_scrollRequest >= 0.0f) { ImGui::SetScrollY(m_scrollRequest); m_scrollRequest = -1.0f; }
+            if (m_overviewDragByte >= 0)
+            {
+                const size_t row = size_t(m_overviewDragByte) / lineB / kLinesPerRow;
+                m_scrollRequest = std::max(0.0f, float(row) * pitch - ImGui::GetWindowHeight() * 0.5f);
+                m_overviewDragByte = -1;
+            }
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(float(kLinesPerRow) * pitch, float(rows) * pitch));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            const float scrollY = ImGui::GetScrollY();
+            const float viewH = ImGui::GetWindowHeight();
+            const size_t rowFirst = size_t(std::max(0.0f, scrollY / pitch));
+            const size_t rowLast = std::min(rows, size_t((scrollY + viewH) / pitch) + 1);
+            m_visibleByteBegin = rowFirst * size_t(kLinesPerRow) * lineB;
+            m_visibleByteEnd = std::min(ch.chunkBytes, rowLast * size_t(kLinesPerRow) * lineB);
+
+            // Probe cache lines (one per column) for outline pass.
+            size_t probeLines[8] = {};
+            size_t probeLineCount = 0;
+            if (m_probe >= 0)
+                for (size_t c = 0; c < ch.columns.size() && probeLineCount < 8; ++c)
+                    probeLines[probeLineCount++] =
+                        (ch.columns[c].offset + size_t(m_probe) * a.columns[c].stride) / lineB;
+
+            for (size_t row = rowFirst; row < rowLast; ++row)
+                for (int k = 0; k < kLinesPerRow; ++k)
+                {
+                    const size_t line = row * size_t(kLinesPerRow) + size_t(k);
+                    if (line >= lines) break;
+                    const size_t s = line * lineB;
+                    const size_t e = std::min(s + lineB, ch.chunkBytes);
+                    const ImVec2 c0(origin.x + float(k) * pitch, origin.y + float(row) * pitch);
+                    const ImVec2 c1(c0.x + m_zoom, c0.y + m_zoom);
+
+                    const Region* dom = nullptr;
+                    size_t domOv = 0, live = 0;
+                    for (const Region& r : m_regions)
+                    {
+                        if (r.end <= s) continue;
+                        if (r.begin >= e) break;
+                        const size_t ov = std::min(e, r.end) - std::max(s, r.begin);
+                        if (r.kind == 0)
+                        {
+                            const auto& cl = ch.columns[size_t(r.column)];
+                            const size_t liveEnd = cl.offset + ch.count * a.columns[size_t(r.column)].stride;
+                            if (liveEnd > std::max(s, cl.offset))
+                                live += std::min(e, liveEnd) - std::max(s, cl.offset);
+                        }
+                        if (!dom || ov > domOv) { dom = &r; domOv = ov; }
+                    }
+
+                    if (!dom || dom->kind == 2) dl->AddRectFilled(c0, c1, kPadCol, 2.0f);
+                    else if (dom->kind == 1) dl->AddRectFilled(c0, c1, Mix(kCellBase, kBitsCol, 0.55f), 2.0f);
+                    else if (dom->kind == 3)
+                    {
+                        dl->AddRectFilled(c0, c1, kCellBase, 2.0f);
+                        dl->AddLine(ImVec2(c0.x, c1.y), ImVec2(c1.x, c0.y), kHatchCol, 1.0f);
+                    }
+                    else
+                    {
+                        const float f = float(double(live) / double(lineB));
+                        dl->AddRectFilled(c0, c1, Mix(kCellBase, Series(size_t(dom->column)), 0.18f + 0.82f * f), 2.0f);
+                        if (domOv < e - s)   // line crosses a region boundary: pad notch
+                            dl->AddRectFilled(ImVec2(c1.x - 3.0f, c0.y), c1, kPadCol, 2.0f);
+                    }
+
+                    for (size_t p = 0; p < probeLineCount; ++p)
+                        if (probeLines[p] == line)
+                            dl->AddRect(c0, c1, kProbeCol, 2.0f, 0, 2.0f);
+                }
+
+            // -------- interaction --------
+            if (ImGui::IsWindowHovered())
+            {
+                ImGuiIO& io = ImGui::GetIO();
+                const ImVec2 m = ImGui::GetMousePos();
+                const int gx = int((m.x - origin.x) / pitch);
+                const int gy = int((m.y - origin.y) / pitch);
+                const size_t line = size_t(gy) * size_t(kLinesPerRow) + size_t(gx);
+                const bool onGrid = gx >= 0 && gx < kLinesPerRow && gy >= 0 && line < lines;
+
+                if (io.KeyCtrl && io.MouseWheel != 0.0f)
+                {
+                    const float oldPitch = pitch;
+                    m_zoom = std::clamp(m_zoom * (1.0f + 0.15f * io.MouseWheel), 1.0f, 32.0f);
+                    const float newPitch = m_zoom + 2.0f;
+                    // Keep the content point under the cursor stable.
+                    const float contentY = m.y - origin.y;
+                    m_scrollRequest = std::max(0.0f, scrollY + contentY / oldPitch * (newPitch - oldPitch));
+                }
+                else if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                {
+                    ImGui::SetScrollY(scrollY - io.MouseDelta.y);
+                    ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
+                }
+
+                if (onGrid)
+                {
+                    const size_t s = line * lineB;
+                    const size_t e = std::min(s + lineB, ch.chunkBytes);
+                    const Region* reg = nullptr;
+                    for (const Region& r : m_regions)
+                        if (s < r.end && r.begin < e &&
+                            (!reg || std::min(e, r.end) - std::max(s, r.begin) >
+                                     std::min(e, reg->end) - std::max(s, reg->begin)))
+                            reg = &r;
+                    ImGui::BeginTooltip();
+                    ImGui::Text("line %zu | bytes %zu-%zu", line, s, e);
+                    if (reg && reg->kind == 0)
+                    {
+                        const auto& cl = ch.columns[size_t(reg->column)];
+                        const uint32_t stride = a.columns[size_t(reg->column)].stride;
+                        const size_t r0 = s > cl.offset ? (s - cl.offset) / stride : 0;
+                        const size_t r1 = std::min(ch.capacity - 1, (std::min(e, cl.offset + cl.bytes) - 1 - cl.offset) / stride);
+                        ImGui::Text("%s | rows %zu-%zu (live < %zu)",
+                                    a.columns[size_t(reg->column)].name.c_str(), r0, r1, ch.count);
+                        if (m_hasDetail && r0 < ch.count)
+                            ImGui::Text("first entity: %u",
+                                        unsigned(m_detail.entities[std::min(r0, ch.count - 1)].GetID()));
+                        // Click pins the probe to the first row in this line.
+                        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                            ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).y == 0.0f &&
+                            ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x == 0.0f)
+                            m_probe = (r0 < ch.count) ? int(r0) : -1;
+                    }
+                    else if (reg && reg->kind == 1)
+                        ImGui::Text("disabled-bit words: %s", a.columns[size_t(reg->column)].name.c_str());
+                    else if (reg && reg->kind == 2) ImGui::TextUnformatted("alignment padding");
+                    else ImGui::TextUnformatted("slack (unused arena tail)");
+                    ImGui::EndTooltip();
+                }
+            }
+            ImGui::EndChild();
         }
         void DrawEntities(const Astra::Debug::ArchetypeInfo&, const Astra::Debug::ChunkInfo&)
         {
