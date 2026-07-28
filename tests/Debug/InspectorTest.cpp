@@ -10,6 +10,8 @@ namespace
     using Astra::Test::Position;
     using Astra::Test::Velocity;
     using Astra::Test::Player;   // empty tag
+    using Astra::Test::Timer;      // AstraEnableable
+    using Astra::Test::Hierarchy;  // AstraEnableable
 
     const Astra::Debug::ArchetypeInfo* FindBySignature(
         const Astra::Debug::InspectorSnapshot& snap, std::string_view needle)
@@ -165,4 +167,56 @@ TEST(Inspector, CaptureIntoMatchesByValueAndRefills)
     for (int i = 0; i < 50; ++i) (void)reg.CreateEntity<Position>();
     Astra::Debug::Capture(reg, into);
     EXPECT_EQ(into.registry.entityCount, 100u);
+
+    // A missing archetypes.clear() would leave stale rows from the pre-mutation
+    // capture appended onto the new ones; catch that by diffing against a fresh
+    // by-value capture of the same (post-mutation) registry state.
+    auto fresh = Astra::Debug::Capture(reg);
+    EXPECT_EQ(into.registry.archetypeCount, into.archetypes.size());
+    ASSERT_EQ(into.archetypes.size(), fresh.archetypes.size());
+    for (size_t i = 0; i < into.archetypes.size(); ++i)
+    {
+        EXPECT_EQ(into.archetypes[i].signature, fresh.archetypes[i].signature);
+        EXPECT_EQ(into.archetypes[i].entityCount, fresh.archetypes[i].entityCount);
+    }
+}
+
+TEST(Inspector, ChunkAccountingWithEnableableColumns)
+{
+    Astra::Registry reg;
+    for (int i = 0; i < 50; ++i) (void)reg.CreateEntity<Position, Timer, Hierarchy>();
+
+    auto snap = Astra::Debug::Capture(reg);
+    const auto* pt = FindBySignature(snap, "Timer");
+    ASSERT_NE(pt, nullptr);
+
+    for (const auto& ch : pt->chunks)
+    {
+        // Bits regions are carved after ALL columns; find the last column's end.
+        size_t lastColumnEnd = 0;
+        for (const auto& cl : ch.columns)
+            lastColumnEnd = std::max(lastColumnEnd, cl.offset + cl.bytes);
+
+        const size_t expectedDisabledBytes = ((ch.capacity + 63) / 64) * 8;
+        size_t enableableCount = 0, bitsSum = 0, prevDisabledOffset = 0;
+        bool first = true;
+        for (const auto& cl : ch.columns)
+        {
+            if (cl.disabledOffset == SIZE_MAX)
+                continue;
+            ++enableableCount;
+            EXPECT_EQ(cl.disabledBytes, expectedDisabledBytes);
+            EXPECT_GE(cl.disabledOffset, lastColumnEnd);
+            if (!first)
+                EXPECT_GT(cl.disabledOffset, prevDisabledOffset);   // strictly ascending
+            first = false;
+            prevDisabledOffset = cl.disabledOffset;
+            bitsSum += cl.disabledBytes;
+            EXPECT_EQ(cl.disabledCount, 0u);   // no SetEnabled calls: layout accounting only
+        }
+        EXPECT_EQ(enableableCount, 2u);   // Timer + Hierarchy; Position is not enableable
+        EXPECT_EQ(ch.bitsBytes, bitsSum);
+        EXPECT_GT(ch.bitsBytes, 0u);
+        EXPECT_EQ(ch.columnBytes + ch.padBytes + ch.bitsBytes + ch.slackBytes, ch.chunkBytes);
+    }
 }
