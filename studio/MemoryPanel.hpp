@@ -146,32 +146,61 @@ namespace Studio
         void DrawChunkStrip(const Astra::Debug::ArchetypeInfo& a,
                             const Astra::Debug::InspectorSnapshot& snap)
         {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("chunks");
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            for (size_t i = 0; i < a.chunks.size(); ++i)
+            const int chunkCount = int(a.chunks.size());
+            const auto& sel = a.chunks[size_t(m_chunk)];
+
+            // Summary first, on its own line, so a long strip can never push it off-panel.
+            ImGui::TextDisabled("chunks: %d | chunk %d | %s | %zu/%zu | slack %.0f%% | line %zu B",
+                chunkCount, m_chunk, FormatBytes(sel.chunkBytes).c_str(), sel.count, sel.capacity,
+                sel.chunkBytes ? 100.0 * double(sel.slackBytes) / double(sel.chunkBytes) : 0.0,
+                snap.cacheLineBytes);
+
+            // Past a couple hundred chunks even wrapped cells stop being clickable
+            // navigation, so add a scrubber and shrink the cells to a density map.
+            const bool compact = chunkCount > 200;
+            bool scrollToSel = false;
+            if (compact)
             {
-                ImGui::SameLine(0.0f, 4.0f);
-                ImGui::PushID(int(i));
+                ImGui::SetNextItemWidth(260.0f);
+                if (ImGui::SliderInt("##chunkscrub", &m_chunk, 0, chunkCount - 1, "chunk %d"))
+                {
+                    m_probe = -1;
+                    scrollToSel = true;
+                }
+            }
+
+            const float cellW = compact ? 10.0f : 26.0f;
+            const float cellH = compact ? 10.0f : 16.0f;
+            const float spacing = compact ? 2.0f : 4.0f;
+            const float rowH = cellH + spacing;
+            const float availW = std::max(cellW,
+                ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ScrollbarSize);
+            const int perRow = std::max(1, int((availW + spacing) / (cellW + spacing)));
+            const int rows = (chunkCount + perRow - 1) / perRow;
+            const float childH = float(std::min(rows, 3)) * rowH + 2.0f;
+
+            ImGui::BeginChild("chunkcells", ImVec2(0, childH));
+            if (scrollToSel)
+                ImGui::SetScrollY(std::max(0.0f, float(m_chunk / perRow) * rowH - rowH));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            for (int i = 0; i < chunkCount; ++i)
+            {
+                if (i % perRow != 0) ImGui::SameLine(0.0f, spacing);
+                ImGui::PushID(i);
                 const ImVec2 p = ImGui::GetCursorScreenPos();
-                if (ImGui::InvisibleButton("c", ImVec2(26, 16))) { m_chunk = int(i); m_probe = -1; }
-                const auto& ci = a.chunks[i];
+                if (ImGui::InvisibleButton("c", ImVec2(cellW, cellH))) { m_chunk = i; m_probe = -1; }
+                const auto& ci = a.chunks[size_t(i)];
                 const float f = ci.capacity ? float(ci.count) / float(ci.capacity) : 0.0f;
-                dl->AddRectFilled(p, ImVec2(p.x + 26, p.y + 16), kCellBase, 2.0f);
-                dl->AddRectFilled(p, ImVec2(p.x + 26.0f * f, p.y + 16), IM_COL32(0x52, 0x51, 0x4E, 255), 2.0f);
-                if (int(i) == m_chunk)
-                    dl->AddRect(p, ImVec2(p.x + 26, p.y + 16), kProbeCol, 2.0f, 0, 2.0f);
+                dl->AddRectFilled(p, ImVec2(p.x + cellW, p.y + cellH), kCellBase, 2.0f);
+                dl->AddRectFilled(p, ImVec2(p.x + cellW * f, p.y + cellH), IM_COL32(0x52, 0x51, 0x4E, 255), 2.0f);
+                if (i == m_chunk)
+                    dl->AddRect(p, ImVec2(p.x + cellW, p.y + cellH), kProbeCol, 2.0f, 0, 2.0f);
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("chunk %zu: %zu/%zu entities, %s",
+                    ImGui::SetTooltip("chunk %d: %zu/%zu entities, %s",
                                       i, ci.count, ci.capacity, FormatBytes(ci.chunkBytes).c_str());
                 ImGui::PopID();
             }
-            const auto& ch = a.chunks[size_t(m_chunk)];
-            ImGui::SameLine(0.0f, 12.0f);
-            ImGui::TextDisabled("chunk %d | %s | %zu/%zu | slack %.0f%% | line %zu B",
-                m_chunk, FormatBytes(ch.chunkBytes).c_str(), ch.count, ch.capacity,
-                ch.chunkBytes ? 100.0 * double(ch.slackBytes) / double(ch.chunkBytes) : 0.0,
-                snap.cacheLineBytes);
+            ImGui::EndChild();
         }
 
         void DrawFooter(const Astra::Debug::ArchetypeInfo& a, const Astra::Debug::ChunkInfo& ch)
