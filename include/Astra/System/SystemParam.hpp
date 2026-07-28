@@ -59,4 +59,57 @@ namespace Astra
         ASTRA_NODISCARD CommandBuffer* operator->() const { return &m_ctx->Commands(); }
         ASTRA_NODISCARD CommandBuffer& Get()        const { return  m_ctx->Commands(); }
     };
+
+    namespace Detail
+    {
+        // ---- Per-parameter access classification (design §4.1) --------------
+        // Default (Commands and anything else): contributes nothing.
+        template<typename P> struct ParamAccess
+        {
+            using Reads    = std::tuple<>;  using Writes    = std::tuple<>;
+            using ResReads = std::tuple<>;  using ResWrites = std::tuple<>;
+        };
+        template<typename... A> struct ParamAccess<View<A...>&>
+        {
+            using Reads    = typename ViewAccess<View<A...>>::Reads;   // consumes Stage 1
+            using Writes   = typename ViewAccess<View<A...>>::Writes;
+            using ResReads = std::tuple<>;  using ResWrites = std::tuple<>;
+        };
+        template<typename T> struct ParamAccess<Res<T>>
+        {
+            using Reads    = std::tuple<>;  using Writes    = std::tuple<>;
+            using ResReads = std::tuple<T>; using ResWrites = std::tuple<>;
+        };
+        template<typename T> struct ParamAccess<ResMut<T>>
+        {
+            using Reads    = std::tuple<>;  using Writes    = std::tuple<>;
+            using ResReads = std::tuple<>;  using ResWrites = std::tuple<T>;
+        };
+
+        // ---- IsSystemParam: the closed param set (design §5.1) --------------
+        template<typename P> struct IsSystemParam : std::false_type {};
+        template<typename... A> struct IsSystemParam<View<A...>&> : std::true_type {};
+        template<typename T>    struct IsSystemParam<Res<T>>      : std::true_type {};
+        template<typename T>    struct IsSystemParam<ResMut<T>>   : std::true_type {};
+        template<>              struct IsSystemParam<Commands>    : std::true_type {};
+        template<typename P> inline constexpr bool IsSystemParam_v = IsSystemParam<P>::value;
+
+        // ---- Shape helpers used by the binder (Task 3/4) --------------------
+        template<typename P> struct IsView : std::false_type {};
+        template<typename... A> struct IsView<View<A...>&> : std::true_type {};
+
+        template<typename P> struct IsResourceParam : std::false_type {};
+        template<typename T> struct IsResourceParam<Res<T>>    : std::true_type {};
+        template<typename T> struct IsResourceParam<ResMut<T>> : std::true_type {};
+
+        template<typename P> struct ResourceType;                 // Res<T>/ResMut<T> -> T
+        template<typename T> struct ResourceType<Res<T>>    { using type = T; };
+        template<typename T> struct ResourceType<ResMut<T>> { using type = T; };
+
+        template<typename P> struct ViewOf { using type = void; };            // View<A...>& -> View<A...>
+        template<typename... A> struct ViewOf<View<A...>&> { using type = View<A...>; };
+
+        template<typename P> struct ViewSlot { using type = std::monostate; };   // per-param cache slot
+        template<typename... A> struct ViewSlot<View<A...>&> { using type = std::optional<View<A...>>; };
+    }
 }
