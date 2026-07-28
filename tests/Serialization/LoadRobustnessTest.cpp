@@ -386,7 +386,7 @@ TEST(LoadRobustness, EntityMapHugeEntityIdIsRejected)
 // ArchetypeManager::Deserialize buffer as EntityMapHugeEntityIdIsRejected.
 // The EntityTable is pre-populated with EntityTable::SetVersion for entity id
 // 0 first, which forces GetOrCreateSegment to create the segment covering ids
-// [0, entitiesPerSegment) (1024 by default) -- id 5 falls in that same
+// [0, entitiesPerSegment) (65536 by default) -- id 5 falls in that same
 // segment but its slot's version was never touched, so it is still 0 (dead).
 // The mapping row then targets id 5 with a non-zero wire version (1), so
 // there is no ambiguity between "id 5's version legitimately restored as 0"
