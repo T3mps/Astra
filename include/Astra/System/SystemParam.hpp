@@ -113,8 +113,8 @@ namespace Astra
         template<typename... A> struct ViewSlot<View<A...>&> { using type = std::optional<View<A...>>; };
     }
 
-    // Shared machinery for a parameter-function system (design §4.2). This task
-    // adds only the harvested-access typedefs; Task 4 adds Run/BuildParam and
+    // Shared machinery for a parameter-function system (design §4.2). Task 3
+    // added the harvested-access typedefs; this task adds Run/BuildParam and
     // the per-View cache. The typedefs make HasSystemTraits_v<Wrapper> true so
     // the existing ExtractSystemTraits fills the scheduler's masks unchanged.
     template<typename... Params>
@@ -127,5 +127,123 @@ namespace Astra
         using WritesResourceTypes = decltype(std::tuple_cat(std::declval<typename Detail::ParamAccess<Params>::ResWrites>()...));
         static constexpr bool HasTraits = true;
         static constexpr bool RequiresExclusive = false;
+
+    protected:
+        // Rebind caches if the registry changed; run the resource-presence gate;
+        // then invoke `invoke(BuildParam<Params>(ctx, reg)...)`. `invoke` is the
+        // wrapper's thunk that forwards to the user fn / free fn.
+        template<typename Invoke>
+        void Run(SystemContext& ctx, Invoke invoke)
+        {
+            Registry& reg = ctx.GetRegistry();
+            if (m_viewRegistry != &reg)   // IM-23 parity: rebuild views on registry switch
+            {
+                ResetViews(std::index_sequence_for<Params...>{});
+                m_viewRegistry = &reg;
+            }
+            if (!ResourcesPresent(reg))   // skip-and-log (design §6)
+            {
+                if (!m_loggedMissing)
+                {
+                    ASTRA_LOG_ERROR("Astra param-system skipped this frame: a declared "
+                                    "Res/ResMut resource is absent from the Registry.");
+                    m_loggedMissing = true;
+                }
+                return;
+            }
+            m_loggedMissing = false;      // a later disappearance logs again
+            InvokeImpl(ctx, reg, invoke, std::index_sequence_for<Params...>{});
+        }
+
+    private:
+        template<typename Invoke, size_t... Is>
+        void InvokeImpl(SystemContext& ctx, Registry& reg, Invoke& invoke, std::index_sequence<Is...>)
+        {
+            invoke(BuildParam<Params, Is>(ctx, reg)...);
+        }
+
+        // Construct one parameter. View params return an lvalue reference into
+        // the persistent cache; Res/ResMut/Commands return a fresh handle.
+        template<typename P, size_t I>
+        decltype(auto) BuildParam(SystemContext& ctx, Registry& reg)
+        {
+            if constexpr (Detail::IsView<P>::value)
+            {
+                auto& slot = std::get<I>(m_views);       // std::optional<View<A...>>
+                if (!slot.has_value())
+                    slot.emplace(CreateViewFor(reg, static_cast<typename Detail::ViewOf<P>::type*>(nullptr)));
+                return static_cast<P>(*slot);            // P == View<A...>& -> lvalue ref
+            }
+            else if constexpr (std::is_same_v<P, Commands>)
+            {
+                return Commands{ctx};
+            }
+            else if constexpr (Detail::IsResourceParam<P>::value)
+            {
+                using RT = typename Detail::ResourceType<P>::type;
+                if constexpr (std::is_same_v<P, Res<RT>>)
+                    return Res<RT>{reg.GetResource<RT>()};
+                else
+                    return ResMut<RT>{reg.GetResource<RT>()};
+            }
+        }
+
+        template<typename... A>
+        static View<A...> CreateViewFor(Registry& reg, View<A...>*) { return reg.CreateView<A...>(); }
+
+        bool ResourcesPresent(Registry& reg) const
+        {
+            return (ParamPresent<Params>(reg) && ...);
+        }
+        template<typename P>
+        static bool ParamPresent(Registry& reg)
+        {
+            if constexpr (Detail::IsResourceParam<P>::value)
+                return reg.GetResource<typename Detail::ResourceType<P>::type>() != nullptr;
+            else
+                return true;
+        }
+
+        template<size_t... Is>
+        void ResetViews(std::index_sequence<Is...>) { (ResetSlot(std::get<Is>(m_views)), ...); }
+        template<typename Slot>
+        static void ResetSlot(Slot& slot)
+        {
+            if constexpr (!std::is_same_v<Slot, std::monostate>)
+                slot.reset();
+        }
+
+        // One cache slot per parameter, index-aligned with Params (monostate for
+        // non-View params). IM-23 view caching, generalized to N views.
+        std::tuple<typename Detail::ViewSlot<Params>::type...> m_views{};
+        Registry* m_viewRegistry = nullptr;
+        bool m_loggedMissing = false;
+    };
+
+    // Lambda / functor param-system (registered by value). Fn is the closure
+    // type (unique per lambda -> unique wrapper type -> unique TypeID hash).
+    template<typename Fn, typename... Params>
+    class FunctionSystemWrapper : public SystemParamBinder<Params...>
+    {
+        Fn m_fn;
+    public:
+        explicit FunctionSystemWrapper(Fn fn) : m_fn(std::move(fn)) {}
+        void operator()(SystemContext& ctx)
+        {
+            this->Run(ctx, [this](auto&&... p) { m_fn(static_cast<decltype(p)>(p)...); });
+        }
+    };
+
+    // Free-function param-system (registered as a non-type template argument, so
+    // each function is its own wrapper type -> no same-signature hash collision).
+    // No stored callable: FnPtr is the template argument.
+    template<auto FnPtr, typename... Params>
+    class FreeFunctionSystemWrapper : public SystemParamBinder<Params...>
+    {
+    public:
+        void operator()(SystemContext& ctx)
+        {
+            this->Run(ctx, [](auto&&... p) { FnPtr(static_cast<decltype(p)>(p)...); });
+        }
     };
 }

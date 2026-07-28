@@ -80,3 +80,74 @@ TEST(SystemParam, BinderHarvestsUnionedAccess)
     // The binder must satisfy the trait-detection gate the scheduler uses.
     EXPECT_TRUE((Astra::HasSystemTraits_v<Binder>));
 }
+
+// ---- Task 4: a wrapper builds each parameter from a SystemContext, iterates ---
+// ---- the cached view, records Commands, and skips-and-logs a missing resource.
+
+namespace
+{
+    // A free function param-system used by several tests (Task 4 & Task 6).
+    inline void AddOneToPositions(Astra::View<Position>& v)
+    {
+        v.ForEach([](Position& p) { p.x += 1.0f; });
+    }
+}
+
+TEST(SystemParam, WrapperRunsViewParamAndCachesView)
+{
+    Astra::Registry reg;
+    Astra::Entity e = reg.CreateEntity<Position>();
+    reg.GetComponent<Position>(e)->x = 10.0f;
+
+    Astra::CommandBuffer cmds{&reg};
+    Astra::SystemContext ctx{reg, cmds, 0u};
+
+    Astra::FunctionSystemWrapper<decltype(AddOneToPositions)*, Astra::View<Position>&>
+        wrapper{&AddOneToPositions};
+
+    wrapper(ctx);
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 11.0f);
+    wrapper(ctx);
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 12.0f);   // second run reuses cached view
+}
+
+TEST(SystemParam, WrapperRunsResourceAndCommandsParams)
+{
+    Astra::Registry reg;
+    Astra::Entity e = reg.CreateEntity<Position>();
+    reg.SetResource(Health{5, 5});
+
+    Astra::CommandBuffer cmds{&reg};
+    Astra::SystemContext ctx{reg, cmds, 0u};
+
+    int seen = -1;
+    auto body = [&](Astra::Res<Health> h, Astra::Commands c)
+    {
+        seen = h->current;              // reads the resource
+        c->DestroyEntity(e);            // records a deferred command
+    };
+    Astra::FunctionSystemWrapper<decltype(body), Astra::Res<Health>, Astra::Commands>
+        wrapper{body};
+
+    wrapper(ctx);
+    EXPECT_EQ(seen, 5);
+    EXPECT_EQ(cmds.GetCommandCount(), 1u);    // Commands recorded into the buffer
+}
+
+TEST(SystemParam, WrapperSkipsWhenResourceAbsent)
+{
+    Astra::Registry reg;                 // no Health resource set
+    Astra::CommandBuffer cmds{&reg};
+    Astra::SystemContext ctx{reg, cmds, 0u};
+
+    bool ran = false;
+    auto body = [&](Astra::ResMut<Health> h) { (void)h; ran = true; };
+    Astra::FunctionSystemWrapper<decltype(body), Astra::ResMut<Health>> wrapper{body};
+
+    wrapper(ctx);
+    EXPECT_FALSE(ran);                   // body never entered (skip-and-log)
+
+    reg.SetResource(Health{1, 1});       // now present
+    wrapper(ctx);
+    EXPECT_TRUE(ran);                    // resumes once the resource exists
+}
