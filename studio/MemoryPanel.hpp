@@ -198,8 +198,78 @@ namespace Studio
             }
         }
 
-        // Filled in by Tasks 5-7.
-        void DrawOverviewBar(const Astra::Debug::ArchetypeInfo&, const Astra::Debug::ChunkInfo&) {}
+        void DrawOverviewBar(const Astra::Debug::ArchetypeInfo& a, const Astra::Debug::ChunkInfo& ch)
+        {
+            const float h = 22.0f;
+            const float w = std::max(50.0f, ImGui::GetContentRegionAvail().x);
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("overview", ImVec2(w, h));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const auto X = [&](size_t byte) {
+                return p0.x + w * float(double(byte) / double(ch.chunkBytes));
+            };
+
+            dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), kCellBase, 3.0f);
+            for (const Region& r : m_regions)
+            {
+                const ImVec2 r0(X(r.begin), p0.y), r1(X(r.end), p0.y + h);
+                if (r.kind == 0)
+                {
+                    const auto& cl = ch.columns[size_t(r.column)];
+                    const size_t liveEnd = cl.offset + ch.count * a.columns[size_t(r.column)].stride;
+                    dl->AddRectFilled(ImVec2(X(cl.offset), p0.y), ImVec2(X(liveEnd), p0.y + h),
+                                      Series(size_t(r.column)));
+                    dl->AddRectFilled(ImVec2(X(liveEnd), p0.y), r1,
+                                      Mix(kCellBase, Series(size_t(r.column)), 0.20f));
+                }
+                else if (r.kind == 1) dl->AddRectFilled(r0, r1, Mix(kCellBase, kBitsCol, 0.55f));
+                else if (r.kind == 2) dl->AddRectFilled(r0, r1, kPadCol);
+                else
+                {
+                    // Slack: 45-degree hatch.
+                    dl->PushClipRect(r0, r1, true);
+                    for (float x = r0.x - h; x < r1.x; x += 6.0f)
+                        dl->AddLine(ImVec2(x, p0.y + h), ImVec2(x + h, p0.y), kHatchCol, 1.0f);
+                    dl->PopClipRect();
+                }
+            }
+
+            if (m_probe >= 0)
+                for (size_t c = 0; c < ch.columns.size(); ++c)
+                {
+                    const float x = X(ch.columns[c].offset + size_t(m_probe) * a.columns[c].stride);
+                    dl->AddRectFilled(ImVec2(x, p0.y), ImVec2(x + 2.0f, p0.y + h), kProbeCol);
+                }
+
+            if (m_mode == 0 && m_visibleByteEnd > m_visibleByteBegin)
+                dl->AddRect(ImVec2(X(m_visibleByteBegin), p0.y),
+                            ImVec2(X(std::min(m_visibleByteEnd, ch.chunkBytes)), p0.y + h),
+                            kProbeCol, 2.0f, 0, 1.5f);
+
+            if (ImGui::IsItemActive() && m_mode == 0)
+            {
+                const float mx = std::clamp(ImGui::GetMousePos().x, p0.x, p0.x + w);
+                m_overviewDragByte = (long long)(double(mx - p0.x) / double(w) * double(ch.chunkBytes));
+            }
+            if (ImGui::IsItemHovered())
+            {
+                const float mx = std::clamp(ImGui::GetMousePos().x, p0.x, p0.x + w);
+                const size_t byte = size_t(double(mx - p0.x) / double(w) * double(ch.chunkBytes));
+                const char* what = "slack";
+                int column = -1;
+                for (const Region& r : m_regions)
+                    if (byte >= r.begin && byte < r.end)
+                    {
+                        column = r.column;
+                        what = r.kind == 0 ? "column" : r.kind == 1 ? "disabled bits" : r.kind == 2 ? "padding" : "slack";
+                        break;
+                    }
+                if (column >= 0)
+                    ImGui::SetTooltip("byte %zu | %s: %s", byte, what, a.columns[size_t(column)].name.c_str());
+                else
+                    ImGui::SetTooltip("byte %zu | %s", byte, what);
+            }
+        }
         void DrawBytes(const Astra::Debug::ArchetypeInfo&, const Astra::Debug::ChunkInfo&)
         {
             ImGui::TextDisabled("Bytes view: Task 6");
