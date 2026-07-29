@@ -16,6 +16,8 @@
 #include <Astra/Astra.hpp>
 #include <Astra/Debug/Inspector.hpp>
 
+#include "Format.hpp"
+
 namespace Studio
 {
     class MemoryPanel
@@ -24,7 +26,7 @@ namespace Studio
         void Draw(const Astra::Debug::InspectorSnapshot& snap, int selectedArchetype,
                   Astra::Registry& registry)
         {
-            ImGui::Begin("Memory");
+            if (!ImGui::Begin("Memory")) { ImGui::End(); return; }
             if (selectedArchetype < 0 || selectedArchetype >= int(snap.archetypes.size()))
             {
                 ImGui::TextDisabled("Select an archetype in the Archetypes panel.");
@@ -105,15 +107,6 @@ namespace Studio
                 return ImU32(f + int(t * float(s - f))) << shift;
             };
             return lerp(0) | lerp(8) | lerp(16) | (0xFFu << 24);
-        }
-
-        static std::string FormatBytes(size_t b)
-        {
-            char buf[32];
-            if (b >= 1024 * 1024) std::snprintf(buf, sizeof(buf), "%.2f MB", double(b) / (1024.0 * 1024.0));
-            else if (b >= 1024)   std::snprintf(buf, sizeof(buf), "%.1f KB", double(b) / 1024.0);
-            else                  std::snprintf(buf, sizeof(buf), "%zu B", b);
-            return buf;
         }
 
         struct Region { size_t begin, end; int column; int kind; };  // kind: 0 col, 1 bits, 2 pad, 3 slack
@@ -291,7 +284,10 @@ namespace Studio
             if (ImGui::IsItemHovered())
             {
                 const float mx = std::clamp(ImGui::GetMousePos().x, p0.x, p0.x + w);
-                const size_t byte = size_t(double(mx - p0.x) / double(w) * double(ch.chunkBytes));
+                // Clamp to the last valid byte: the far-right pixel maps to
+                // chunkBytes, which no half-open region contains.
+                const size_t byte = std::min(ch.chunkBytes - 1,
+                    size_t(double(mx - p0.x) / double(w) * double(ch.chunkBytes)));
                 const char* what = "slack";
                 int column = -1;
                 for (const Region& r : m_regions)
@@ -466,7 +462,6 @@ namespace Studio
             const float x0 = org.x + labelW;
             const auto entX = [&](float i) { return x0 + i * scale - m_entPan; };
 
-            int hoverRow = -1;
             for (size_t c = 0; c < a.columns.size(); ++c)
             {
                 const float y = org.y + float(c) * (laneH + gapY);
@@ -550,7 +545,6 @@ namespace Studio
                     const int row = int((m.x - x0 + m_entPan) / scale);
                     if (lane >= 0 && lane < int(a.columns.size()) && row >= 0 && row < int(ch.capacity))
                     {
-                        hoverRow = row;
                         const size_t c = size_t(lane);
                         const uint32_t stride = a.columns[c].stride;
                         ImGui::BeginTooltip();
@@ -575,7 +569,6 @@ namespace Studio
                     }
                 }
             }
-            (void)hoverRow;
             ImGui::EndChild();
         }
 

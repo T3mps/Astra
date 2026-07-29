@@ -10,6 +10,7 @@
 #include <Astra/Debug/Inspector.hpp>
 
 #include "Components.hpp"
+#include "Format.hpp"
 #include "WorkloadRunner.hpp"
 #include "MemoryPanel.hpp"
 
@@ -28,7 +29,9 @@ namespace Studio
         void RenderFrame()
         {
             if (m_autoStep) m_runner.Step(ImGui::GetIO().DeltaTime);
-            m_snapshot = Astra::Debug::Capture(m_registry);
+            // Capture-into: refills the same snapshot each frame, retaining
+            // outer vector capacity instead of reallocating from scratch.
+            Astra::Debug::Capture(m_registry, m_snapshot);
             DrawWorkloadPanel();
             DrawRegistryPanel();
             DrawArchetypesPanel();
@@ -36,20 +39,11 @@ namespace Studio
         }
 
     protected:
-        static std::string PrettyBytes(size_t b)
-        {
-            char buf[32];
-            if (b >= 1024 * 1024) std::snprintf(buf, sizeof(buf), "%.2f MB", double(b) / (1024.0 * 1024.0));
-            else if (b >= 1024)   std::snprintf(buf, sizeof(buf), "%.1f KB", double(b) / 1024.0);
-            else                  std::snprintf(buf, sizeof(buf), "%zu B", b);
-            return buf;
-        }
-
         void DrawWorkloadPanel()
         {
-            ImGui::Begin("Workload");
+            if (!ImGui::Begin("Workload")) { ImGui::End(); return; }
             ImGui::Combo("Preset", &m_presetIndex, PresetNames, IM_ARRAYSIZE(PresetNames));
-            ImGui::SliderInt("Count", &m_spawnCount, 100, 100000, "%d", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderInt("Count", &m_spawnCount, 100, 1000000, "%d", ImGuiSliderFlags_Logarithmic);
             if (ImGui::Button("Spawn")) m_runner.Spawn(Preset(m_presetIndex), m_spawnCount);
             ImGui::SameLine();
             if (ImGui::Button("Clear")) m_runner.Clear();
@@ -65,13 +59,16 @@ namespace Studio
 
         void DrawRegistryPanel()
         {
-            ImGui::Begin("Registry");
+            if (!ImGui::Begin("Registry")) { ImGui::End(); return; }
             const auto& r = m_snapshot.registry;
             ImGui::Text("Entities:    %zu", r.entityCount);
             ImGui::Text("Archetypes:  %zu", r.archetypeCount);
             ImGui::Text("Chunks:      %zu", r.chunkCount);
             ImGui::Text("Memory used: %s / %s",
-                PrettyBytes(r.bytesUsed).c_str(), PrettyBytes(r.bytesAllocated).c_str());
+                FormatBytes(r.bytesUsed).c_str(), FormatBytes(r.bytesAllocated).c_str());
+            // True arena footprint: chunk bytes incl. alignment pad, disabled-bit
+            // words, and slack -- what the layout-derived figures above omit.
+            ImGui::Text("Reserved:    %s (arena)", FormatBytes(r.bytesReserved).c_str());
             if (r.bytesAllocated > 0)
             {
                 float occ = float(double(r.bytesUsed) / double(r.bytesAllocated));
@@ -82,15 +79,16 @@ namespace Studio
 
         void DrawArchetypesPanel()
         {
-            ImGui::Begin("Archetypes");
+            if (!ImGui::Begin("Archetypes")) { ImGui::End(); return; }
             const ImGuiTableFlags flags = ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg |
                 ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
-            if (ImGui::BeginTable("archetypes", 5, flags))
+            if (ImGui::BeginTable("archetypes", 6, flags))
             {
                 ImGui::TableSetupColumn("Signature", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableSetupColumn("Entities");
                 ImGui::TableSetupColumn("Chunks");
                 ImGui::TableSetupColumn("Bytes");
+                ImGui::TableSetupColumn("Reserved");
                 ImGui::TableSetupColumn("Occupancy");
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableHeadersRow();
@@ -123,7 +121,8 @@ namespace Studio
                                 case 1:  return a.entityCount < b.entityCount;
                                 case 2:  return a.chunkCount < b.chunkCount;
                                 case 3:  return a.bytesAllocated < b.bytesAllocated;
-                                case 4:  return occupancy(a) < occupancy(b);
+                                case 4:  return a.bytesReserved < b.bytesReserved;
+                                case 5:  return occupancy(a) < occupancy(b);
                                 default: return false;
                             }
                         };
@@ -147,8 +146,9 @@ namespace Studio
                         m_selectedArchetype = i;
                     ImGui::TableSetColumnIndex(1); ImGui::Text("%zu", a.entityCount);
                     ImGui::TableSetColumnIndex(2); ImGui::Text("%zu", a.chunkCount);
-                    ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(PrettyBytes(a.bytesAllocated).c_str());
-                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(FormatBytes(a.bytesAllocated).c_str());
+                    ImGui::TableSetColumnIndex(4); ImGui::TextUnformatted(FormatBytes(a.bytesReserved).c_str());
+                    ImGui::TableSetColumnIndex(5);
                     ImGui::Text("%.0f%%", a.bytesAllocated
                         ? 100.0 * double(a.bytesUsed) / double(a.bytesAllocated) : 0.0);
                 }

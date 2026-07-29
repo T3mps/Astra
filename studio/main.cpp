@@ -1,11 +1,14 @@
 #include <cstdio>
 
+// StudioApp (via Astra) pulls in windows.h; include it BEFORE glfw3.h so
+// APIENTRY is already defined and glfw3.h skips its own definition -- the
+// reverse order redefines it in minwindef.h (warning C4005).
+#include "StudioApp.hpp"
+
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
-
-#include "StudioApp.hpp"
 
 int main()
 {

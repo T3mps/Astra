@@ -13,6 +13,5 @@ namespace Studio
         int current = 100, max = 100;
     };
     struct Sprite   { int textureId = 0; float scale = 1.0f; };
-    struct Lifetime { float seconds = 5.0f; };
     struct Frozen   { };   // tag
 }

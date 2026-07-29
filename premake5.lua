@@ -301,10 +301,11 @@ workspace "Astra"
                 "%{IncludeDir.ImGui}", "%{IncludeDir.ImGui}/backends", "%{IncludeDir.GLFW}"
             }
             links { "ImGui", "GLFW" }
+            floatingpoint "Fast"   -- premake-native /fp:fast; a buildoptions flag double-set it (D9025)
             filter "system:windows"
                 systemversion "latest"
-                links { "opengl32", "gdi32" }
-                buildoptions { "/Zc:__cplusplus", "/arch:AVX", "/bigobj", "/fp:fast" }
+                links { "opengl32", "gdi32", "user32" }
+                buildoptions { "/Zc:__cplusplus", "/arch:AVX", "/bigobj" }
                 defines { "__SSE2__", "__SSE4_2__" }
             filter "system:linux"
                 links { "GL", "X11", "pthread", "dl" }
