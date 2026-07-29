@@ -538,6 +538,8 @@ namespace Astra
         }
 
         // Offset of the column's disabled-bit words, or size_t max if not enableable.
+        // Word regions are 8-byte aligned (unlike column bases, which are
+        // cache-line aligned) -- mirrors InitializeColumns' carve.
         ASTRA_NODISCARD size_t GetDisabledWordsOffset(uint16_t column) const
         {
             ASTRA_ASSERT(column < m_meta->columnCount, "Column ordinal out of bounds");

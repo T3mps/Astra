@@ -76,8 +76,9 @@ namespace Astra::Debug
     };
 
     // Capture-into: clears and refills `out`, retaining outer vector capacity.
-    // Runs every studio frame -- O(archetypes x columns + chunks) POD work only;
-    // per-entity copies live in CaptureChunkDetail (selected chunk only).
+    // Runs every studio frame -- POD work proportional to chunks x columns,
+    // never to entity count; per-entity copies live in CaptureChunkDetail
+    // (selected chunk only).
     inline void Capture(Registry& registry, InspectorSnapshot& out)
     {
         out.registry = RegistrySnapshot{};
@@ -141,6 +142,8 @@ namespace Astra::Debug
             info.chunks.reserve(info.chunkCount);
             for (const auto& chunk : archetype->GetChunks())
             {
+                if (!chunk)
+                    continue;
                 ChunkInfo ch;
                 ch.count = chunk->GetCount();
                 ch.capacity = chunk->GetCapacity();
@@ -163,7 +166,7 @@ namespace Astra::Debug
                         // inline, matching the existing duplication in Archetype.hpp's
                         // own capacity math (ComputeLayoutBytesForCapacity et al.).
                         cl.disabledBytes = ((ch.capacity + 63) / 64) * 8;
-                        cl.disabledCount = chunk->GetDisabledCount(int(c));
+                        cl.disabledCount = chunk->GetDisabledCount(static_cast<int>(c));
                     }
                     ch.columnBytes += cl.bytes;
                     ch.padBytes += cl.offset - cursor;
@@ -229,13 +232,17 @@ namespace Astra::Debug
         {
             if (!archetype)
                 continue;
-            if (index++ == archetypeIndex) { target = archetype; break; }
+            if (index++ == archetypeIndex)
+            {
+                target = archetype;
+                break;
+            }
         }
         if (!target)
             return false;
 
         const auto& chunks = target->GetChunks();
-        if (chunkIndex >= chunks.size())
+        if (chunkIndex >= chunks.size() || !chunks[chunkIndex])
             return false;
         const auto& chunk = chunks[chunkIndex];
 
@@ -249,8 +256,12 @@ namespace Astra::Debug
         for (uint16_t e = 0; e < meta.enableableColumnCount; ++e)
         {
             const uint16_t c = meta.enableableColumns[e];
-            const uint64_t* w = chunk->GetDisabledWords(int(c));
-            if (w) out.disabledWords[c].assign(w, w + words);
+            const uint64_t* w = chunk->GetDisabledWords(static_cast<int>(c));
+            // An enableable column always carves a word region; a null here
+            // would leave this column indistinguishable from non-enableable.
+            ASTRA_ASSERT(w != nullptr, "Enableable column has no disabled-word region");
+            if (w)
+                out.disabledWords[c].assign(w, w + words);
         }
         return true;
     }
