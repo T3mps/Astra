@@ -746,6 +746,89 @@ TEST(ComponentDescriptorTagTest, DestructSkipsEmptyComponent)
     EXPECT_EQ(ThemeFCountedTag::s_live, 0);   // BUG: -1 (the dtor ran on non-object storage)
 }
 
+// ---------------------------------------------------------------------------
+// UnregisterModuleRange -- module-unload safety valve.
+//
+// A descriptor's function pointers live in whichever module registered the type.
+// When that module unloads they dangle, and the first-registration guard means
+// nothing ever rebuilds them: a reloaded module's RegisterComponent<T> early-
+// returns and the stale pointers survive until something calls one and faults.
+//
+// A real DLL unload cannot be staged in a unit test, so the unloading module's
+// image range is simulated by the exact address of the descriptor's own
+// defaultConstruct -- which is precisely what the production caller passes a
+// range containing.
+// ---------------------------------------------------------------------------
+
+TEST_F(ComponentRegistryTest, UnregisterModuleRangeDropsDescriptorsOwnedByThatRange)
+{
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponent<Position>();
+
+    const Astra::ComponentID id = Astra::TypeID<Position>::Value();
+    const Astra::ComponentDescriptor* desc = registry.GetComponentDescriptor(id);
+    ASSERT_NE(desc, nullptr);
+
+    const auto fn = reinterpret_cast<uintptr_t>(desc->defaultConstruct);
+    ASSERT_NE(fn, 0u);
+
+    EXPECT_EQ(registry.UnregisterModuleRange(reinterpret_cast<const void*>(fn), 1), 1u);
+
+    // The lookup now MISSES instead of handing back a callable pointer into what
+    // would be freed code. Both accessors, because the by-hash path is the one
+    // scene deserialization uses.
+    EXPECT_EQ(registry.GetComponentDescriptor(id), nullptr);
+    EXPECT_EQ(registry.GetComponentDescriptorByHash(Astra::TypeID<Position>::Hash()), nullptr);
+}
+
+TEST_F(ComponentRegistryTest, UnregisterModuleRangeLeavesOtherModulesAlone)
+{
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponent<Position>();
+
+    const Astra::ComponentID id = Astra::TypeID<Position>::Value();
+    ASSERT_NE(registry.GetComponentDescriptor(id), nullptr);
+
+    // A range that cannot contain any real code. Unloading one module must not
+    // disturb types owned by another -- otherwise a plugin unload would silently
+    // strip the engine's own roster.
+    EXPECT_EQ(registry.UnregisterModuleRange(reinterpret_cast<const void*>(uintptr_t{16}), 16), 0u);
+    EXPECT_NE(registry.GetComponentDescriptor(id), nullptr);
+
+    // Degenerate inputs are a no-op, not a wipe.
+    EXPECT_EQ(registry.UnregisterModuleRange(nullptr, 128), 0u);
+    EXPECT_EQ(registry.UnregisterModuleRange(reinterpret_cast<const void*>(uintptr_t{16}), 0), 0u);
+    EXPECT_NE(registry.GetComponentDescriptor(id), nullptr);
+}
+
+TEST_F(ComponentRegistryTest, RegisterComponentRebuildsAfterUnregisterModuleRange)
+{
+    // THE regression. Without clearing the first-registration guard, the reloaded
+    // module's RegisterComponent<T> early-returns and the dropped type can never
+    // come back -- which is the half of the defect that makes it permanent rather
+    // than transient.
+    Astra::ComponentRegistry registry;
+    registry.RegisterComponent<Position>();
+
+    const Astra::ComponentID id = Astra::TypeID<Position>::Value();
+    const Astra::ComponentDescriptor* before = registry.GetComponentDescriptor(id);
+    ASSERT_NE(before, nullptr);
+    const auto fn = reinterpret_cast<uintptr_t>(before->defaultConstruct);
+
+    ASSERT_EQ(registry.UnregisterModuleRange(reinterpret_cast<const void*>(fn), 1), 1u);
+    ASSERT_EQ(registry.GetComponentDescriptor(id), nullptr);
+
+    registry.RegisterComponent<Position>();
+
+    const Astra::ComponentDescriptor* after = registry.GetComponentDescriptor(id);
+    ASSERT_NE(after, nullptr);
+    EXPECT_EQ(after->id, id);
+    EXPECT_EQ(after->size, sizeof(Position));
+    EXPECT_NE(after->defaultConstruct, nullptr);
+    // And it is usable again, not merely present.
+    EXPECT_EQ(registry.GetComponentDescriptorByHash(Astra::TypeID<Position>::Hash()), after);
+}
+
 // ==========================================================================
 // Enableable-components (spec 2026-07-25 Task 1): trait detection + descriptor
 // snapshot. File-scope (specializations cannot target function-local types).

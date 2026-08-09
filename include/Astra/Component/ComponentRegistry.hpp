@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -78,7 +79,83 @@ namespace Astra
 
             (RegisterComponent<Components>(), ...);
         }
-        
+
+        // Module-unload safety valve.
+        //
+        // A ComponentDescriptor stores raw function pointers (defaultConstruct,
+        // destruct, visitFields, ...) that live in whichever MODULE registered the
+        // type -- and a host's plugin deliberately re-points even engine-owned
+        // types at itself, which is exactly what ReRegisterComponent above is for.
+        // When that module is unloaded, every such descriptor is left aiming at
+        // freed code. Worse, the first-registration guard in RegisterComponent
+        // means the type can never be rebuilt: m_registered[id] is still true, so
+        // a reloaded module's RegisterComponent<T> early-returns and the stale
+        // pointers survive. The next call through one is an access violation.
+        //
+        // Call this with the unloading module's image range BEFORE freeing it.
+        // Every descriptor whose code lies inside is dropped, so that:
+        //   - a lookup before anything re-registers returns nullptr -- callers get
+        //     a clean "not registered" miss instead of calling into freed memory;
+        //   - a later RegisterComponent<T> takes the cold path and rebuilds the
+        //     descriptor against whichever module is live at that point.
+        //
+        // Deliberately ADDRESS-RANGE based rather than tracking an owning module
+        // handle: that keeps Astra free of any platform module API, and the caller
+        // is by definition the one that knows the range it is about to unmap.
+        //
+        // m_hashToID is intentionally left alone -- GetComponentDescriptorByHash
+        // resolves through GetComponentDescriptor, which is gated on m_present, so
+        // clearing the presence bit already makes the lookup miss. Re-registration
+        // simply overwrites the same hash -> id entry with the same id.
+        //
+        // Returns the number of descriptors dropped.
+        size_t UnregisterModuleRange(const void* base, size_t size)
+        {
+            if (!base || size == 0)
+                return 0;
+
+            const uintptr_t lo = reinterpret_cast<uintptr_t>(base);
+            const uintptr_t hi = lo + size;
+            auto inRange = [lo, hi](uintptr_t addr)
+            {
+                return addr != 0 && addr >= lo && addr < hi;
+            };
+
+            std::lock_guard<std::mutex> lock(m_registrationMutex);
+
+            size_t dropped = 0;
+            for (size_t id = 0; id < MAX_COMPONENTS; ++id)
+            {
+                if (!m_present.Test(id))
+                    continue;
+
+                const ComponentDescriptor& d = m_components[id];
+                // RegisterComponentImpl instantiates all of these together in one
+                // module, so any single hit proves ownership. Several are tested
+                // rather than just one because copyConstruct/visitFields are
+                // conditionally null, and a descriptor must not be missed merely
+                // because the slot this check happened to pick was the null one.
+                const bool owned =
+                    inRange(reinterpret_cast<uintptr_t>(d.defaultConstruct)) ||
+                    inRange(reinterpret_cast<uintptr_t>(d.destruct)) ||
+                    inRange(reinterpret_cast<uintptr_t>(d.moveConstruct)) ||
+                    inRange(reinterpret_cast<uintptr_t>(d.moveAssign)) ||
+                    inRange(reinterpret_cast<uintptr_t>(d.serialize)) ||
+                    inRange(reinterpret_cast<uintptr_t>(d.visitFields));
+                if (!owned)
+                    continue;
+
+                // Blank the slot rather than only clearing the bit: the array is
+                // pointer-stable and long-lived, and leaving dead addresses in it
+                // is exactly the state this function exists to eliminate.
+                m_components[id] = ComponentDescriptor{};
+                m_present.Reset(id);
+                m_registered[id].store(false, std::memory_order_release);
+                ++dropped;
+            }
+            return dropped;
+        }
+
         ASTRA_NODISCARD const ComponentDescriptor* GetComponentDescriptor(ComponentID id) const
         {
             // Directly-indexed, pointer-stable: &m_components[id] never moves for
