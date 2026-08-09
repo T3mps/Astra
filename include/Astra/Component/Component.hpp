@@ -34,6 +34,12 @@ namespace Astra
     class TypeMeta;          // Forward declaration for reflection integration
     class IFieldVisitor;     // Forward declaration for format-agnostic visitor seam
 
+    // Per-module TypeMeta rebuild callback, retained by an owned component slot
+    // so a later hot-reload/rebind can regenerate the meta against whichever
+    // module is live. See Detail::MetaFactory<T> / Detail::BuildMetaThunk<T>
+    // (MetaRegistry.hpp) for the adapter that targets this signature.
+    using MetaBuildFn = TypeMeta (*)();
+
     /**
      * Opt-in enableability (spec 2026-07-25 §2). A component is enableable iff
      * it declares `static constexpr bool AstraEnableable = true` or specializes

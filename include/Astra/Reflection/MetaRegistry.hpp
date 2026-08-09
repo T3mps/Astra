@@ -511,6 +511,18 @@ namespace Astra
             static inline FactorySlot fn;
         };
 
+        // Adapts MetaFactory<T>::fn (a FactorySlot proxy) to the plain
+        // `TypeMeta (*)()` shape of MetaBuildFn, so an owned component slot can
+        // retain a rebuild callback without ComponentRegistry/ComponentDescriptor
+        // needing to know about T. Caller must check MetaFactory<T>::fn's
+        // truthiness before taking this function's address -- calling through it
+        // when fn is empty throws (see FactorySlot::operator()).
+        template<typename T>
+        TypeMeta BuildMetaThunk()
+        {
+            return MetaFactory<T>::fn();
+        }
+
         /**
          * Helper struct for static registration of types.
          * Used by ASTRA_REFLECT_TYPE macro.

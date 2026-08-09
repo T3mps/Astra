@@ -204,20 +204,19 @@ namespace Astra
                     descriptors.push_back(m_components[id]);
         }
 
-    private:
-        template<Component T>
-        void RegisterComponentImpl(ComponentID id)
-        {
-            ASTRA_ASSERT(id < MAX_COMPONENTS,
-                         "Component ID space exhausted (MAX_COMPONENTS); raise ASTRA_MAX_COMPONENTS");
-            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
-            {
-                // Refuse registration so failure is observable (descriptor
-                // lookup returns nullptr; Registry::AddComponent returns
-                // nullptr) instead of silently corrupting ComponentMask bits.
-                return;
-            }
+        // ==== ComponentModule plumbing (spec 2026-08-09) ====================
 
+        // Pure descriptor build: size/alignment/triviality/hash/version/fn-pointers,
+        // extracted from RegisterComponentImpl so ComponentModule can build the
+        // same descriptor for an OWNED registration. Static (no `this`): does not
+        // touch m_componentNames/m_components/m_present/m_hashToID -- desc.name
+        // is left unset; the caller stores it via StoreComponentName. `meta` is
+        // whatever the caller already resolved (may be null); this function never
+        // queries MetaRegistry itself, so it has no opinion on which TypeContext
+        // is in play.
+        template<Component T>
+        ASTRA_NODISCARD static ComponentDescriptor MakeDescriptor(ComponentID id, const TypeMeta* meta)
+        {
             ComponentDescriptor desc;
             desc.id = id;
             // Empty components should report size 0 to avoid memory allocation
@@ -229,21 +228,17 @@ namespace Astra
             // nullptr) instead of handing back a descriptor the storage will
             // misalign. Must run BEFORE the ASTRA_ASSERT below so Debug builds
             // degrade the same way as Release/Dist (mirrors FieldInfo.hpp's
-            // Get/Set/GetPtr guard-before-assert ordering).
+            // Get/Set/GetPtr guard-before-assert ordering). Callers detect this
+            // refusal by re-testing desc.alignment (already valid at this point)
+            // before installing -- everything after this guard is unset.
             if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY
             {
-                return;
+                return desc;
             }
             ASTRA_ASSERT(desc.alignment <= CACHE_LINE_SIZE,
                          "Component alignment above 64 bytes is not supported by chunk storage");
 
             desc.hash = TypeID<T>::Hash();
-
-            // m_componentNames grows by one entry per (re)registration -- accepted cost
-            // (tiny strings, rare path) in exchange for pointer-stable c_str() storage.
-            auto nameView = TypeID<T>::Name();
-            m_componentNames.emplace_back(nameView);
-            desc.name = m_componentNames.back().c_str();
 
             desc.version = SerializationTraits<T>::Version;
             desc.minVersion = SerializationTraits<T>::MinVersion;
@@ -289,11 +284,74 @@ namespace Astra
             desc.serializeVersioned = &SerializeVersioned<T>;
             desc.deserializeVersioned = &DeserializeVersioned<T>;
 
-            // Link to reflection metadata if type is registered with MetaRegistry
-            desc.meta = MetaRegistry::Instance().Get<T>();
+            // Link to reflection metadata (resolved by the caller, not looked up here).
+            desc.meta = meta;
 
             // Reflection-driven visitor slot: null unless the type is reflected.
             desc.visitFields = desc.meta ? &VisitFields<T> : nullptr;
+
+            return desc;
+        }
+
+        // Issues module ids starting at 1 (0 means anonymous/unowned). Thread-safe.
+        uint32_t OpenModuleId(std::string_view name)
+        {
+            std::lock_guard<std::mutex> lock(m_registrationMutex);
+            m_moduleNames.emplace_back(name);
+            return m_nextModuleId++;
+        }
+
+        ASTRA_NODISCARD uint32_t GetOwner(ComponentID id) const
+        {
+            return (id < MAX_COMPONENTS) ? m_owner[id] : 0u;
+        }
+
+        // ComponentModule plumbing (Task 2 scope: empty slot or same-owner
+        // replace; Task 3 adds the shadow push for different-owner slots).
+        // By-value desc: InstallOwned sets desc.name from StoreComponentName
+        // under the lock before writing the slot.
+        // Returns false when the id is invalid/refused. buildMeta may be null.
+        bool InstallOwned(ComponentID id, uint32_t owner, ComponentDescriptor desc, MetaBuildFn buildMeta)
+        {
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+            {
+                return false;
+            }
+
+            std::lock_guard<std::mutex> lock(m_registrationMutex);
+            desc.name = StoreComponentName(desc.name);
+            m_components[id] = desc;
+            m_present.Set(id);
+            m_hashToID[desc.hash] = id;
+            m_owner[id] = owner;
+            m_metaThunk[id] = buildMeta;
+            m_registered[id].store(true, std::memory_order_release);
+            return true;
+        }
+
+    private:
+        template<Component T>
+        void RegisterComponentImpl(ComponentID id)
+        {
+            ASTRA_ASSERT(id < MAX_COMPONENTS,
+                         "Component ID space exhausted (MAX_COMPONENTS); raise ASTRA_MAX_COMPONENTS");
+            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+            {
+                // Refuse registration so failure is observable (descriptor
+                // lookup returns nullptr; Registry::AddComponent returns
+                // nullptr) instead of silently corrupting ComponentMask bits.
+                return;
+            }
+
+            ComponentDescriptor desc = MakeDescriptor<T>(id, MetaRegistry::Instance().Get<T>());
+            if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY  // MakeDescriptor refused (over-aligned)
+            {
+                return;
+            }
+
+            // m_componentNames grows by one entry per (re)registration -- accepted cost
+            // (tiny strings, rare path) in exchange for pointer-stable c_str() storage.
+            desc.name = StoreComponentName(TypeID<T>::Name());
 
             // Also link MetaRegistry to ComponentID for reverse lookup
             if (desc.meta)
@@ -305,6 +363,18 @@ namespace Astra
             m_components[id] = desc;
             m_present.Set(id);
             m_hashToID[desc.hash] = id;
+            m_owner[id] = 0;  // anonymous: this path never goes through a ComponentModule
+            m_metaThunk[id] = Detail::MetaFactory<T>::fn ? &Detail::BuildMetaThunk<T> : nullptr;
+        }
+
+        // Copies `name` into pointer-stable, NUL-terminated storage and returns
+        // the stored copy's address. Shared by RegisterComponentImpl and
+        // InstallOwned; both call this while already holding m_registrationMutex
+        // (std::mutex is non-recursive, so this must NOT lock itself).
+        const char* StoreComponentName(std::string_view name)
+        {
+            m_componentNames.emplace_back(name);
+            return m_componentNames.back().c_str();
         }
 
         template<typename T>
@@ -412,5 +482,16 @@ namespace Astra
         // is only ever held via std::shared_ptr; never copied/moved by value).
         std::mutex m_registrationMutex;
         std::atomic<bool> m_registered[MAX_COMPONENTS] = {};
+
+        // ComponentModule plumbing. m_owner tracks who owns the LIVE entry at
+        // each id (0 = anonymous, i.e. registered via RegisterComponent, never
+        // through a module); m_metaThunk retains a per-slot rebuild callback
+        // (null when the type isn't reflected) so a later hot-reload can
+        // regenerate that slot's TypeMeta. Both are written only under
+        // m_registrationMutex (RegisterComponentImpl / InstallOwned).
+        uint32_t m_owner[MAX_COMPONENTS] = {};
+        MetaBuildFn m_metaThunk[MAX_COMPONENTS] = {};
+        uint32_t m_nextModuleId = 1;         // module ids; issued under m_registrationMutex
+        std::deque<std::string> m_moduleNames;  // index = moduleId - 1; diagnostics
     };
 }
