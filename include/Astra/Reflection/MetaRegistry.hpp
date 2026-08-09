@@ -132,6 +132,70 @@ namespace Astra
             return ptr;
         }
 
+        // Hot-reload rebind: installs `fresh` if the hash is unknown; on a
+        // hash hit with MATCHING identity (size/alignment/triviality/name)
+        // move-assigns the contents through the existing pointer -- the
+        // address every ComponentDescriptor::meta caches stays valid, only
+        // the closures/fields swap. Identity mismatch refuses (nullptr),
+        // exactly like Register(TypeMeta&&). The componentId link maps are
+        // keyed by hash/id and are deliberately untouched.
+        TypeMeta* RebindInPlace(TypeMeta&& fresh)
+        {
+            std::unique_lock lock(m_mutex);
+            auto it = m_types.Find(fresh.typeHash);
+            if (it == m_types.end())
+            {
+                uint64_t hash = fresh.typeHash;
+                auto metaPtr = std::make_unique<TypeMeta>(std::move(fresh));
+                TypeMeta* ptr = metaPtr.get();
+                m_types[hash] = std::move(metaPtr);
+                return ptr;
+            }
+            TypeMeta& existing = *it->second;
+            if (existing.size != fresh.size
+                || existing.alignment != fresh.alignment
+                || existing.isTrivial != fresh.isTrivial
+                || existing.typeName != fresh.typeName)
+            {
+                ASTRA_LOG_ERROR("MetaRegistry: RebindInPlace identity mismatch -- refused");
+                ASTRA_ENSURE_ALWAYS(false, "MetaRegistry rebind identity collision");
+                return nullptr;
+            }
+            existing = std::move(fresh);   // move-assign: unique_ptr target address unchanged
+            return &existing;
+        }
+
+        // Public erase: for module-owned NON-component metas (RegisterMeta
+        // teardown). Refuses a component-linked hash -- erasing one would
+        // dangle every cached ComponentDescriptor::meta for a live component.
+        bool Erase(uint64_t hash)
+        {
+            std::unique_lock lock(m_mutex);
+            if (m_typeToComponentId.Find(hash) != m_typeToComponentId.end())
+            {
+                ASTRA_ENSURE_ALWAYS(false,
+                    "MetaRegistry::Erase refused: hash is component-linked (use the "
+                    "component clear path, not a manual erase)");
+                return false;
+            }
+            return m_types.Erase(hash) != 0;
+        }
+
+        // Internal clear-path erase (spec 2026-08-09 meta-lifecycle rule):
+        // called when a component slot clears TO EMPTY, so the descriptor is
+        // already gone and nothing legitimately holds this meta. Removes the
+        // entry AND both link rows.
+        bool EraseUnchecked(uint64_t hash)
+        {
+            std::unique_lock lock(m_mutex);
+            if (auto it = m_typeToComponentId.Find(hash); it != m_typeToComponentId.end())
+            {
+                m_componentIdToType.Erase(it->second);
+                m_typeToComponentId.Erase(it);
+            }
+            return m_types.Erase(hash) != 0;
+        }
+
         /**
          * Gets type metadata by hash.
          * Thread-safe.
@@ -398,6 +462,55 @@ namespace Astra
 
     namespace Detail
     {
+        // Per-T-per-module meta factory, retained so a module handle can
+        // REBUILD this module's TypeMeta later (hot-reload rebind). Inline
+        // template static: each DLL/EXE gets its own copy, which is exactly
+        // the ownership boundary the rebuild must respect.
+        //
+        // `fn` is a trivially-constructed proxy, NOT a bare std::function.
+        // MetaFactory<T>::fn and the ASTRA_REFLECT_TYPE registrar variable
+        // that assigns to it are BOTH inline/template statics, so both have
+        // "unordered" dynamic initialization ([basic.start.dynamic]) with no
+        // ordering guarantee between them -- empirically confirmed on MSVC
+        // (repro'd in isolation and reproduced with this exact header): a
+        // plain `static inline std::function<TypeMeta()> fn;` member can
+        // have its own (empty) default-construction scheduled AFTER the
+        // registrar's constructor assigns to it, silently discarding the
+        // assignment (fn reads back empty/throws bad_function_call).
+        // Routing the real storage through a function-local static
+        // sidesteps "unordered init" entirely: the proxy itself is an empty
+        // type needing no dynamic initialization, and the actual
+        // std::function is constructed exactly once, on first touch,
+        // per the language's construct-on-first-use guarantee for
+        // function-local statics (thread-safe, no ordering assumptions).
+        // Proxy mirrors std::function's surface: assignment, explicit bool,
+        // call, and implicit conversion to std::function<TypeMeta()>.
+        template<typename T>
+        struct MetaFactory
+        {
+        private:
+            static std::function<TypeMeta()>& Storage()
+            {
+                static std::function<TypeMeta()> s;
+                return s;
+            }
+
+        public:
+            struct FactorySlot
+            {
+                FactorySlot& operator=(std::function<TypeMeta()> f)
+                {
+                    Storage() = std::move(f);
+                    return *this;
+                }
+                explicit operator bool() const { return static_cast<bool>(Storage()); }
+                TypeMeta operator()() const { return Storage()(); }
+                operator std::function<TypeMeta()>() const { return Storage(); }
+            };
+
+            static inline FactorySlot fn;
+        };
+
         /**
          * Helper struct for static registration of types.
          * Used by ASTRA_REFLECT_TYPE macro.
@@ -414,6 +527,12 @@ namespace Astra
             template<typename BuilderFunc>
             explicit StaticTypeRegistrar(BuilderFunc&& builderFunc)
             {
+                MetaFactory<T>::fn = [f = builderFunc]() {
+                    TypeMetaBuilder<T> b;
+                    f(b);
+                    return b.Build();
+                };
+
                 TypeMetaBuilder<T> builder;
                 builderFunc(builder);
                 // TypeMeta is move-only; hold it via shared_ptr so the
