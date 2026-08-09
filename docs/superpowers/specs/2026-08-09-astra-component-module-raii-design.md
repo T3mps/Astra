@@ -69,8 +69,20 @@ public:
 - `Open` takes the `shared_ptr` **explicitly** (no `enable_shared_from_this`):
   no footgun with stack-constructed registries, and the handle keeps the
   registry alive by construction (handle-outlives-registry is impossible).
-- Internally: `{shared_ptr<ComponentRegistry>, uint32_t moduleId}`. The
-  registry issues monotonic module ids and keeps names for diagnostics.
+- Internally: `{shared_ptr<ComponentRegistry>, TypeContext*, uint32_t moduleId}`.
+  The registry issues monotonic module ids and keeps names for diagnostics.
+- **Explicit TypeContext capture (review finding 3, option b):** `Open`
+  captures `GetTypeContext()` once — read in the calling module, so it sees
+  that module's slot — and `ASTRA_ENSURE`s the slot was **explicitly
+  installed** (not the module-local default `GetTypeContext()` silently falls
+  back to when `SetTypeContext` was never called). Every subsequent
+  `Register`/`RegisterMeta`/rebind thunk routes through the captured context
+  (ids via `capturedCtx->GetOrAssignComponentID(TypeID<T>::Hash(), ...)`,
+  metas via `capturedCtx->Meta()`, never `MetaRegistry::Instance()`), so the
+  RAII path has **no dependence on per-module ambient slot hygiene**; the
+  assert remains as a tripwire that catches a missing `SetTypeContext` at
+  handle creation — loudly, instead of the historical silent-aliasing class
+  of bug.
 - `Register<Ts...>` is a template instantiated **in the calling module** — that
   is what binds descriptors (and meta thunks) to the caller's image. This is
   the load-bearing property; document it prominently.
@@ -88,7 +100,7 @@ Added:
 - Sparse shadow store: `FlatMap<ComponentID, SmallVector<ShadowEntry, 1>>`,
   empty in the common case; a slot only occupies it while genuinely overridden
   (realistically depth 1, only during a hot-reload window).
-- `ShadowEntry = { uint32_t owner; ComponentDescriptor desc; MetaRebindFn metaRebind; }`.
+- `ShadowEntry = { uint32_t owner; ComponentDescriptor desc; MetaBuildFn buildMeta; }`.
 
 Operations (all under `m_registrationMutex`):
 
@@ -107,11 +119,18 @@ ComponentIDs are **never freed** — the TypeContext hash→id mapping persists
 
 ### 3.3 Meta rebind thunks
 
-- `using MetaRebindFn = void(*)();` — each registration path captures
-  `&RebindMetaThunk<T>`, a per-T-per-module function that rebuilds T's
-  `TypeMeta` from the calling module's reflect data and installs it **in place
-  at the stable `TypeMeta*`** (descriptors cache that pointer; contents swap,
-  address doesn't).
+- `using MetaBuildFn = TypeMeta (*)();` — each registration path captures
+  `&BuildMetaThunk<T>`, a per-T-per-module function that **builds** T's
+  `TypeMeta` from the calling module's reflect data. The registry then installs
+  it **in place at the stable `TypeMeta*`** via `RebindInPlace` (descriptors
+  cache that pointer; contents swap, address doesn't).
+- **Lock discipline for thunks (review finding 4):** the build thunk executes
+  user reflect bodies, so it runs **outside both mutexes**. Sequence on any
+  slot transition: (1) slot bookkeeping under `m_registrationMutex`, release;
+  (2) invoke the build thunk with no locks held; (3) `RebindInPlace` swaps
+  under the meta mutex only. The transient window where the slot is updated
+  but the meta not yet swapped is benign (registration is a single-threaded
+  setup/teardown path by contract) and documented.
 - `Detail::StaticTypeRegistrar<T>` additionally retains its built meta as a
   per-module factory (today the builder output is consumed once and enqueued;
   it must remain reachable per-type so the thunk can rebuild).
@@ -119,9 +138,11 @@ ComponentIDs are **never freed** — the TypeContext hash→id mapping persists
   meta mutex, preserves the `componentId` backref and address, applies the same
   identity-collision refusal as `Register`.
 - Slot transitions drive meta transitions: push rebinds T's meta to the
-  pusher's closures; pop rebinds to the restored owner's (legal — a live shadow
-  entry's module is by definition still mapped). Unreflected types carry a null
-  thunk and skip the meta step (matches today's nullable `desc.meta`).
+  pusher's closures; pop rebinds to the restored owner's — legal for
+  module-owned entries, whose live handle proves the module is still mapped
+  (owner-0 entries are covered by the range net instead; see §3.6).
+  Unreflected types carry a null thunk and skip the meta step (matches
+  today's nullable `desc.meta`).
 - **Non-component reflected types** (plugin-private enums/structs — reachable
   via `GetByName`/`GetMeta`/`ForEachType` even after their component is gone):
   explicit `RegisterMeta<Ts...>()` adopts/rebinds the entry the static-init
@@ -151,8 +172,16 @@ ComponentIDs are **never freed** — the TypeContext hash→id mapping persists
    `ComponentModule engineModule` (declared **after** `components` so
    destruction order is automatic), opened as `"Arcane.Engine"`, registering
    the 11-type roster.
-2. **Plugin Init** — plugin opens its own handle (plugin-side static),
-   registers **only its own types**. The 16 engine-type `ReRegisterComponent`
+2. **Plugin Init** — plugin opens its own handle, **heap-held plugin-side**
+   (e.g. a file-scope `std::optional<ComponentModule>`), registers **only its
+   own types**, and resets it explicitly in `GamePlugin_Shutdown`. **Never a
+   plugin-side static object** (review finding 2, empirically confirmed): a
+   DLL static's destructor runs *during* `FreeLibrary` at
+   `DLL_PROCESS_DETACH` under the loader lock (VS18 CRT:
+   `dll_dllmain.cpp` drives `__scrt_dllmain_uninitialize_c()` → `_cexit()` →
+   static-destructor table) — which would take `m_registrationMutex`, run
+   meta build thunks, and possibly release the last registry `shared_ptr`
+   all under the loader lock. The 16 engine-type `ReRegisterComponent`
    lines across Sandbox/PlaygroundGame are deleted, not migrated.
    PlaygroundGame registers nothing (owns no types).
 3. **Plugin Shutdown** — `g_module.reset()` (runs before unmap by the existing
@@ -182,10 +211,21 @@ info level with both module names, so needless overrides are visible.
   user callback under either (C3 lesson).
 - Moved-from handle: empty, dtor no-ops. Double reset: idempotent. Two handles
   from one DLL: allowed, distinct owners.
-- Plugin forgets `Shutdown` cleanup: handle stays alive (holds the registry
-  `shared_ptr`); descriptors dangle at unmap exactly like today; the range
-  purge catches the descriptor half. `RegisterMeta`-owned metas cannot be
-  address-probed — documented as the one thing only the RAII path cleans.
+- Plugin forgets `Shutdown` cleanup: under the mandated heap-held contract the
+  handle is genuinely leaked — it stays alive (holding the registry
+  `shared_ptr`), its descriptors dangle at unmap, and the range purge catches
+  the descriptor half. `RegisterMeta`-owned metas cannot be address-probed —
+  documented as the one thing only the RAII path cleans. (This is why the
+  handle must be heap-held with explicit reset, not a static whose detach-time
+  destructor would "self-heal" under the loader lock — see §3.5.2.)
+- **Owner-0 restore scoping (review finding 6):** the invariant "a restored
+  shadow entry's module is by definition still mapped" holds only for
+  **module-owned** entries — a live handle proves its module is mapped. An
+  anonymous (owner-0) shadowed entry may originate from a non-RAII module that
+  has since unloaded; restoring it would re-materialize dangling pointers. The
+  extended range net covers this: a host that purges the dying image (as
+  Arcane does) strips its owner-0 shadow entries before any restore can
+  surface them.
 - POSIX: RAII path needs no image spans; the platform gap only affects the
   fallback net (unchanged from today).
 
@@ -219,14 +259,35 @@ ceiling**):
 
 **Arcane** (acceptance, after vendor sync): `[hotreload]` suite,
 `PluginHostTest`, `EditorComponentCatalogTest`, plus a **new regression test
-for the secondary-plugin disown hole**. ABI bump to **v10**.
+for the secondary-plugin disown hole**, plus an acceptance assertion that no
+consumer retains a `TypeMeta*` across `RegisterMeta` erasure (review finding
+7 — today's transient-use pattern becomes a tested contract, not a doc
+promise). ABI bump to **v10**.
 
-## 5. Sequencing
+**Exit gate (review finding 5):** the in-repo legacy surface is 23
+`ReRegisterComponent` occurrences across 8 files (the 17 plugin-Init lines
+plus comment references in Runtime.cpp/PluginHost.cpp and three test files).
+The Arcane movement ends with a zero-legacy sweep — `grep -riw
+ReRegisterComponent` with build/vendor path-excludes — and that sweep must
+cover **all plugin repos under D:\dev\starworks**, not just the Gacha tree
+(the survey-misses-the-sibling failure mode below).
+
+## 5. Sequencing — three movements
 
 1. **Astra movement:** branch → SDD (spec → plan → TDD tasks) → whole-branch
    OPUS review → 3-config → local FF-merge to dev, delete branch, do not push.
-2. **Arcane movement (inseparable pair):** `scripts\sync-astra.ps1` vendor bump
-   + migration (Runtime engineModule, PluginHost step-7 deletion + net
-   retention, plugin rosters deleted/replaced, ABI v10) + Arcane test suite.
+2. **Arcane movement (inseparable pair with the sync):**
+   `scripts\sync-astra.ps1` vendor bump + migration (Runtime engineModule,
+   PluginHost step-7 deletion + net retention, plugin rosters
+   deleted/replaced, ABI v10) + Arcane test suite + the zero-legacy sweep.
    The vendor sync must not run before the migration is ready —
    `ReRegisterComponent` no longer exists after this lands.
+3. **Aphelyon movement (review finding 1):** the sibling repo
+   `D:\dev\starworks\Aphelyon` is outside every Gacha-scoped sweep and calls
+   `ReRegisterComponent` on three engine types (`Aphelyon.cpp:81-83`:
+   Transform, WorldTransform, SpriteRenderer). Migrate: delete those lines
+   (engine-owned types; open a handle only if Aphelyon grows its own
+   component types), re-stamp its project manifest to `engineAbi 10`, and
+   rebuild against the v10 SDK. Gated on the same v10 stamp as movement 2;
+   until it lands, Aphelyon.dll correctly fails the ABI pairing rather than
+   silently misbehaving.
