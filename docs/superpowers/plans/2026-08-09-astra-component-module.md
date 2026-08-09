@@ -33,6 +33,8 @@
 - Produces (later tasks rely on these exact names):
   - `template<typename T> struct Astra::Detail::MetaFactory { static inline std::function<TypeMeta()> fn; };`
   - `TypeMeta* MetaRegistry::RebindInPlace(TypeMeta&& fresh);` — install if absent; identity-collision refuse (nullptr) exactly like `Register(TypeMeta&&)`; else move-assign through the existing pointer (address stable) and return it.
+  - `bool MetaRegistry::Erase(uint64_t hash);` — public, GUARDED: refuses (`ASTRA_ENSURE_ALWAYS` + false) when `m_typeToComponentId` contains the hash (a live component's meta must never be pulled out from under cached `ComponentDescriptor::meta` pointers). Removes the entry only.
+  - `bool MetaRegistry::EraseUnchecked(uint64_t hash);` — internal clear-path form: removes the entry AND both link-map rows (`m_typeToComponentId` by hash; `m_componentIdToType` by the linked id, if any). Used by ComponentRegistry when a slot clears to empty (spec §3.6 meta-lifecycle adjudication).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -84,6 +86,9 @@ TEST(MetaRebind, RebindInPlaceKeepsAddressAndLink)
 
 TEST(MetaRebind, RebindInPlaceInstallsWhenAbsent)
 {
+    // NOTE: this test (and the 9999 link above) permanently mutates the
+    // shared default-context registry -- harmless: synthetic hashes/ids no
+    // real suite reads (plan-review finding 6).
     auto& reg = Astra::MetaRegistry::Instance();
     Astra::TypeMeta synthetic;
     synthetic.typeHash = 0xA110C8ED00000001ull;    // no reflect block uses this hash
@@ -92,7 +97,30 @@ TEST(MetaRebind, RebindInPlaceInstallsWhenAbsent)
     ASSERT_NE(installed, nullptr);
     EXPECT_EQ(reg.Get(0xA110C8ED00000001ull), installed);
 }
+
+TEST(MetaRebind, EraseGuardsComponentLinkedHashes)
+{
+    auto& reg = Astra::MetaRegistry::Instance();
+    // Synthetic non-component entry: public Erase succeeds.
+    Astra::TypeMeta loose;
+    loose.typeHash = 0xA110C8ED00000002ull;
+    loose.typeName = "Astra_Test_ModMeta::SyntheticLoose";
+    ASSERT_NE(reg.RebindInPlace(std::move(loose)), nullptr);
+    EXPECT_TRUE(reg.Erase(0xA110C8ED00000002ull));
+    EXPECT_EQ(reg.Get(0xA110C8ED00000002ull), nullptr);
+
+    // Component-linked entry (MetaProbe was linked to 9999 above): public
+    // Erase REFUSES; EraseUnchecked removes entry + link rows.
+    const uint64_t hash = Astra::TypeID<Astra_Test_ModMeta::MetaProbe>::Hash();
+    EXPECT_FALSE(reg.Erase(hash));
+    ASSERT_NE(reg.Get(hash), nullptr);
+    EXPECT_TRUE(reg.EraseUnchecked(hash));
+    EXPECT_EQ(reg.Get(hash), nullptr);
+    EXPECT_EQ(reg.GetByComponentId(static_cast<Astra::ComponentID>(9999)), nullptr);
+}
 ```
+
+(Ordering note: `EraseGuardsComponentLinkedHashes` depends on `RebindInPlaceKeepsAddressAndLink` having linked 9999 — GoogleTest runs same-file tests in declaration order; keep the order as written.)
 
 - [ ] **Step 2: Regenerate the solution and run the test to verify it fails**
 
@@ -165,7 +193,40 @@ Add directly below `Register(TypeMeta&&)` (:95-133), mirroring its identity chec
             existing = std::move(fresh);   // move-assign: unique_ptr target address unchanged
             return &existing;
         }
+
+        // Public erase: for module-owned NON-component metas (RegisterMeta
+        // teardown). Refuses a component-linked hash -- erasing one would
+        // dangle every cached ComponentDescriptor::meta for a live component.
+        bool Erase(uint64_t hash)
+        {
+            std::unique_lock lock(m_mutex);
+            if (m_typeToComponentId.Find(hash) != m_typeToComponentId.end())
+            {
+                ASTRA_ENSURE_ALWAYS(false,
+                    "MetaRegistry::Erase refused: hash is component-linked (use the "
+                    "component clear path, not a manual erase)");
+                return false;
+            }
+            return m_types.Erase(hash) != 0;
+        }
+
+        // Internal clear-path erase (spec 2026-08-09 meta-lifecycle rule):
+        // called when a component slot clears TO EMPTY, so the descriptor is
+        // already gone and nothing legitimately holds this meta. Removes the
+        // entry AND both link rows.
+        bool EraseUnchecked(uint64_t hash)
+        {
+            std::unique_lock lock(m_mutex);
+            if (auto it = m_typeToComponentId.Find(hash); it != m_typeToComponentId.end())
+            {
+                m_componentIdToType.Erase(it->second);
+                m_typeToComponentId.Erase(it);
+            }
+            return m_types.Erase(hash) != 0;
+        }
 ```
+
+(Adjust the two `Erase(it)`-style calls to FlatMap's actual iterator/key erase overloads — FlatMap.hpp:620/:629.)
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -472,7 +533,7 @@ git commit -m "feat(component): ComponentModule::Open with context tripwire + ow
 - Consumes: Task 2 surface.
 - Produces:
   - `struct ComponentRegistry::ShadowEntry { uint32_t owner; ComponentDescriptor desc; MetaBuildFn buildMeta; };`
-  - `SmallVector<ComponentRegistry::MetaRestore, 4> ComponentRegistry::ReleaseModule(uint32_t owner);` where `struct MetaRestore { MetaBuildFn buildMeta; uint64_t hash; ComponentID id; };` — performs the locked sweep and RETURNS the meta rebuilds for the caller to run outside all locks.
+  - `SmallVector<ComponentRegistry::MetaRestore, 4> ComponentRegistry::ReleaseModule(uint32_t owner);` where `struct MetaRestore { MetaBuildFn buildMeta; uint64_t hash; ComponentID id; };` — performs the locked sweep and RETURNS the meta work for the caller to run outside all locks. **`buildMeta != nullptr` ⇒ rebuild + `RebindInPlace` + `LinkToComponent`; `buildMeta == nullptr` ⇒ the slot cleared TO EMPTY: `EraseUnchecked(hash)`** (spec §3.6 meta-lifecycle rule — no stale meta stays reachable after its module's type vanishes).
   - Push semantics inside `InstallOwned`: different-live-owner slot → current live entry (owner, desc, thunk) moves into `m_shadow[id]`, new entry installed, `ASTRA_LOG_INFO` naming both modules.
 
 - [ ] **Step 1: Write the failing tests** (append to ComponentModuleTest.cpp; REUSE `Astra_Test_Mod::OwnedA/OwnedB` — no new types)
@@ -567,6 +628,33 @@ TEST(ComponentModule, SameModuleReRegisterDoesNotGrowShadow)
     // (no shadow left behind: OwnedA pops to empty, not to a stale copy of itself)
 }
 
+TEST(ComponentModule, MidStackRemovalAtDepthTwo)
+{
+    // Plan-review finding 2: the nontrivial ReleaseModule branch. Base
+    // (anonymous) -> modA overrides -> modB overrides; destroying modA
+    // (MID-stack) must not disturb modB's live entry; destroying modB then
+    // restores the BASE (modA's entry is gone from the middle).
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    const auto idA = Astra::TypeID<Astra_Test_Mod::OwnedA>::Value();
+
+    creg->RegisterComponent<Astra_Test_Mod::OwnedA>();       // base, owner 0
+    auto modA = Astra::ComponentModule::Open(creg, "DepthA");
+    modA.Register<Astra_Test_Mod::OwnedA>();
+    auto modB = Astra::ComponentModule::Open(creg, "DepthB");
+    modB.Register<Astra_Test_Mod::OwnedA>();
+    const uint32_t ownerB = creg->GetOwner(idA);
+
+    modA.Reset();                                            // mid-stack removal
+    ASSERT_NE(creg->GetComponentDescriptor(idA), nullptr);
+    EXPECT_EQ(creg->GetOwner(idA), ownerB);                  // live entry untouched
+
+    modB.Reset();                                            // pops PAST the removed middle
+    ASSERT_NE(creg->GetComponentDescriptor(idA), nullptr);   // base restored
+    EXPECT_EQ(creg->GetOwner(idA), 0u);
+    EXPECT_NE(creg->GetComponentDescriptor(idA)->defaultConstruct, nullptr);
+}
+
 TEST(ComponentModule, MoveAndDoubleResetAreIdempotent)
 {
     InstalledContext ctx;
@@ -639,11 +727,16 @@ In `ComponentRegistry.hpp`:
                 }
                 else
                 {
+                    const uint64_t clearedHash = m_components[id].hash;
                     m_components[id] = ComponentDescriptor{};
                     m_present.Reset(id);
                     m_owner[id] = 0;
                     m_metaThunk[id] = nullptr;
                     m_registered[id].store(false, std::memory_order_release);
+                    // buildMeta == nullptr ⇒ caller runs EraseUnchecked(hash)
+                    // outside this lock (spec §3.6: cleared-to-empty types
+                    // take their meta with them).
+                    metaWork.push_back({nullptr, clearedHash, static_cast<ComponentID>(id)});
                 }
             }
             return metaWork;
@@ -662,9 +755,16 @@ In `ComponentRegistry.hpp`:
                 auto metaWork = m_registry->ReleaseModule(m_moduleId);
                 for (auto& w : metaWork)          // outside all locks: user reflect code
                 {
-                    TypeMeta fresh = w.buildMeta();
-                    m_context->Meta().RebindInPlace(std::move(fresh));
-                    m_context->Meta().LinkToComponent(w.hash, w.id);
+                    if (w.buildMeta)              // survivor restored: rebind its meta
+                    {
+                        TypeMeta fresh = w.buildMeta();
+                        m_context->Meta().RebindInPlace(std::move(fresh));
+                        m_context->Meta().LinkToComponent(w.hash, w.id);
+                    }
+                    else                          // cleared to empty: meta goes too
+                    {
+                        m_context->Meta().EraseUnchecked(w.hash);
+                    }
                 }
                 EraseOwnedMetas();                // Task 5 adds this; Task 3: omit the call
             }
@@ -730,6 +830,37 @@ TEST(ComponentModule, MetaRebindsAcrossPushAndPop)
     EXPECT_EQ(Astra::MetaRegistry::Instance().GetByComponentId(idR), meta);
     EXPECT_NE(creg->GetComponentDescriptor(idR), nullptr);            // base descriptor restored
 }
+
+namespace Astra_Test_ModMeta2
+{
+    struct ReflectedEphemeral { int y = 0; };   // type budget: 4th id-consuming type
+    ASTRA_REFLECT_TYPE(ReflectedEphemeral)
+        ASTRA_REFLECT_FIELD(ReflectedEphemeral, y)
+    ASTRA_REFLECT_TYPE_END()
+}
+
+TEST(ComponentModule, MetaErasedWhenSlotPopsToEmpty)
+{
+    // Spec §3.6 meta-lifecycle rule (plan-review finding 1): a module-owned
+    // reflected component with NO shadow survivor takes its meta with it --
+    // unload-before-load then reinstalls FRESH, never comparing against a
+    // stale entry whose typeName views unmapped storage.
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    const uint64_t hash = Astra::TypeID<Astra_Test_ModMeta2::ReflectedEphemeral>::Hash();
+
+    {
+        auto genN = Astra::ComponentModule::Open(creg, "EphemeralGenN");
+        genN.Register<Astra_Test_ModMeta2::ReflectedEphemeral>();
+        ASSERT_NE(Astra::MetaRegistry::Instance().Get(hash), nullptr);
+    }
+    EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash), nullptr);    // meta erased with the slot
+
+    auto genN1 = Astra::ComponentModule::Open(creg, "EphemeralGenN1");
+    genN1.Register<Astra_Test_ModMeta2::ReflectedEphemeral>();        // absent path: fresh install
+    EXPECT_NE(Astra::MetaRegistry::Instance().Get(hash), nullptr);
+    EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash)->fields.size(), 1u);
+}
 ```
 
 - [ ] **Step 2: Build, run.** Expected: PASS if Tasks 1–3 wired the thunks correctly; if it fails, the gap is in `RegisterComponent`'s cold path not capturing the thunk (Task 2 Step 4) or `Reset()` not running `metaWork` (Task 3 Step 3) — fix there, not here.
@@ -747,14 +878,13 @@ git commit -m "test(component): meta rebind end-to-end across owner push/pop"
 
 **Files:**
 - Modify: `include/Astra/Component/ComponentModule.hpp` (add `RegisterMeta`, `EraseOwnedMetas`)
-- Modify: `include/Astra/Reflection/MetaRegistry.hpp` (add `Erase(uint64_t hash)`)
 - Test: `tests/Component/ComponentModuleTest.cpp` (extend)
 
 **Interfaces:**
+- Consumes: Task 1's guarded `MetaRegistry::Erase(hash)` (refuses component-linked hashes — `RegisterMeta` types are non-components, so the legit path always passes the guard).
 - Produces:
   - `template<typename... Ts> void ComponentModule::RegisterMeta();` — for each T: requires `Detail::MetaFactory<T>::fn` (reflected in this module; `ASTRA_ENSURE` + skip otherwise); builds outside locks; `RebindInPlace`; records `TypeID<T>::Hash()` in the handle's owned-meta list (`SmallVector<uint64_t, 4> m_ownedMetas`).
-  - `bool MetaRegistry::Erase(uint64_t hash);` — removes the entry AND both link-map rows (`m_typeToComponentId` by hash; `m_componentIdToType` by the linked id, if any). Returns whether an entry was removed.
-  - `ComponentModule::Reset()` calls `EraseOwnedMetas()` (uncomment the Task-3 placeholder): for each recorded hash, `m_context->Meta().Erase(hash)`.
+  - `ComponentModule::Reset()` calls `EraseOwnedMetas()` (uncomment the Task-3 placeholder): for each recorded hash, `m_context->Meta().Erase(hash)` — the PUBLIC guarded form.
 
 - [ ] **Step 1: Write the failing tests** (types budget: 4th of 7 — a reflected NON-component struct; it consumes no ComponentID since it is never registered as a component)
 
@@ -790,7 +920,7 @@ TEST(ComponentModule, RegisterMetaAdoptsAndErasesOnDestruction)
 
 - [ ] **Step 2: Build, verify FAIL** (`RegisterMeta`/`Erase` missing).
 
-- [ ] **Step 3: Implement** — `MetaRegistry::Erase` below `RebindInPlace` (unique_lock on `m_mutex`; `m_types.Erase(hash)`; look up `m_typeToComponentId.Find(hash)` first and erase the reverse row too). `ComponentModule::RegisterMeta` mirrors `RegisterOne`'s phase-2 only (no descriptor phase), then `m_ownedMetas.push_back(TypeID<T>::Hash())`. Wire `EraseOwnedMetas()` into `Reset()` before the registry release.
+- [ ] **Step 3: Implement** — `ComponentModule::RegisterMeta` mirrors `RegisterOne`'s phase-2 only (no descriptor phase), then `m_ownedMetas.push_back(TypeID<T>::Hash())`. `EraseOwnedMetas()` iterates the list calling `m_context->Meta().Erase(hash)` (Task 1's guarded public form). Wire the call into `Reset()` before the registry release.
 
 - [ ] **Step 4: Build, run `ComponentModule*` + `MetaRebind*` + full suite. Commit**
 
@@ -817,9 +947,22 @@ Remove `ReRegisterComponent` (ComponentRegistry.hpp:59-68). In the `UnregisterMo
 - [ ] **Step 2: Rewrite the three tests** (keep the existing `Astra_Test_ReReg` probe types — zero new ids):
 
 ```cpp
+namespace
+{
+    // Same RAII guard as ComponentModuleTest.cpp (plan-review finding 3):
+    // a failed ASSERT must not leak an installed slot into later tests --
+    // OpenRefusesWithoutInstalledContext asserts a null slot as its
+    // precondition. Duplicated 6 lines; anonymous namespace, no ODR issue.
+    struct InstalledContext
+    {
+        InstalledContext()  { Astra::SetTypeContext(&Astra::DefaultTypeContext()); }
+        ~InstalledContext() { Astra::SetTypeContext(nullptr); }
+    };
+}
+
 TEST(ComponentRegistryReRegister, ModuleOverrideRebuildsDescriptor)
 {
-    Astra::SetTypeContext(&Astra::DefaultTypeContext());
+    InstalledContext ctx;
     auto registry = std::make_shared<Astra::ComponentRegistry>();
     registry->RegisterComponent<Astra_Test_ReReg::ReRegProbe>();
     const auto* before = registry->GetComponentDescriptor(Astra::TypeID<Astra_Test_ReReg::ReRegProbe>::Value());
@@ -833,7 +976,6 @@ TEST(ComponentRegistryReRegister, ModuleOverrideRebuildsDescriptor)
     EXPECT_EQ(after->id, id);
     EXPECT_EQ(after->hash, hash);
     EXPECT_NE(after->defaultConstruct, nullptr);
-    Astra::SetTypeContext(nullptr);
 }
 
 TEST(ComponentRegistryReRegister, RegisterRemainsIdempotent)
@@ -847,14 +989,13 @@ TEST(ComponentRegistryReRegister, RegisterRemainsIdempotent)
 
 TEST(ComponentRegistryReRegister, ModuleRegisterOnFreshTypeActsAsRegister)
 {
-    Astra::SetTypeContext(&Astra::DefaultTypeContext());
+    InstalledContext ctx;
     auto registry = std::make_shared<Astra::ComponentRegistry>();
     auto mod = Astra::ComponentModule::Open(registry, "FreshTest");
     mod.Register<Astra_Test_ReReg::FreshProbe>();
     const auto* desc = registry->GetComponentDescriptor(Astra::TypeID<Astra_Test_ReReg::FreshProbe>::Value());
     ASSERT_NE(desc, nullptr);
     EXPECT_EQ(registry->Size(), 1u);
-    Astra::SetTypeContext(nullptr);
 }
 ```
 
@@ -933,7 +1074,7 @@ Add `ASTRA_NODISCARD size_t ComponentRegistry::ComponentNameCount() const { retu
 `UnregisterModuleRange` extension, inside the existing per-id loop (after the current live-entry `owned` check), with the same `inRange` lambda:
 
 1. First strip in-range SHADOW entries for this id (same fn-pointer probe against each `ShadowEntry::desc`), regardless of whether the live entry is owned.
-2. Then, if the live entry is in-range: instead of always blanking, restore the newest REMAINING shadow entry (same code path as `ReleaseModule` — extract a private `RestoreOrClearSlot(ComponentID id)` helper used by both) and count it dropped. Meta rebuild work from a restore inside the purge is returned the same way — change `UnregisterModuleRange` to collect `MetaRestore` items and run them after releasing the lock, exactly like `Reset()` does (the purge caller is the host, on its own thread, no locks held).
+2. Then, if the live entry is in-range: instead of always blanking, restore the newest REMAINING shadow entry (same code path as `ReleaseModule` — extract a private `RestoreOrClearSlot(ComponentID id)` helper used by both) and count it dropped. Meta work from inside the purge is collected the same way — `MetaRestore` items (restore ⇒ rebuild+rebind+relink; **clear-to-empty ⇒ null buildMeta + the purged descriptor's hash, captured BEFORE blanking ⇒ `EraseUnchecked`**, spec §3.6) and run after releasing the registration lock. The purge has no captured context — it runs the meta work through `MetaRegistry::Instance()`, which is correct here because the caller is the HOST (the module that installed the shared context), not the dying plugin.
 3. Also clear `m_owner[id]`/`m_metaThunk[id]` when in-range (a purged thunk must never be invoked).
 
 `StoreComponentName` reuse: before `emplace_back`, linear-scan `m_componentNames` for an equal string and return its `c_str()` if found (the deque is tiny — bounded by distinct type names; a hot-reload loop re-registers the SAME names, which is exactly the case this makes O(existing) instead of unbounded growth).
@@ -988,7 +1129,12 @@ TEST(ComponentModule, InstallOwnedRefusesInvalidId)
 
 (`ComponentModule::RegisterOne`'s own early-return on `INVALID_COMPONENT` is the same branch, exercised process-wide by the Theme E collision suites.)
 
-- [ ] **Step 2: Final header doc pass** on `ComponentModule.hpp`: the class comment must state (verbatim requirements from the spec) — heap-held in plugins, reset in Shutdown, NEVER a DLL static (destructor under loader lock), "register only what you own" posture, `Register<T>` instantiation-module significance, and that `UnregisterModuleRange` remains the fallback net.
+- [ ] **Step 2: Final header doc pass** on `ComponentModule.hpp` and the new registry members. The class comment must state (verbatim requirements from the spec) — heap-held in plugins, reset in Shutdown, NEVER a DLL static (destructor under loader lock), "register only what you own" posture, `Register<T>` instantiation-module significance, and that `UnregisterModuleRange` remains the fallback net. Plus these four one-liners (plan-review findings 5 & 6):
+  - In `RegisterOne`, above the `MakeDescriptor` call: `// desc.meta is captured BEFORE the phase-2 rebind -- valid only because RebindInPlace is address-stable.`
+  - In `RegisterOne`, above the `Meta().Get` call: `// Get() never drains the pending queue (TypeContext.hpp:210-213); it cannot miss here only because Open's tripwire proved SetTypeContext ran, which drained.`
+  - On the phase-1/phase-2 pair: `// Not atomic across two modules racing the same type -- benign: reload registration is host-serialized by contract.`
+  - On the purge restore path (Task 7's helper): `// A restored shadow entry's module is still mapped only under RAII discipline; a host that unmapped a non-RAII module without purging it first double-faults here -- that ordering is the documented contract.`
+  - `ComponentNameCount()` doc: `// Introduced for registration-lifecycle tests + AstraStudio's registry panel; counts distinct stored name strings, not registered components.`
 
 - [ ] **Step 3: 3-config gate**
 
