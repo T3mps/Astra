@@ -10,6 +10,7 @@
 #include <type_traits>
 
 #include "../Container/FlatMap.hpp"
+#include "../Container/SmallVector.hpp"
 #include "../Core/Result.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Reflection/MetaRegistry.hpp"
@@ -306,10 +307,31 @@ namespace Astra
             return (id < MAX_COMPONENTS) ? m_owner[id] : 0u;
         }
 
-        // ComponentModule plumbing (Task 2 scope: empty slot or same-owner
-        // replace; Task 3 adds the shadow push for different-owner slots).
-        // By-value desc: InstallOwned sets desc.name from StoreComponentName
-        // under the lock before writing the slot.
+        // Snapshot of a slot's previously-live entry, taken when a different
+        // owner overrides it (InstallOwned) so ReleaseModule can restore it.
+        struct ShadowEntry { uint32_t owner; ComponentDescriptor desc; MetaBuildFn buildMeta; };
+        // Post-lock meta work ReleaseModule hands back to its caller: either
+        // rebuild+rebind (buildMeta set, a survivor was restored) or erase
+        // (buildMeta null, the slot cleared to empty).
+        struct MetaRestore { MetaBuildFn buildMeta; uint64_t hash; ComponentID id; };
+
+        // ComponentModule plumbing. Full semantics (Task 3):
+        //   1. id >= MAX_COMPONENTS -> refused (false).
+        //   2. Slot empty            -> plain install.
+        //   3. Live owner == owner   -> in-place replace of the live entry
+        //                               (no shadow: this module is just
+        //                               re-registering/rebinding its own type).
+        //   4. Live owner != owner   -> the CURRENT live entry (owner, desc,
+        //                               thunk) is pushed onto this id's shadow
+        //                               stack before the new entry overwrites
+        //                               the slot, so a later ReleaseModule can
+        //                               restore it.
+        // By-value desc: desc.name is caller-owned temporary storage (RegisterOne's
+        // stack std::string's c_str()) and is copied into registry-owned storage
+        // here, under the lock, before it is written into any slot. A pushed
+        // SHADOW copy needs no such re-storage: it is a copy of the CURRENT live
+        // entry, whose desc.name already points at registry-owned m_componentNames
+        // storage from that entry's own prior InstallOwned call.
         // Returns false when the id is invalid/refused. buildMeta may be null.
         bool InstallOwned(ComponentID id, uint32_t owner, ComponentDescriptor desc, MetaBuildFn buildMeta)
         {
@@ -320,6 +342,13 @@ namespace Astra
 
             std::lock_guard<std::mutex> lock(m_registrationMutex);
             desc.name = StoreComponentName(desc.name);
+
+            if (m_present.Test(id) && m_owner[id] != owner)
+            {
+                ASTRA_LOG_INFO(DescribeOverride(owner, m_owner[id], m_components[id].name));
+                m_shadow[id].push_back(ShadowEntry{m_owner[id], m_components[id], m_metaThunk[id]});
+            }
+
             m_components[id] = desc;
             m_present.Set(id);
             m_hashToID[desc.hash] = id;
@@ -329,7 +358,83 @@ namespace Astra
             return true;
         }
 
+        // Per-owner cleanup for module unload (ComponentModule::Reset). Under
+        // m_registrationMutex: strips this owner's SHADOWED entries wherever
+        // they sit in the stack, then -- for every id where this owner's entry
+        // is LIVE -- either restores the newest remaining shadow entry or clears
+        // the slot to empty. The meta rebuild/erase work is returned rather than
+        // performed here so the caller can run it OUTSIDE all locks (user
+        // reflection code may run arbitrary work in a MetaBuildFn thunk).
+        SmallVector<MetaRestore, 4> ReleaseModule(uint32_t owner)
+        {
+            SmallVector<MetaRestore, 4> metaWork;
+            std::lock_guard<std::mutex> lock(m_registrationMutex);
+            for (size_t id = 0; id < MAX_COMPONENTS; ++id)
+            {
+                // Drop this owner's SHADOWED entries wherever they sit.
+                if (auto it = m_shadow.Find(static_cast<ComponentID>(id)); it != m_shadow.end())
+                {
+                    auto& list = it->second;
+                    for (size_t i = list.size(); i-- > 0;)
+                        if (list[i].owner == owner)
+                            list.erase(list.begin() + static_cast<ptrdiff_t>(i));
+                    if (list.empty()) m_shadow.Erase(it);
+                }
+                if (!m_present.Test(id) || m_owner[id] != owner)
+                    continue;
+                // This owner's entry is LIVE: restore newest shadow, or clear.
+                if (auto it = m_shadow.Find(static_cast<ComponentID>(id));
+                    it != m_shadow.end() && !it->second.empty())
+                {
+                    ShadowEntry restored = std::move(it->second.back());
+                    it->second.pop_back();
+                    if (it->second.empty()) m_shadow.Erase(it);
+                    m_components[id] = restored.desc;        // same address, new contents
+                    m_owner[id]      = restored.owner;
+                    m_metaThunk[id]  = restored.buildMeta;
+                    if (restored.buildMeta)
+                        metaWork.push_back({restored.buildMeta, restored.desc.hash,
+                                            static_cast<ComponentID>(id)});
+                }
+                else
+                {
+                    const uint64_t clearedHash = m_components[id].hash;
+                    m_components[id] = ComponentDescriptor{};
+                    m_present.Reset(id);
+                    m_owner[id] = 0;
+                    m_metaThunk[id] = nullptr;
+                    m_registered[id].store(false, std::memory_order_release);
+                    // buildMeta == nullptr ⇒ caller runs EraseUnchecked(hash)
+                    // outside this lock (spec §3.6: cleared-to-empty types
+                    // take their meta with them).
+                    metaWork.push_back({nullptr, clearedHash, static_cast<ComponentID>(id)});
+                }
+            }
+            return metaWork;
+        }
+
     private:
+        // Builds the ASTRA_LOG_INFO override-notice body for InstallOwned's
+        // different-owner branch. `componentName` may be null (defensive only --
+        // the live slot always has a name once m_present is set).
+        std::string DescribeOverride(uint32_t newOwner, uint32_t prevOwner, const char* componentName) const
+        {
+            auto nameOf = [this](uint32_t o) -> std::string_view
+            {
+                return (o != 0 && static_cast<size_t>(o - 1) < m_moduleNames.size())
+                    ? std::string_view(m_moduleNames[o - 1])
+                    : std::string_view("(anonymous)");
+            };
+            std::string msg = "ComponentModule: module '";
+            msg += nameOf(newOwner);
+            msg += "' overrides '";
+            msg += nameOf(prevOwner);
+            msg += "' for component '";
+            msg += componentName ? componentName : "";
+            msg += "'";
+            return msg;
+        }
+
         template<Component T>
         void RegisterComponentImpl(ComponentID id)
         {
@@ -493,5 +598,10 @@ namespace Astra
         MetaBuildFn m_metaThunk[MAX_COMPONENTS] = {};
         uint32_t m_nextModuleId = 1;         // module ids; issued under m_registrationMutex
         std::deque<std::string> m_moduleNames;  // index = moduleId - 1; diagnostics
+
+        // Sparse shadow stack: only ids that have EVER been overridden by a
+        // different owner get an entry here. Written only under
+        // m_registrationMutex (InstallOwned pushes; ReleaseModule pops/strips).
+        FlatMap<ComponentID, SmallVector<ShadowEntry, 1>> m_shadow;
     };
 }

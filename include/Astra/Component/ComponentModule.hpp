@@ -115,10 +115,33 @@ namespace Astra
         uint32_t m_moduleId = 0;
     };
 
-    // Task-2 scope: release the handle. Task 3 adds the removal sweep here
-    // (unregistering this module's owned descriptors from the registry).
+    // Full unload semantics (Task 3). A no-op on a moved-from or
+    // already-reset handle (operator bool guards the sweep). ReleaseModule
+    // does the locked bookkeeping and hands back the meta work; that work
+    // runs here, OUTSIDE any registry lock, because a MetaBuildFn thunk (or
+    // MetaRegistry's own mutex) is user reflection code the registry lock
+    // must not be held across.
     inline void ComponentModule::Reset()
     {
+        if (*this)
+        {
+            auto metaWork = m_registry->ReleaseModule(m_moduleId);
+            for (auto& w : metaWork)          // outside all locks: user reflect code
+            {
+                if (w.buildMeta)              // survivor restored: rebind its meta
+                {
+                    TypeMeta fresh = w.buildMeta();
+                    m_context->Meta().RebindInPlace(std::move(fresh));
+                    m_context->Meta().LinkToComponent(w.hash, w.id);
+                }
+                else                          // cleared to empty: meta goes too
+                {
+                    m_context->Meta().EraseUnchecked(w.hash);
+                }
+            }
+            // EraseOwnedMetas() (module-owned non-component metas) is Task 5's
+            // addition; nothing to release here yet.
+        }
         m_registry.reset();
         m_context = nullptr;
         m_moduleId = 0;
