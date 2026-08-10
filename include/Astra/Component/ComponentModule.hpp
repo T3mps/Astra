@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 
+#include "../Container/SmallVector.hpp"
 #include "../Core/TypeContext.hpp"
 #include "../Core/TypeID.hpp"
 #include "ComponentRegistry.hpp"
@@ -44,6 +45,19 @@ namespace Astra
             (RegisterOne<Ts>(), ...);
         }
 
+        // Module-owned NON-component reflected types (Task 5). T is never
+        // registered as a component here -- no ComponentID is consumed, no
+        // descriptor phase, no LinkToComponent. The module still owns the
+        // meta's lifetime: RebindInPlace points the closures into THIS
+        // image, and the recorded hash is erased (via the guarded public
+        // MetaRegistry::Erase) when the handle is reset/destroyed.
+        template<typename... Ts>
+        void RegisterMeta()
+        {
+            if (!*this) return;
+            (RegisterOneMeta<Ts>(), ...);
+        }
+
         void Reset();                      // Task 3 fills the removal sweep; Task 2: just release
         ~ComponentModule() { Reset(); }
 
@@ -56,8 +70,10 @@ namespace Astra
                 m_registry = std::move(other.m_registry);
                 m_context  = other.m_context;
                 m_moduleId = other.m_moduleId;
+                m_ownedMetas = std::move(other.m_ownedMetas);
                 other.m_context  = nullptr;
                 other.m_moduleId = 0;
+                other.m_ownedMetas.clear();
             }
             return *this;
         }
@@ -110,9 +126,45 @@ namespace Astra
             }
         }
 
+        // Mirrors RegisterOne's phase 2 ONLY -- T is not a component, so
+        // there is no id mint, no descriptor, no InstallOwned/LinkToComponent.
+        // Requires T reflected in THIS module (Detail::MetaFactory<T>::fn);
+        // otherwise refuses observably and skips, matching RegisterOne's
+        // treat-refusal-as-safe-no-op contract.
+        template<typename T>
+        void RegisterOneMeta()
+        {
+            if (!*this) return;
+            if (!Detail::MetaFactory<T>::fn)
+            {
+                ASTRA_ENSURE_ALWAYS(false, "RegisterMeta<T> requires T reflected in this module");
+                return;
+            }
+
+            MetaBuildFn thunk = &Detail::BuildMetaThunk<T>;   // built outside locks
+
+            TypeMeta fresh = thunk();
+            m_context->Meta().RebindInPlace(std::move(fresh));
+            m_ownedMetas.push_back(TypeID<T>::Hash());
+        }
+
+        // Erases every meta this handle owns via RegisterMeta (guarded public
+        // Erase -- non-component hashes always pass the component-linked
+        // check, so this never refuses in the legitimate path). Called from
+        // Reset() BEFORE the registry/context members are released.
+        void EraseOwnedMetas()
+        {
+            for (uint64_t hash : m_ownedMetas)
+            {
+                m_context->Meta().Erase(hash);
+            }
+            m_ownedMetas.clear();
+        }
+
         std::shared_ptr<ComponentRegistry> m_registry;
         TypeContext* m_context = nullptr;
         uint32_t m_moduleId = 0;
+        SmallVector<uint64_t, 4> m_ownedMetas;
     };
 
     // Full unload semantics (Task 3). A no-op on a moved-from or
@@ -139,8 +191,9 @@ namespace Astra
                     m_context->Meta().EraseUnchecked(w.hash);
                 }
             }
-            // EraseOwnedMetas() (module-owned non-component metas) is Task 5's
-            // addition; nothing to release here yet.
+            // Module-owned non-component metas (RegisterMeta, Task 5): erase
+            // BEFORE releasing m_context -- EraseOwnedMetas needs it valid.
+            EraseOwnedMetas();
         }
         m_registry.reset();
         m_context = nullptr;

@@ -280,3 +280,33 @@ TEST(ComponentModule, MetaErasedWhenSlotPopsToEmpty)
     EXPECT_NE(Astra::MetaRegistry::Instance().Get(hash), nullptr);
     EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash)->fields.size(), 1u);
 }
+
+// ---- Task 5: RegisterMeta<Ts...> -- module-owned NON-component reflection --
+
+namespace Astra_Test_ModMeta3
+{
+    struct PluginPrivate { double d = 0.0; };   // reflected, never a component
+    ASTRA_REFLECT_TYPE(PluginPrivate)
+        ASTRA_REFLECT_FIELD(PluginPrivate, d)
+    ASTRA_REFLECT_TYPE_END()
+}
+
+TEST(ComponentModule, RegisterMetaAdoptsAndErasesOnDestruction)
+{
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    const uint64_t hash = Astra::TypeID<Astra_Test_ModMeta3::PluginPrivate>::Hash();
+
+    // The static-init drain installed it anonymously the first time any
+    // MetaRegistry::Instance() ran in this binary.
+    ASSERT_NE(Astra::MetaRegistry::Instance().Get(hash), nullptr);
+
+    {
+        auto mod = Astra::ComponentModule::Open(creg, "PrivateMetaOwner");
+        mod.RegisterMeta<Astra_Test_ModMeta3::PluginPrivate>();
+        EXPECT_NE(Astra::MetaRegistry::Instance().Get(hash), nullptr);
+    }
+    // Owned meta erased with the handle: GetMeta/GetByName can no longer
+    // reach closures that would have died with the module.
+    EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash), nullptr);
+}
