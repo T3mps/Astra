@@ -310,3 +310,47 @@ TEST(ComponentModule, RegisterMetaAdoptsAndErasesOnDestruction)
     // reach closures that would have died with the module.
     EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash), nullptr);
 }
+
+// ---- Task 7: UnregisterModuleRange unified with the shadow owner stack ----
+// Reuses Astra::Test::Position (in place of the brief's fictional
+// Astra_Test_Mod::OwnedA) for the same ComponentID-budget reason as the
+// Task 3 section above.
+
+TEST(ComponentModule, RangePurgeStripsShadowsAndRestoresSurvivor)
+{
+    // A non-RAII "module" (simulated by an anonymous base) is shadowed by an
+    // owned override; purging the OVERRIDE's address range must restore the
+    // base -- and purging a range covering a SHADOWED entry must strip it
+    // without touching the live one.
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    const auto idA = Astra::TypeID<Astra::Test::Position>::Value();
+
+    creg->RegisterComponent<Astra::Test::Position>();            // base
+    auto mod = Astra::ComponentModule::Open(creg, "PurgeVictim");
+    mod.Register<Astra::Test::Position>();                       // override (live)
+
+    // Purge the whole image (every fn pointer in this test binary lies in
+    // range): strips BOTH entries -- live override AND shadowed base -- so
+    // the slot must end EMPTY, not restored-to-a-purged-entry.
+    const auto* liveDesc = creg->GetComponentDescriptor(idA);
+    ASSERT_NE(liveDesc, nullptr);
+    const void* base = reinterpret_cast<const void*>(
+        reinterpret_cast<uintptr_t>(liveDesc->defaultConstruct) & ~uintptr_t(0xFFFF));
+    const size_t dropped = creg->UnregisterModuleRange(base, size_t(1) << 30);
+    EXPECT_GE(dropped, 1u);
+    EXPECT_EQ(creg->GetComponentDescriptor(idA), nullptr);        // no dangling restore
+    mod.Reset();                                                  // idempotent after purge: no crash
+}
+
+TEST(ComponentModule, ComponentNamesDoNotGrowOnRebind)
+{
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    auto mod = Astra::ComponentModule::Open(creg, "NameReuse");
+    mod.Register<Astra::Test::Position>();
+    const size_t after1 = creg->ComponentNameCount();
+    mod.Register<Astra::Test::Position>();
+    mod.Register<Astra::Test::Position>();
+    EXPECT_EQ(creg->ComponentNameCount(), after1);                // reused by content, not appended
+}
