@@ -168,10 +168,18 @@ ComponentIDs are **never freed** — the TypeContext hash→id mapping persists
 
 ### 3.5 Flows (Arcane as the concrete script)
 
-1. **Engine boot** — `Runtime::Impl` gains
-   `ComponentModule engineModule` (declared **after** `components` so
-   destruction order is automatic), opened as `"Arcane.Engine"`, registering
-   the 11-type roster.
+1. **Engine boot** — *(AMENDED 2026-08-10, movement-2 execution, user-ratified)*:
+   the engine roster stays on **anonymous** `RegisterComponent` (owner-0) —
+   NOT a Runtime-owned `ComponentModule`. The module-owned form was
+   implemented and reverted: Arcane's test suite runs ~48 short-lived
+   `Runtime` instances against one shared `TypeContext`, and each teardown's
+   `Reset()` erased shared reflected metas (the §3.6 single-registry-per-
+   context precondition, confirmed by the first real consumer within hours).
+   Nothing load-bearing is lost: the owner stack restores an owner-0 base on
+   plugin unload identically (empirically tested), and the engine module
+   never unloads, so RAII cleanup bought nothing in production. Handles are
+   the PLUGIN mechanism. Astra backlog note: per-registry meta scoping would
+   lift the precondition if a consumer ever needs module-owned engine rosters.
 2. **Plugin Init** — plugin opens its own handle, **heap-held plugin-side**
    (e.g. a file-scope `std::optional<ComponentModule>`), registers **only its
    own types**, and resets it explicitly in `GamePlugin_Shutdown`. **Never a
