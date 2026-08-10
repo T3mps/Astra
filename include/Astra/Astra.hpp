@@ -36,6 +36,7 @@
 
 // Component system
 #include "Component/Component.hpp"
+#include "Component/ComponentModule.hpp"
 #include "Component/ComponentRegistry.hpp"
 
 // Archetype system

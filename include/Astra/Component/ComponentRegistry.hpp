@@ -271,7 +271,14 @@ namespace Astra
         template<Component T>
         ASTRA_NODISCARD static ComponentDescriptor MakeDescriptor(ComponentID id, const TypeMeta* meta)
         {
-            ComponentDescriptor desc;
+            // Value-initialized, NOT default-initialized: the over-aligned
+            // refusal below returns early, and every field after that point
+            // would otherwise be INDETERMINATE. Zeroing up front makes a
+            // refused descriptor all-null/all-zero (null fn pointers, null
+            // name, zero hash) instead of garbage, so a caller that forgets
+            // to re-test desc.alignment fails loudly rather than silently
+            // calling into an uninitialized function pointer.
+            ComponentDescriptor desc{};
             desc.id = id;
             // Empty components should report size 0 to avoid memory allocation
             desc.size = std::is_empty_v<T> ? 0 : sizeof(T);
@@ -390,29 +397,54 @@ namespace Astra
         // SHADOW copy needs no such re-storage: it is a copy of the CURRENT live
         // entry, whose desc.name already points at registry-owned m_componentNames
         // storage from that entry's own prior InstallOwned call.
-        // Returns false when the id is invalid/refused. buildMeta may be null.
+        // Returns false when the id is invalid/refused, or when the descriptor
+        // is over-aligned. buildMeta may be null.
         bool InstallOwned(ComponentID id, uint32_t owner, ComponentDescriptor desc, MetaBuildFn buildMeta)
         {
             if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
             {
                 return false;
             }
-
-            std::lock_guard<std::mutex> lock(m_registrationMutex);
-            desc.name = StoreComponentName(desc.name);
-
-            if (m_present.Test(id) && m_owner[id] != owner)
+            // Defense in depth: this is a PUBLIC entry point, so it repeats
+            // MakeDescriptor's over-alignment refusal instead of trusting every
+            // caller to re-test it (RegisterComponentImpl:526 and
+            // ComponentModule::RegisterOne both do, but a hand-built descriptor
+            // need not have come through MakeDescriptor at all). Chunk storage
+            // can only honor alignments up to CACHE_LINE_SIZE; installing a
+            // descriptor above it would hand back misaligned component memory.
+            if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY
             {
-                ASTRA_LOG_INFO(DescribeOverride(owner, m_owner[id], m_components[id].name));
-                m_shadow[id].push_back(ShadowEntry{m_owner[id], m_components[id], m_metaThunk[id]});
+                return false;
             }
 
-            m_components[id] = desc;
-            m_present.Set(id);
-            m_hashToID[desc.hash] = id;
-            m_owner[id] = owner;
-            m_metaThunk[id] = buildMeta;
-            m_registered[id].store(true, std::memory_order_release);
+            // The override notice is BUILT under the lock (DescribeOverride
+            // reads m_moduleNames and the live slot's name) but EMITTED after
+            // the lock releases: ASTRA_LOG_INFO reaches a user-installed
+            // LogSink, and user code must never run under m_registrationMutex.
+            std::string overrideNotice;
+            {
+                std::lock_guard<std::mutex> lock(m_registrationMutex);
+                // std::string_view from a null pointer is UB, and a hand-built
+                // descriptor may legitimately arrive with desc.name unset.
+                desc.name = StoreComponentName(desc.name ? desc.name : "");
+
+                if (m_present.Test(id) && m_owner[id] != owner)
+                {
+                    overrideNotice = DescribeOverride(owner, m_owner[id], m_components[id].name);
+                    m_shadow[id].push_back(ShadowEntry{m_owner[id], m_components[id], m_metaThunk[id]});
+                }
+
+                m_components[id] = desc;
+                m_present.Set(id);
+                m_hashToID[desc.hash] = id;
+                m_owner[id] = owner;
+                m_metaThunk[id] = buildMeta;
+                m_registered[id].store(true, std::memory_order_release);
+            }
+            if (!overrideNotice.empty())
+            {
+                ASTRA_LOG_INFO(overrideNotice);
+            }
             return true;
         }
 
@@ -484,6 +516,12 @@ namespace Astra
                 // buildMeta == nullptr ⇒ caller runs EraseUnchecked(hash)
                 // outside this lock (spec §3.6: cleared-to-empty types
                 // take their meta with them).
+                // SCOPE CAVEAT: the meta lives in the SHARED TypeContext, not
+                // in this registry. If several ComponentRegistry instances
+                // share one context, a clear-to-empty here erases a TypeMeta
+                // that ANOTHER registry's still-live descriptor may cache in
+                // desc.meta. One registry per context is the supported shape
+                // for module-owned reflected components.
                 metaWork.push_back({nullptr, clearedHash, id});
             }
         }

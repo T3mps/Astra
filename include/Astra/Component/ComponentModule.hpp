@@ -73,11 +73,20 @@ namespace Astra
         // meta's lifetime: RebindInPlace points the closures into THIS
         // image, and the recorded hash is erased (via the guarded public
         // MetaRegistry::Erase) when the handle is reset/destroyed.
-        // Mixing Register<T> and RegisterMeta<T> for the SAME T on one
-        // module is unsupported: at teardown it fail-safes rather than
-        // corrupting state (the guarded Erase in EraseOwnedMetas simply
-        // refuses because T is component-linked), at the cost of one
-        // spurious ASTRA_ENSURE_ALWAYS log.
+        // Mixing Register<T> and RegisterMeta<T> for the SAME T on one module
+        // is UNSUPPORTED. It fail-safes either way at teardown -- never
+        // corrupting state -- but the two outcomes differ, so the mechanism is
+        // worth stating exactly. Reset() runs the component sweep FIRST, then
+        // EraseOwnedMetas:
+        //   - Component slot CLEARED TO EMPTY: the sweep already called
+        //     EraseUnchecked(hash), which removed the meta AND both link rows.
+        //     The later guarded Erase(hash) in EraseOwnedMetas then finds
+        //     nothing component-linked and nothing to erase, so it silently
+        //     no-ops -- no log at all.
+        //   - Component slot RESTORED to a survivor: the link row still maps
+        //     hash -> id, so the guarded Erase REFUSES (it will not dangle a
+        //     live descriptor's cached meta) and emits one ENSURE log. The
+        //     survivor keeps its meta; only the spurious log is lost work.
         template<typename... Ts>
         void RegisterMeta()
         {
@@ -127,14 +136,58 @@ namespace Astra
 
             // Not atomic across two modules racing the same type -- benign:
             // reload registration is host-serialized by contract.
-            // Phase 1 (locked, inside registry): slot + owner bookkeeping.
-            // Get() never drains the pending queue (TypeContext.hpp:210-213);
-            // it cannot miss here only because Open's tripwire proved
-            // SetTypeContext ran, which drained.
-            const TypeMeta* meta = m_context->Meta().Get(TypeID<T>::Hash());
-            // desc.meta is captured BEFORE the phase-2 rebind -- valid only
-            // because RebindInPlace is address-stable.
+            //
+            // ORDER (meta BEFORE descriptor): the rebind must happen first so
+            // the descriptor can capture the resulting TypeMeta*. An earlier
+            // ordering built the descriptor from a PRE-rebind Meta().Get(),
+            // which silently yielded meta == nullptr (and therefore
+            // visitFields == nullptr, permanently) on the unload-before-load
+            // reload path -- the previous generation's clear-to-empty had
+            // already erased the entry, so there was nothing to Get() yet.
+            //
+            // LOCK DISCIPLINE: no lock NESTING occurs here. Phase A takes only
+            // the MetaRegistry mutex (inside RebindInPlace/LinkToComponent);
+            // phase B takes only the registry's registration mutex (inside
+            // InstallOwned). They are held strictly sequentially, never
+            // simultaneously, so the spec's "registration -> meta, never
+            // reversed" rule -- which is about hold-and-wait nesting -- is not
+            // in play at all. The thunk itself (arbitrary user reflection
+            // code) runs with NO lock held.
+
+            // ---- Phase A: meta (no registry lock) ----------------------------
+            const TypeMeta* meta = nullptr;
+            if (thunk)
+            {
+                TypeMeta fresh = thunk();
+                // RebindInPlace is address-stable on the hit path (move-assign
+                // through the existing unique_ptr) and installs fresh on the
+                // miss path -- either way the returned pointer is the address
+                // the descriptor must cache.
+                meta = m_context->Meta().RebindInPlace(std::move(fresh));
+                if (!meta)
+                {
+                    // Identity-collision refusal (RebindInPlace already logged
+                    // + ENSUREd). The type's identity is contested, so do NOT
+                    // install a descriptor claiming a meta we could not bind:
+                    // treat it exactly like a refused id -- never owned.
+                    return;
+                }
+                m_context->Meta().LinkToComponent(TypeID<T>::Hash(), id);
+            }
+            // An UNREFLECTED type (null thunk) still registers normally with
+            // meta == nullptr; only a non-null thunk whose rebind REFUSED aborts.
+
+            // ---- Phase B: descriptor + slot install --------------------------
             ComponentDescriptor desc = ComponentRegistry::MakeDescriptor<T>(id, meta);
+            // MakeDescriptor refuses an over-aligned type by early-returning a
+            // zeroed descriptor whose only valid field is `alignment`; callers
+            // MUST re-test it. Mirrors ComponentRegistry.hpp's
+            // RegisterComponentImpl guard so the module path refuses
+            // identically -- chunk storage cannot honor alignment above
+            // CACHE_LINE_SIZE, and an installed descriptor here would be a live
+            // slot full of null function pointers.
+            if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY
+                return;                                    // over-aligned: never owned
 
             // MakeDescriptor is static (no ComponentRegistry instance), so it
             // cannot reach m_componentNames and leaves desc.name unset. This
@@ -147,17 +200,7 @@ namespace Astra
             const std::string nameStorage(TypeID<T>::Name());
             desc.name = nameStorage.c_str();
 
-            if (!m_registry->InstallOwned(id, m_moduleId, desc, thunk))
-                return;
-
-            // Phase 2 (NO locks held here): rebuild + install this module's
-            // meta so field closures point into THIS image (spec §3.3).
-            if (thunk)
-            {
-                TypeMeta fresh = thunk();
-                m_context->Meta().RebindInPlace(std::move(fresh));
-                m_context->Meta().LinkToComponent(TypeID<T>::Hash(), id);
-            }
+            m_registry->InstallOwned(id, m_moduleId, desc, thunk);
         }
 
         // Mirrors RegisterOne's phase 2 ONLY -- T is not a component, so
@@ -178,8 +221,14 @@ namespace Astra
             MetaBuildFn thunk = &Detail::BuildMetaThunk<T>;   // built outside locks
 
             TypeMeta fresh = thunk();
-            m_context->Meta().RebindInPlace(std::move(fresh));
-            m_ownedMetas.push_back(TypeID<T>::Hash());
+            // Record ownership ONLY if the rebind actually took. A refused
+            // rebind (identity collision -> nullptr) left the INCUMBENT meta
+            // in place; recording the hash anyway would make teardown erase
+            // someone else's entry, destroying a meta this handle never owned.
+            if (m_context->Meta().RebindInPlace(std::move(fresh)) != nullptr)
+            {
+                m_ownedMetas.push_back(TypeID<T>::Hash());
+            }
         }
 
         // Erases every meta this handle owns via RegisterMeta (guarded public
@@ -222,6 +271,11 @@ namespace Astra
                 }
                 else                          // cleared to empty: meta goes too
                 {
+                    // Scope caveat: this meta lives in the SHARED TypeContext, so a
+                    // clear-to-empty in THIS registry erases a TypeMeta that another
+                    // registry sharing the context may still cache in a live
+                    // descriptor -- one registry per context is the supported shape
+                    // for module-owned reflected components.
                     m_context->Meta().EraseUnchecked(w.hash);
                 }
             }

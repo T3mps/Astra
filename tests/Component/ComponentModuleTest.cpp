@@ -280,6 +280,61 @@ TEST(ComponentModule, MetaErasedWhenSlotPopsToEmpty)
     genN1.Register<Astra_Test_ModMeta2::ReflectedEphemeral>();        // absent path: fresh install
     EXPECT_NE(Astra::MetaRegistry::Instance().Get(hash), nullptr);
     EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash)->fields.size(), 1u);
+
+    // Final-review FIX 2: the RELOADED descriptor must point at the freshly
+    // installed meta. The pre-fix ordering built the descriptor from a
+    // Meta().Get() taken BEFORE the rebind -- on this unload-before-load path
+    // the entry had just been erased, so desc.meta/visitFields were null
+    // FOREVER for gen N+1 (reflection-driven serialization silently degraded).
+    const auto* reloaded = creg->GetComponentDescriptor(
+        Astra::TypeID<Astra_Test_ModMeta2::ReflectedEphemeral>::Value());
+    ASSERT_NE(reloaded, nullptr);
+    EXPECT_EQ(reloaded->meta, Astra::MetaRegistry::Instance().Get(hash));
+    EXPECT_NE(reloaded->meta, nullptr);
+    EXPECT_NE(reloaded->visitFields, nullptr);
+}
+
+// ---- Final-review FIX 1: over-aligned refusal on the MODULE path ----------
+// The anonymous RegisterComponent path has always refused alignment >
+// CACHE_LINE_SIZE (RegistrationGuardTest); ComponentModule::RegisterOne
+// discarded that refusal and installed MakeDescriptor's early-return
+// descriptor -- a live slot whose function pointers were indeterminate.
+// The AstraTest binary raises ASTRA_MAX_COMPONENTS to 192, so this one extra
+// id-consuming type fits the budget (see the Task 4 note above).
+
+namespace Astra_Test_ModAlign
+{
+    struct alignas(128) OverAligned { float v[4]; };   // > CACHE_LINE_SIZE (64)
+}
+
+TEST(ComponentModule, OverAlignedTypeIsRefusedOnModulePath)
+{
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    auto mod = Astra::ComponentModule::Open(creg, "OverAlignedOwner");
+    ASSERT_TRUE(static_cast<bool>(mod));
+
+    mod.Register<Astra_Test_ModAlign::OverAligned>();
+
+    const auto id = Astra::TypeID<Astra_Test_ModAlign::OverAligned>::Value();
+    EXPECT_EQ(creg->GetComponentDescriptor(id), nullptr);   // clean miss, not a live slot
+    EXPECT_EQ(creg->GetOwner(id), 0u);                      // never owned
+    EXPECT_EQ(creg->Size(), 0u);
+}
+
+TEST(ComponentModule, InstallOwnedRefusesOverAlignedDescriptor)
+{
+    // Defense in depth: the public entry point repeats the guard, so a
+    // hand-built descriptor that never went through MakeDescriptor is refused
+    // too.
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    Astra::ComponentDescriptor desc{};
+    desc.id = 0;
+    desc.size = 64;
+    desc.alignment = Astra::CACHE_LINE_SIZE * 2;
+    EXPECT_FALSE(creg->InstallOwned(0, 1u, desc, nullptr));
+    EXPECT_EQ(creg->Size(), 0u);
 }
 
 // ---- Task 5: RegisterMeta<Ts...> -- module-owned NON-component reflection --
