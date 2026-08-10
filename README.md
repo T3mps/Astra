@@ -400,12 +400,26 @@ context. The pending queue is module-local; registrations enqueued before
 initializers) are flushed when the context is installed.
 
 **Hot-reload sequence:** serialize world -> unload DLL -> load new DLL ->
-`SetTypeContext` -> `componentRegistry->ReRegisterComponent<T>()` for each type
-whose descriptor may have changed -> deserialize. `ReRegisterComponent`
-unconditionally rebuilds the descriptor (move/copy/serialize function pointers)
-so they target the newly loaded module code. Type IDs are stable across reloads
-because `TypeID` resolves by XXHash64 of the type name through the shared
-`TypeContext`.
+`SetTypeContext` -> in the new image's `Init`, open a module handle and
+register the types whose descriptors may have changed -> deserialize:
+
+```cpp
+// New image's Init, after SetTypeContext
+auto mod = Astra::ComponentModule::Open(componentRegistry, "MyPlugin");
+mod.Register<MyTypes...>();   // unconditionally rebuilds each descriptor
+```
+
+`Register<Ts...>()` rebuilds the descriptor for each type unconditionally
+(move/copy/serialize/reflection function pointers) so they target the newly
+loaded module code. Type IDs are stable across reloads because `TypeID`
+resolves by XXHash64 of the type name through the shared `TypeContext`. The
+old image's handle is destroyed in *its* `Shutdown`, before the DLL is
+unloaded; that destruction automatically restores each descriptor to a
+still-live earlier owner or clears it to unregistered, so nothing is ever
+left pointing at freed code. The handle itself must be heap-held (e.g.
+`std::unique_ptr<Astra::ComponentModule>`) and explicitly reset in
+`Shutdown` -- never a DLL-static, since a static's destructor would run
+under the loader lock during unload.
 
 ### SIMD Configuration
 

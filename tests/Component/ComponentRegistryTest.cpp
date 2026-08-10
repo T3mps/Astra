@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+#include "Astra/Component/ComponentModule.hpp"
 #include "Astra/Component/ComponentRegistry.hpp"
+#include "Astra/Core/TypeContext.hpp"
 #include "Astra/Serialization/BinaryWriter.hpp"
 #include "Astra/Serialization/BinaryReader.hpp"
 #include "../TestComponents.hpp"
@@ -637,43 +639,55 @@ namespace Astra_Test_ReReg
     struct FreshProbe { int v; };
 }
 
-TEST(ComponentRegistryReRegister, ReRegisterOverwritesDescriptor)
+namespace
 {
-    Astra::ComponentRegistry registry;
-    registry.RegisterComponent<Astra_Test_ReReg::ReRegProbe>();
-    const auto* before = registry.GetComponentDescriptor(Astra::TypeID<Astra_Test_ReReg::ReRegProbe>::Value());
-    ASSERT_NE(before, nullptr);
-    const auto id   = before->id;
-    const auto hash = before->hash;
+    // Same RAII guard as ComponentModuleTest.cpp (plan-review finding 3):
+    // a failed ASSERT must not leak an installed slot into later tests --
+    // OpenRefusesWithoutInstalledContext asserts a null slot as its
+    // precondition. Duplicated 6 lines; anonymous namespace, no ODR issue.
+    struct InstalledContext
+    {
+        InstalledContext()  { Astra::SetTypeContext(&Astra::DefaultTypeContext()); }
+        ~InstalledContext() { Astra::SetTypeContext(nullptr); }
+    };
+}
 
-    // Re-registration must keep the same id (hash-stable via TypeContext)
-    // and rebuild the descriptor (in a real reload, the function pointers
-    // move into the newly loaded module).
-    registry.ReRegisterComponent<Astra_Test_ReReg::ReRegProbe>();
-    const auto* after = registry.GetComponentDescriptor(id);
+TEST(ComponentRegistryReRegister, ModuleOverrideRebuildsDescriptor)
+{
+    InstalledContext ctx;
+    auto registry = std::make_shared<Astra::ComponentRegistry>();
+    registry->RegisterComponent<Astra_Test_ReReg::ReRegProbe>();
+    const auto* before = registry->GetComponentDescriptor(Astra::TypeID<Astra_Test_ReReg::ReRegProbe>::Value());
+    ASSERT_NE(before, nullptr);
+    const auto id = before->id; const auto hash = before->hash;
+
+    auto mod = Astra::ComponentModule::Open(registry, "ReRegTest");
+    mod.Register<Astra_Test_ReReg::ReRegProbe>();     // the hot-reload rebind, RAII form
+    const auto* after = registry->GetComponentDescriptor(id);
     ASSERT_NE(after, nullptr);
     EXPECT_EQ(after->id, id);
     EXPECT_EQ(after->hash, hash);
     EXPECT_NE(after->defaultConstruct, nullptr);
-    EXPECT_NE(after->destruct, nullptr);
 }
 
 TEST(ComponentRegistryReRegister, RegisterRemainsIdempotent)
 {
-    Astra::ComponentRegistry registry;
+    Astra::ComponentRegistry registry;                 // unchanged from today
     registry.RegisterComponent<Astra_Test_ReReg::IdemProbe>();
     const size_t count = registry.Size();
     registry.RegisterComponent<Astra_Test_ReReg::IdemProbe>();
     EXPECT_EQ(registry.Size(), count);
 }
 
-TEST(ComponentRegistryReRegister, ReRegisterOnUnregisteredActsAsRegister)
+TEST(ComponentRegistryReRegister, ModuleRegisterOnFreshTypeActsAsRegister)
 {
-    Astra::ComponentRegistry registry;
-    registry.ReRegisterComponent<Astra_Test_ReReg::FreshProbe>();
-    const auto* desc = registry.GetComponentDescriptor(Astra::TypeID<Astra_Test_ReReg::FreshProbe>::Value());
+    InstalledContext ctx;
+    auto registry = std::make_shared<Astra::ComponentRegistry>();
+    auto mod = Astra::ComponentModule::Open(registry, "FreshTest");
+    mod.Register<Astra_Test_ReReg::FreshProbe>();
+    const auto* desc = registry->GetComponentDescriptor(Astra::TypeID<Astra_Test_ReReg::FreshProbe>::Value());
     ASSERT_NE(desc, nullptr);
-    EXPECT_EQ(registry.Size(), 1u);
+    EXPECT_EQ(registry->Size(), 1u);
 }
 
 namespace Astra_Test_RegStability

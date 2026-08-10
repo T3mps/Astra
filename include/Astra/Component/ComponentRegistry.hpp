@@ -54,20 +54,6 @@ namespace Astra
             m_registered[id].store(true, std::memory_order_release);  // "attempt resolved for id"
         }
 
-        // Hot-reload path: rebuilds the descriptor unconditionally so its function
-        // pointers target the currently loaded module. The id is stable across
-        // reloads because TypeID resolves through the shared TypeContext by hash.
-        template<Component T>
-        void ReRegisterComponent()
-        {
-            const ComponentID id = TypeID<T>::Value();
-            if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
-                return;
-            std::lock_guard<std::mutex> lock(m_registrationMutex);
-            RegisterComponentImpl<T>(id);
-            m_registered[id].store(true, std::memory_order_release);
-        }
-
         // Bulk, single-threaded setup path: do NOT call from workers. Each
         // per-type RegisterComponent() below re-locks m_registrationMutex, so
         // this must NOT hold the lock across the fan-out (std::mutex is
@@ -85,8 +71,9 @@ namespace Astra
         //
         // A ComponentDescriptor stores raw function pointers (defaultConstruct,
         // destruct, visitFields, ...) that live in whichever MODULE registered the
-        // type -- and a host's plugin deliberately re-points even engine-owned
-        // types at itself, which is exactly what ReRegisterComponent above is for.
+        // type -- and a module may re-point a type at itself via
+        // ComponentModule::Register — the RAII path cleans that up itself; this
+        // range purge is the fallback net for modules that never adopted it.
         // When that module is unloaded, every such descriptor is left aiming at
         // freed code. Worse, the first-registration guard in RegisterComponent
         // means the type can never be rebuilt: m_registered[id] is still true, so
