@@ -42,6 +42,16 @@ namespace Astra
         template<Component T>
         void RegisterComponent()
         {
+            // Birth-context affinity (all-config): a caller whose ambient context
+            // differs from the one this registry was constructed under would mint
+            // ids from the WRONG counter -- the silent cross-module aliasing
+            // class. Checked BEFORE TypeID<T>::Value() so the mismatched module's
+            // per-type id cache is never seeded from the wrong context.
+            if (!ASTRA_ENSURE_ALWAYS(GetTypeContext() == m_birthContext,
+                    "ComponentRegistry: RegisterComponent from a module whose TypeContext "
+                    "differs from this registry's birth context -- call Astra::SetTypeContext "
+                    "in the calling module first"))
+                return;
             const ComponentID id = TypeID<T>::Value();
             if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY  // guard before indexing m_registered
                 return;
@@ -237,6 +247,12 @@ namespace Astra
                     fn(static_cast<ComponentID>(id), m_components[id]);
         }
 
+        // Birth-context affinity anchor: the TypeContext this registry's ids
+        // are minted under (captured at construction, in the constructing
+        // module). Registry's Debug accessor tripwire and
+        // ComponentModule::Open's all-config refusal both compare against it.
+        ASTRA_NODISCARD TypeContext* GetBirthContext() const noexcept { return m_birthContext; }
+
         ASTRA_NODISCARD size_t Size() const
         {
             return m_present.Count();
@@ -401,6 +417,10 @@ namespace Astra
         // is over-aligned. buildMeta may be null.
         bool InstallOwned(ComponentID id, uint32_t owner, ComponentDescriptor desc, MetaBuildFn buildMeta)
         {
+            // Birth-context affinity (all-config) -- see RegisterComponent.
+            if (!ASTRA_ENSURE_ALWAYS(GetTypeContext() == m_birthContext,
+                    "ComponentRegistry: InstallOwned from a foreign-context module"))
+                return false;
             if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
             {
                 return false;
@@ -709,6 +729,11 @@ namespace Astra
         // workers first-registering different types can't race the containers.
         // non-copyable: holds a registration mutex + atomics (ComponentRegistry
         // is only ever held via std::shared_ptr; never copied/moved by value).
+        // The TypeContext this registry was constructed under (NSDMI: captured
+        // at construction, in whichever module constructs it). See
+        // GetBirthContext() -- the affinity guard for cross-module aliasing.
+        TypeContext* m_birthContext = GetTypeContext();
+
         std::mutex m_registrationMutex;
         std::atomic<bool> m_registered[MAX_COMPONENTS] = {};
 

@@ -117,6 +117,7 @@ namespace Astra
         template<Component... Components>
         Entity CreateEntityWith(Components&&... components)
         {
+            AssertContextAffinity();
             Entity entity = m_entityManager.Create();
             if (!entity.IsValid()) ASTRA_UNLIKELY
                 return Entity::Invalid();
@@ -315,9 +316,23 @@ namespace Astra
         // present on the live entity afterward (added, or already present, or a tag);
         // false only for a stale/invalid handle. The bool return is not [[nodiscard]], so
         // existing statement-style callers are unaffected.
+        // Debug tripwire for the cross-module aliasing class (an unpinned module
+        // minting TypeIDs from its module-local default context and indexing THIS
+        // registry with them -- e.g. a host exe that skipped SetTypeContext and
+        // read Transform bytes through TypeID<Camera>). Hot accessors carry this
+        // in Debug only; registration paths refuse all-config (ComponentRegistry
+        // birth-context affinity).
+        void AssertContextAffinity() const noexcept
+        {
+            ASTRA_ASSERT(GetTypeContext() == GetComponentRegistry()->GetBirthContext(),
+                         "Registry touched from a module whose TypeContext is not this registry's "
+                         "birth context -- call Astra::SetTypeContext in the calling module first");
+        }
+
         template<Component T>
         bool AddComponent(Entity entity, const T& component)
         {
+            AssertContextAffinity();
             if (!m_entityManager.IsValid(entity))
                 return false;
 
@@ -333,6 +348,7 @@ namespace Astra
         template<Component T, typename... Args>
         bool EmplaceComponent(Entity entity, Args&&... args)
         {
+            AssertContextAffinity();
             // See AddComponent (IM-24): stale/invalid handle -> graceful false, no abort.
             if (!m_entityManager.IsValid(entity))
                 return false;
@@ -349,6 +365,7 @@ namespace Astra
         template<Component T>
         bool RemoveComponent(Entity entity)
         {
+            AssertContextAffinity();
             if (m_signalManager.IsSignalEnabled(Signal::ComponentRemoved)) ASTRA_UNLIKELY
             {
                 // Cold arm: the signal needs the PRE-removal pointer. The validated
@@ -507,6 +524,7 @@ namespace Astra
         template<Component T>
         ASTRA_NODISCARD T* GetComponent(Entity entity)
         {
+            AssertContextAffinity();
             if (!m_entityManager.IsValid(entity))
                 return nullptr;
             return m_archetypeManager->GetComponent<T>(entity);
@@ -515,6 +533,7 @@ namespace Astra
         template<Component T>
         ASTRA_NODISCARD const T* GetComponent(Entity entity) const
         {
+            AssertContextAffinity();
             if (!m_entityManager.IsValid(entity))
                 return nullptr;
             return m_archetypeManager->GetComponent<T>(entity);
@@ -523,6 +542,7 @@ namespace Astra
         template<Component T>
         ASTRA_NODISCARD bool HasComponent(Entity entity) const
         {
+            AssertContextAffinity();
             if (!m_entityManager.IsValid(entity))
                 return false;
             return m_archetypeManager->HasComponent<T>(entity);
@@ -995,18 +1015,21 @@ namespace Astra
         template<Component T>
         ASTRA_NODISCARD T* GetResource() noexcept
         {
+            AssertContextAffinity();
             return m_resourceStorage.Get<T>();
         }
 
         template<Component T>
         ASTRA_NODISCARD const T* GetResource() const noexcept
         {
+            AssertContextAffinity();
             return m_resourceStorage.Get<T>();
         }
 
         template<Component T>
         T* SetResource(T&& resource)
         {
+            AssertContextAffinity();
             ComponentID id = TypeID<T>::Value();
             bool isNew = !m_resourceStorage.Has<T>();
             
@@ -1163,6 +1186,7 @@ namespace Astra
         template<ValidQueryArg... QueryArgs>
         ASTRA_NODISCARD auto CreateView()
         {
+            AssertContextAffinity();
             return View<QueryArgs...>(m_archetypeManager, m_workScheduler);
         }
         

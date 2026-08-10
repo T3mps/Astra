@@ -2,6 +2,7 @@
 #include <thread>
 #include <Astra/Component/ComponentModule.hpp>
 #include <Astra/Component/ComponentRegistry.hpp>
+#include <Astra/Registry/Registry.hpp>
 #include <Astra/Core/TypeContext.hpp>
 #include <Astra/Core/TypeID.hpp>
 #include <Astra/Reflection/MetaRegistry.hpp>
@@ -513,3 +514,59 @@ TEST(ComponentModule, InstallOwnedRefusesInvalidId)
     EXPECT_FALSE(creg->InstallOwned(static_cast<Astra::ComponentID>(Astra::MAX_COMPONENTS), 1u, desc, nullptr));
     EXPECT_EQ(creg->Size(), 0u);
 }
+
+// ============================================================================
+// Birth-context affinity (2026-08-10): a registry constructed under one
+// TypeContext must refuse (all-config, registration paths) or assert (Debug,
+// hot accessors) when touched from a module whose ambient context differs --
+// the cross-module aliasing class (unpinned host exe minting foreign ids).
+// A second TypeContext stands in for "another module's default context";
+// NOTHING is ever minted into it, so no cross-suite state is disturbed.
+// ============================================================================
+
+TEST(ComponentModule, RegisterComponentRefusesForeignContext)
+{
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();   // birth = installed default ctx
+
+    Astra::TypeContext foreign;                                  // "another module's" context
+    Astra::SetTypeContext(&foreign);
+    creg->RegisterComponent<Astra::Test::Position>();            // ambient != birth -> refused
+    Astra::SetTypeContext(&Astra::DefaultTypeContext());         // restore before asserting
+
+    EXPECT_EQ(creg->Size(), 0u);
+    creg->RegisterComponent<Astra::Test::Position>();            // matching context: works
+    EXPECT_EQ(creg->Size(), 1u);
+}
+
+TEST(ComponentModule, OpenRefusesForeignContext)
+{
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();    // birth = installed default ctx
+
+    Astra::TypeContext foreign;
+    Astra::SetTypeContext(&foreign);                             // installed, but NOT creg's birth
+    Astra::ComponentModule mod = Astra::ComponentModule::Open(creg, "ForeignCtx");
+    Astra::SetTypeContext(&Astra::DefaultTypeContext());
+
+    EXPECT_FALSE(static_cast<bool>(mod));                        // observable refusal
+    EXPECT_EQ(creg->Size(), 0u);
+}
+
+#if defined(ASTRA_BUILD_DEBUG) || defined(ASTRA_ENABLE_ASSERTS)
+TEST(ComponentModuleDeathTest, AccessorAssertsOnForeignContext)
+{
+    // Debug tripwire at the damage site: a hot accessor touched from a
+    // mismatched-context module dies loudly instead of silently aliasing.
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    creg->RegisterComponent<Astra::Test::Position>();
+    Astra::Registry reg(creg);
+
+    Astra::TypeContext foreign;
+    Astra::SetTypeContext(&foreign);
+    EXPECT_DEATH((void)reg.GetComponent<Astra::Test::Position>(Astra::Entity{}),
+                 "birth context");
+    Astra::SetTypeContext(&Astra::DefaultTypeContext());
+}
+#endif

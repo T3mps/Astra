@@ -54,6 +54,15 @@ namespace Astra
             {
                 return mod;   // empty handle: observable refusal
             }
+            // Birth-context affinity: the installed slot must be the context
+            // the target registry's ids are minted under, or every id this
+            // module registers would come from the wrong counter.
+            if (!ASTRA_ENSURE_ALWAYS(installed == registry->GetBirthContext(),
+                    "ComponentModule::Open: this module's installed TypeContext is not the "
+                    "one the target registry was constructed under -- ids would alias"))
+            {
+                return mod;   // empty handle: observable refusal
+            }
             mod.m_registry = std::move(registry);
             mod.m_context  = installed;
             mod.m_moduleId = mod.m_registry->OpenModuleId(name);
