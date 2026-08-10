@@ -122,8 +122,41 @@ namespace Astra
         }
 
     private:
+        // The descriptor alignment MakeDescriptor will compute for T. Mirrors
+        // its expression EXACTLY, empty-type case included, so the module path
+        // refuses precisely the set of types the anonymous path refuses --
+        // no more, no less (an over-aligned EMPTY tag is storage-free and is
+        // accepted by both).
+        template<Component T>
+        static constexpr size_t DescriptorAlignmentV = std::is_empty_v<T> ? size_t(1) : alignof(T);
+
+        // Over-aligned refusal, HOISTED above EVERY side effect. Alignment is a
+        // purely compile-time property -- it needs neither a ComponentID nor a
+        // TypeMeta -- so this MUST precede Phase A. A type that is both
+        // ASTRA_REFLECT_TYPE'd AND over-aligned would otherwise commit a live,
+        // component-LINKED TypeMeta into the shared MetaRegistry and only then
+        // have its descriptor refused by Phase B: the meta and its hash<->id
+        // link would then outlive the module FOREVER (ReleaseModule skips an id
+        // whose m_present bit was never set, so the unload sweep never reaches
+        // it, and the guarded MetaRegistry::Erase permanently refuses a
+        // component-linked hash). Refusing up here means a refused type mints no
+        // id, builds and links no meta, and installs no descriptor -- it is
+        // invisible to the entire registry.
+        // Phase B keeps its own re-test, and InstallOwned keeps its guard: those
+        // are defense in depth on the DESCRIPTOR side (MakeDescriptor's contract
+        // requires callers to re-test, and InstallOwned is public).
         template<Component T>
         void RegisterOne()
+        {
+            if constexpr (DescriptorAlignmentV<T> <= CACHE_LINE_SIZE)
+            {
+                RegisterOneChecked<T>();
+            }
+            // else: over-aligned -> refused with zero side effects.
+        }
+
+        template<Component T>
+        void RegisterOneChecked()
         {
             // Explicit-context id mint: TypeID<T>::Hash()/Name() are pure
             // compile-time values; only the id assignment touches context state.
@@ -182,10 +215,13 @@ namespace Astra
             // MakeDescriptor refuses an over-aligned type by early-returning a
             // zeroed descriptor whose only valid field is `alignment`; callers
             // MUST re-test it. Mirrors ComponentRegistry.hpp's
-            // RegisterComponentImpl guard so the module path refuses
-            // identically -- chunk storage cannot honor alignment above
-            // CACHE_LINE_SIZE, and an installed descriptor here would be a live
-            // slot full of null function pointers.
+            // RegisterComponentImpl guard -- chunk storage cannot honor
+            // alignment above CACHE_LINE_SIZE, and an installed descriptor here
+            // would be a live slot full of null function pointers.
+            // UNREACHABLE via RegisterOne (the hoisted compile-time guard
+            // already refused such a T before Phase A) -- kept as defense in
+            // depth so this function stays correct on its own terms, and so a
+            // future caller reaching it directly cannot skip the contract.
             if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY
                 return;                                    // over-aligned: never owned
 

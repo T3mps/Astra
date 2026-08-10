@@ -322,6 +322,66 @@ TEST(ComponentModule, OverAlignedTypeIsRefusedOnModulePath)
     EXPECT_EQ(creg->Size(), 0u);
 }
 
+namespace Astra_Test_ModAlign
+{
+    // BOTH reflected AND over-aligned -- the combination the scoped re-review
+    // caught. Consumes NO ComponentID (the hoisted guard refuses before the
+    // mint), so it costs nothing against the 192 test ceiling.
+    struct alignas(128) ReflectedOverAligned { int z = 0; };
+    ASTRA_REFLECT_TYPE(ReflectedOverAligned)
+        ASTRA_REFLECT_FIELD(ReflectedOverAligned, z)
+    ASTRA_REFLECT_TYPE_END()
+}
+
+TEST(ComponentModule, ReflectedOverAlignedTypeNeverTouchesMetaRegistry)
+{
+    // Follow-up defect: with the meta phase moved BEFORE the descriptor phase,
+    // a reflected + over-aligned type used to commit a live, component-LINKED
+    // TypeMeta and only then have its descriptor refused. The meta and its
+    // hash<->id link then outlived the module forever -- ReleaseModule skips an
+    // id whose m_present bit was never set, and the guarded MetaRegistry::Erase
+    // permanently refuses a component-linked hash. The alignment refusal is now
+    // hoisted above every side effect.
+    InstalledContext ctx;
+    auto& meta = Astra::MetaRegistry::Instance();
+    const uint64_t hash = Astra::TypeID<Astra_Test_ModAlign::ReflectedOverAligned>::Hash();
+
+    // Pre-state: the static-init drain installed this meta ANONYMOUSLY (no
+    // component link). That entry must survive Register untouched.
+    const Astra::TypeMeta* metaBefore = meta.Get(hash);
+    ASSERT_NE(metaBefore, nullptr);
+    ASSERT_EQ(meta.GetComponentId(hash), Astra::INVALID_COMPONENT);   // not linked yet
+
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    auto mod = Astra::ComponentModule::Open(creg, "ReflectedOverAlignedOwner");
+    ASSERT_TRUE(static_cast<bool>(mod));
+
+    // Two synthetic id mints straddling the Register: if Register consumed a
+    // ComponentID the delta would be 2, not 1. Deliberately raw-hash calls (no
+    // TypeIdentity), so they cannot collide with any real type -- and note the
+    // test never calls TypeID<ReflectedOverAligned>::Value(), which would mint
+    // the very id it is asserting was never minted.
+    auto& tctx = Astra::DefaultTypeContext();
+    const Astra::ComponentID probeA = tctx.GetOrAssignComponentID(0xA57A0A11u, "Astra_Test_ModAlign_ProbeA");
+    mod.Register<Astra_Test_ModAlign::ReflectedOverAligned>();
+    const Astra::ComponentID probeB = tctx.GetOrAssignComponentID(0xA57A0A12u, "Astra_Test_ModAlign_ProbeB");
+    EXPECT_EQ(probeB, static_cast<Astra::ComponentID>(probeA + 1));   // no id consumed
+
+    // Registry side: nothing installed, by-hash lookup finds nothing.
+    EXPECT_EQ(creg->GetComponentDescriptorByHash(hash), nullptr);
+    EXPECT_FALSE(creg->GetComponentIDFromHash(hash).IsOk());
+    EXPECT_EQ(creg->Size(), 0u);
+
+    // Meta side: the drain-installed entry is untouched and STILL UNLINKED.
+    EXPECT_EQ(meta.Get(hash), metaBefore);
+    EXPECT_EQ(meta.GetComponentId(hash), Astra::INVALID_COMPONENT);
+    EXPECT_EQ(meta.GetTypeHash(probeA), 0u);                          // no stray reverse link
+
+    mod.Reset();                                                      // nothing to erase or restore
+    EXPECT_EQ(meta.Get(hash), metaBefore);                            // survives teardown intact
+    EXPECT_EQ(meta.GetComponentId(hash), Astra::INVALID_COMPONENT);
+}
+
 TEST(ComponentModule, InstallOwnedRefusesOverAlignedDescriptor)
 {
     // Defense in depth: the public entry point repeats the guard, so a
