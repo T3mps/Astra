@@ -82,10 +82,23 @@ workspace "Astra"
             {
                 "GoogleTest"
             }
-            
+
+            -- TEST-BINARY-ONLY ceiling raise (human-approved 2026-08-09): the shared
+            -- AstraTest process mints ComponentIDs process-wide across every suite in
+            -- this binary, and that budget is now fully exhausted at the shipped
+            -- default of 128 (ComponentModule Task 4's two new reflected probe types
+            -- tipped SystemSchedulerResourceConflict over the ceiling -- Bitmap.hpp's
+            -- fatal "index < Bits" guard, exit code 3). Raising it here only widens
+            -- AstraTest's own headroom; the shipped default (Component.hpp) stays 128
+            -- for every other target (Astra, AstraBenchmark, AstraStudio, ...).
+            defines
+            {
+                "ASTRA_MAX_COMPONENTS=192"
+            }
+
             filter "system:windows"
                 systemversion "latest"
-                buildoptions { 
+                buildoptions {
                     "/Zc:__cplusplus",      -- Enable proper __cplusplus macro
                     "/arch:AVX",            -- Enable up to AVX (includes SSE4.2) - matching benchmark
                     "/diagnostics:column",  -- Show column info in errors
@@ -94,11 +107,11 @@ workspace "Astra"
                     "/fp:fast",             -- Fast floating point - matching benchmark
                     "/openmp:experimental"  -- Enable OpenMP SIMD support
                 }
-                defines { 
+                defines {
                     "__SSE2__",             -- Define SSE2 support - matching benchmark
                     "__SSE4_2__"            -- Define SSE4.2 support (for CRC32) - matching benchmark
                 }
-                
+
             filter "system:linux"
                 links { "pthread" }
                 buildoptions {

@@ -3,6 +3,8 @@
 #include <Astra/Component/ComponentRegistry.hpp>
 #include <Astra/Core/TypeContext.hpp>
 #include <Astra/Core/TypeID.hpp>
+#include <Astra/Reflection/MetaRegistry.hpp>
+#include <Astra/Reflection/Macros.hpp>
 #include "../TestComponents.hpp"
 
 // Reuses the shared Astra::Test::Position/Velocity types rather than minting
@@ -202,4 +204,79 @@ TEST(ComponentModule, MoveAndDoubleResetAreIdempotent)
     b.Reset();
     b.Reset();                                               // double reset: no-op
     EXPECT_EQ(creg->GetComponentDescriptor(Astra::TypeID<Astra::Test::Position>::Value()), nullptr);
+}
+
+// ---- Task 4: meta transitions across slot push/pop (end-to-end) -----------
+// Two fresh reflected probe types, budgeted against the ComponentID ceiling:
+// neither may reuse Astra_Test_ModMeta::MetaProbe (MetaRebindTest.cpp) --
+// cross-file coupling through the shared MetaRegistry is order-fragile --
+// nor Astra::Test::Position/Velocity, which are NOT reflected. The shared
+// AstraTest binary raises ASTRA_MAX_COMPONENTS to 192 (test-project-only,
+// see premake5.lua) specifically so these two new ids fit: the shipped
+// default of 128 was already fully exhausted process-wide across every
+// suite in this binary before these types were added.
+
+namespace Astra_Test_ModMeta2
+{
+    struct ReflectedOwned { int x = 0; };
+    ASTRA_REFLECT_TYPE(ReflectedOwned)
+        ASTRA_REFLECT_FIELD(ReflectedOwned, x)
+    ASTRA_REFLECT_TYPE_END()
+}
+
+TEST(ComponentModule, MetaRebindsAcrossPushAndPop)
+{
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    const uint64_t hash = Astra::TypeID<Astra_Test_ModMeta2::ReflectedOwned>::Hash();
+
+    creg->RegisterComponent<Astra_Test_ModMeta2::ReflectedOwned>();   // anonymous base
+    const Astra::TypeMeta* meta = Astra::MetaRegistry::Instance().Get(hash);
+    ASSERT_NE(meta, nullptr);
+    const auto idR = Astra::TypeID<Astra_Test_ModMeta2::ReflectedOwned>::Value();
+    ASSERT_EQ(creg->GetComponentDescriptor(idR)->meta, meta);
+
+    {
+        auto mod = Astra::ComponentModule::Open(creg, "MetaOwner");
+        mod.Register<Astra_Test_ModMeta2::ReflectedOwned>();          // push: meta rebound (same address)
+        EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash), meta);   // address stable through push
+        EXPECT_EQ(meta->fields.size(), 1u);
+    }
+    // Pop back to the anonymous base: its thunk re-ran, address still stable,
+    // contents rebuilt, component link intact.
+    EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash), meta);
+    EXPECT_EQ(meta->fields.size(), 1u);
+    EXPECT_EQ(Astra::MetaRegistry::Instance().GetByComponentId(idR), meta);
+    EXPECT_NE(creg->GetComponentDescriptor(idR), nullptr);            // base descriptor restored
+}
+
+namespace Astra_Test_ModMeta2
+{
+    struct ReflectedEphemeral { int y = 0; };   // type budget: 4th id-consuming type
+    ASTRA_REFLECT_TYPE(ReflectedEphemeral)
+        ASTRA_REFLECT_FIELD(ReflectedEphemeral, y)
+    ASTRA_REFLECT_TYPE_END()
+}
+
+TEST(ComponentModule, MetaErasedWhenSlotPopsToEmpty)
+{
+    // Spec §3.6 meta-lifecycle rule (plan-review finding 1): a module-owned
+    // reflected component with NO shadow survivor takes its meta with it --
+    // unload-before-load then reinstalls FRESH, never comparing against a
+    // stale entry whose typeName views unmapped storage.
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    const uint64_t hash = Astra::TypeID<Astra_Test_ModMeta2::ReflectedEphemeral>::Hash();
+
+    {
+        auto genN = Astra::ComponentModule::Open(creg, "EphemeralGenN");
+        genN.Register<Astra_Test_ModMeta2::ReflectedEphemeral>();
+        ASSERT_NE(Astra::MetaRegistry::Instance().Get(hash), nullptr);
+    }
+    EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash), nullptr);    // meta erased with the slot
+
+    auto genN1 = Astra::ComponentModule::Open(creg, "EphemeralGenN1");
+    genN1.Register<Astra_Test_ModMeta2::ReflectedEphemeral>();        // absent path: fresh install
+    EXPECT_NE(Astra::MetaRegistry::Instance().Get(hash), nullptr);
+    EXPECT_EQ(Astra::MetaRegistry::Instance().Get(hash)->fields.size(), 1u);
 }
