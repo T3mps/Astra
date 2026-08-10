@@ -368,7 +368,12 @@ namespace Astra
         // (buildMeta null, the slot cleared to empty).
         struct MetaRestore { MetaBuildFn buildMeta; uint64_t hash; ComponentID id; };
 
-        // ComponentModule plumbing. Full semantics (Task 3):
+        // ComponentModule plumbing. Entry contract: desc.name must be a live
+        // NUL-terminated const char* for the duration of this call -- it is
+        // re-pointed to registry-owned storage under the lock before this
+        // function returns (see the by-value-desc paragraph below), so the
+        // caller's storage need not outlive the call, only span it.
+        // Full semantics (Task 3):
         //   1. id >= MAX_COMPONENTS -> refused (false).
         //   2. Slot empty            -> plain install.
         //   3. Live owner == owner   -> in-place replace of the live entry
@@ -451,6 +456,10 @@ namespace Astra
         // (owner-scoped release) and UnregisterModuleRange (address-range
         // purge) -- both replace whatever is live at `id` with whatever
         // legitimately survives underneath it, and record the same transition.
+        // See UnregisterModuleRange's doc comment above for the RAII-discipline
+        // / double-fault contract a restored shadow entry depends on: it is
+        // still mapped only because its module was released through RAII (or
+        // purged) before this restore, never assumed here.
         void RestoreOrClearSlot(ComponentID id, SmallVector<MetaRestore, 4>& metaWork)
         {
             if (auto it = m_shadow.Find(id); it != m_shadow.end() && !it->second.empty())

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <thread>
 #include <Astra/Component/ComponentModule.hpp>
 #include <Astra/Component/ComponentRegistry.hpp>
 #include <Astra/Core/TypeContext.hpp>
@@ -353,4 +354,47 @@ TEST(ComponentModule, ComponentNamesDoNotGrowOnRebind)
     mod.Register<Astra::Test::Position>();
     mod.Register<Astra::Test::Position>();
     EXPECT_EQ(creg->ComponentNameCount(), after1);                // reused by content, not appended
+}
+
+// ---- Task 8: concurrency smoke + refusal-path unit test -------------------
+// Reuses Astra::Test::Position/Velocity in place of the brief's fictional
+// Astra_Test_Mod::OwnedA/OwnedB, for the same ComponentID-budget reason as
+// every other section in this file.
+
+TEST(ComponentModule, ConcurrentRegisterFromTwoModules)
+{
+    // Two threads, two handles, disjoint types, one shared registry: both
+    // threads repeatedly take m_registrationMutex (InstallOwned) at the same
+    // time. This does not prove lock-freedom of anything -- it proves the
+    // registration path has no torn-state/crash under real concurrent
+    // contention, which the rest of the suite (single-threaded) cannot.
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    auto m1 = Astra::ComponentModule::Open(creg, "T1");
+    auto m2 = Astra::ComponentModule::Open(creg, "T2");
+    ASSERT_TRUE(static_cast<bool>(m1));
+    ASSERT_TRUE(static_cast<bool>(m2));
+
+    std::thread t1([&] { for (int i = 0; i < 100; ++i) m1.Register<Astra::Test::Position>(); });
+    std::thread t2([&] { for (int i = 0; i < 100; ++i) m2.Register<Astra::Test::Velocity>(); });
+    t1.join();
+    t2.join();
+
+    EXPECT_NE(creg->GetComponentDescriptor(Astra::TypeID<Astra::Test::Position>::Value()), nullptr);
+    EXPECT_NE(creg->GetComponentDescriptor(Astra::TypeID<Astra::Test::Velocity>::Value()), nullptr);
+}
+
+TEST(ComponentModule, InstallOwnedRefusesInvalidId)
+{
+    // Spec §4 item 5: the module path must never own a refused id.
+    // INVALID_COMPONENT cannot be fabricated through a public collision in
+    // one TU (that is Theme E's territory, exercised process-wide elsewhere),
+    // so exercise ComponentRegistry::InstallOwned's own guard directly --
+    // the same branch ComponentModule::RegisterOne's early-return relies on.
+    InstalledContext ctx;
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    Astra::ComponentDescriptor desc{};
+    EXPECT_FALSE(creg->InstallOwned(Astra::INVALID_COMPONENT, 1u, desc, nullptr));
+    EXPECT_FALSE(creg->InstallOwned(static_cast<Astra::ComponentID>(Astra::MAX_COMPONENTS), 1u, desc, nullptr));
+    EXPECT_EQ(creg->Size(), 0u);
 }

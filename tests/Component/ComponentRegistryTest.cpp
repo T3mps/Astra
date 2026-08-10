@@ -668,6 +668,7 @@ TEST(ComponentRegistryReRegister, ModuleOverrideRebuildsDescriptor)
     EXPECT_EQ(after->id, id);
     EXPECT_EQ(after->hash, hash);
     EXPECT_NE(after->defaultConstruct, nullptr);
+    EXPECT_NE(after->destruct, nullptr);
 }
 
 TEST(ComponentRegistryReRegister, RegisterRemainsIdempotent)

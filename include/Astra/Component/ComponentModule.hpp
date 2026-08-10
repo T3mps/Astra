@@ -15,7 +15,29 @@ namespace Astra
     // Open() captures the EXPLICITLY INSTALLED TypeContext -- all ids and
     // metas route through the captured context, never ambient per-module
     // state. Register<Ts...>() must be instantiated in the module whose
-    // code the descriptors should point into (that is the whole point).
+    // code the descriptors should point into -- the compiler stamps each
+    // descriptor's function pointers with THIS translation unit's code, so
+    // the instantiating module is the module the resulting registration is
+    // tied to (that is the whole point).
+    //
+    // Ownership contract (mandatory, not advisory):
+    //   - HEAP-HELD in every plugin/module that uses it (e.g. a file-scope
+    //     std::optional<ComponentModule>), and reset EXPLICITLY from that
+    //     module's own Shutdown entry point.
+    //   - NEVER a plugin-side static/global object. A DLL static's
+    //     destructor runs *during* FreeLibrary at DLL_PROCESS_DETACH, under
+    //     the loader lock -- but ~ComponentModule() takes the registry's
+    //     registration mutex, may invoke a MetaBuildFn thunk (arbitrary user
+    //     reflection code), and may drop the last shared_ptr to the
+    //     registry. None of that is safe under the loader lock. Heap-held +
+    //     explicit Shutdown-time Reset() keeps all of it off the loader lock.
+    //   - "Register only what you own": Register<Ts...>() should list only
+    //     the types this module's code actually implements -- registering a
+    //     type you don't own just to keep it alive defeats RAII ownership
+    //     (Reset() would erase it out from under its real owner on unload).
+    //   - UnregisterModuleRange remains the fallback net for modules that
+    //     never adopted this RAII path (or that forgot Shutdown cleanup) --
+    //     it is a safety valve, not a substitute for the contract above.
     class ComponentModule
     {
     public:
@@ -51,6 +73,11 @@ namespace Astra
         // meta's lifetime: RebindInPlace points the closures into THIS
         // image, and the recorded hash is erased (via the guarded public
         // MetaRegistry::Erase) when the handle is reset/destroyed.
+        // Mixing Register<T> and RegisterMeta<T> for the SAME T on one
+        // module is unsupported: at teardown it fail-safes rather than
+        // corrupting state (the guarded Erase in EraseOwnedMetas simply
+        // refuses because T is component-linked), at the cost of one
+        // spurious ASTRA_ENSURE_ALWAYS log.
         template<typename... Ts>
         void RegisterMeta()
         {
@@ -98,8 +125,15 @@ namespace Astra
 
             MetaBuildFn thunk = Detail::MetaFactory<T>::fn ? &Detail::BuildMetaThunk<T> : nullptr;
 
+            // Not atomic across two modules racing the same type -- benign:
+            // reload registration is host-serialized by contract.
             // Phase 1 (locked, inside registry): slot + owner bookkeeping.
+            // Get() never drains the pending queue (TypeContext.hpp:210-213);
+            // it cannot miss here only because Open's tripwire proved
+            // SetTypeContext ran, which drained.
             const TypeMeta* meta = m_context->Meta().Get(TypeID<T>::Hash());
+            // desc.meta is captured BEFORE the phase-2 rebind -- valid only
+            // because RebindInPlace is address-stable.
             ComponentDescriptor desc = ComponentRegistry::MakeDescriptor<T>(id, meta);
 
             // MakeDescriptor is static (no ComponentRegistry instance), so it
