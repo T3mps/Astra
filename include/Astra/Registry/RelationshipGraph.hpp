@@ -424,7 +424,20 @@ namespace Astra
             m_descendantCaches.Clear();
             m_ancestorCaches.Clear();
         }
-        
+
+        // Monotonic counter bumped on any structural change (attach, detach,
+        // reparent, entity destroy that removes a parent/child edge) and
+        // stable across component mutation and pure reads -- the same
+        // counter this class uses internally (see BuildDescendantCache /
+        // BuildAncestorCache / IncrementVersion below) to invalidate its own
+        // traversal caches. Lets a consumer memoize data derived from
+        // GetDescendantsCached/GetAncestorsCached and skip recomputing it
+        // unless the hierarchy actually changed since it last checked.
+        ASTRA_NODISCARD std::uint32_t StructureVersion() const noexcept
+        {
+            return m_structureVersion.load(std::memory_order_acquire);
+        }
+
         void Serialize(BinaryWriter& writer) const
         {
             // Write parent-child relationships

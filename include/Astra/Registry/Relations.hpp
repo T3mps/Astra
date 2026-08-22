@@ -81,6 +81,19 @@ namespace Astra
             }
         }
         
+        /**
+         * @brief Get the graph-wide structure version (see RelationshipGraph::StructureVersion)
+         * @return The current version, or 0 if the Registry has been destroyed
+         */
+        ASTRA_FORCEINLINE std::uint32_t StructureVersion() const noexcept
+        {
+            if (!m_relationsGraph) ASTRA_UNLIKELY
+                return 0;  // Registry destroyed -- 0 matches this codebase's
+                           // existing "no valid version" sentinel (TraversalCache::IsValid)
+
+            return m_relationsGraph->StructureVersion();
+        }
+
         ASTRA_FORCEINLINE auto GetChildren() const
         {
             if (!m_relationsGraph) ASTRA_UNLIKELY

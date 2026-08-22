@@ -611,3 +611,49 @@ TEST(RelationsDestroyGuard, CachedTraversalOnUnrelatedEntityKeepsGraphNonEmpty)
     reg.GetRelationshipGraph().OnEntityDestroyed(e);
     EXPECT_TRUE(reg.GetRelationshipGraph().Empty());
 }
+
+// StructureVersion forwarding: Registry and Relations must surface the same
+// counter RelationshipGraph maintains internally, so a consumer holding
+// either can decide whether hierarchy-derived data it cached is stale
+// without walking the tree to find out.
+TEST(RelationsStructureVersion, ForwardsThroughRegistryAndRelations)
+{
+    Astra::Registry reg;
+    auto parent = reg.CreateEntity();
+    auto child = reg.CreateEntity();
+
+    const std::uint32_t before = reg.GetRelationshipGraph().StructureVersion();
+    EXPECT_EQ(reg.StructureVersion(), before);
+    EXPECT_EQ(reg.GetRelations(parent).StructureVersion(), before);
+
+    reg.SetParent(child, parent);
+
+    const std::uint32_t after = reg.GetRelationshipGraph().StructureVersion();
+    EXPECT_GT(after, before);
+    EXPECT_EQ(reg.StructureVersion(), after);
+    EXPECT_EQ(reg.GetRelations(parent).StructureVersion(), after);
+}
+
+// Component mutation is invisible to the hierarchy: RelationshipGraph knows
+// nothing about component storage, so adding/mutating/removing a component
+// must not move the version -- only SetParent/RemoveParent/OnEntityDestroyed
+// (when they touch a parent/child edge) do.
+TEST(RelationsStructureVersion, StableAcrossComponentMutation)
+{
+    Astra::Registry reg;
+    auto componentRegistry = reg.GetComponentRegistry();
+    componentRegistry->RegisterComponents<Astra::Test::Position>();
+
+    auto e = reg.CreateEntity();
+    const std::uint32_t before = reg.StructureVersion();
+
+    reg.AddComponent<Astra::Test::Position>(e, Astra::Test::Position{1, 2, 3});
+    EXPECT_EQ(reg.StructureVersion(), before);
+
+    if (auto* pos = reg.GetComponent<Astra::Test::Position>(e))
+        pos->x = 42.0f;
+    EXPECT_EQ(reg.StructureVersion(), before);
+
+    reg.RemoveComponent<Astra::Test::Position>(e);
+    EXPECT_EQ(reg.StructureVersion(), before);
+}

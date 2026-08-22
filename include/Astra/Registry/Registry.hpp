@@ -1559,6 +1559,14 @@ namespace Astra
 
         ASTRA_NODISCARD RelationshipGraph& GetRelationshipGraph() { return *m_relationshipGraph; }
         ASTRA_NODISCARD const RelationshipGraph& GetRelationshipGraph() const { return *m_relationshipGraph; }
+
+        // See RelationshipGraph::StructureVersion() -- graph-wide, not entity
+        // scoped, so unlike GetParent/GetChildren/etc. above there's no
+        // per-entity validity check to make here.
+        ASTRA_NODISCARD std::uint32_t StructureVersion() const noexcept
+        {
+            return m_relationshipGraph->StructureVersion();
+        }
         
         void EnableSignals(Signal signals)
         {

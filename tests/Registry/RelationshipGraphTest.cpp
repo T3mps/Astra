@@ -438,15 +438,140 @@ TEST_F(RelationshipGraphTest, InvalidEntityOperations)
 {
     Astra::Entity valid(1, 1);
     Astra::Entity invalid; // Default constructed is invalid
-    
+
     // Operations with invalid entities should be safe
     graph->SetParent(invalid, valid);
     graph->SetParent(valid, invalid);
     graph->AddLink(invalid, valid);
     graph->AddLink(valid, invalid);
-    
+
     // Should not create any relationships
     EXPECT_FALSE(graph->GetParent(valid).IsValid());
     EXPECT_EQ(graph->GetChildren(valid).size(), 0u);
     EXPECT_EQ(graph->GetLinks(valid).size(), 0u);
+}
+
+// StructureVersion must be stable across component mutation and pure reads,
+// and must increment only on structural change (attach/detach/reparent/
+// destroy). This is what lets a consumer (e.g. Arcane's transform propagation)
+// cache data derived from GetDescendantsCached and only recompute it once per
+// structure change instead of unconditionally every call.
+TEST_F(RelationshipGraphTest, StructureVersionStableAcrossReads)
+{
+    auto entities = CreateEntities(3);
+    auto parent = entities[0];
+    auto child = entities[1];
+    auto other = entities[2];
+
+    graph->SetParent(child, parent);
+    graph->AddLink(parent, other);
+    const std::uint32_t version = graph->StructureVersion();
+
+    // A battery of pure reads -- none of these may bump the version.
+    (void)graph->GetParent(child);
+    (void)graph->GetChildren(parent);
+    (void)graph->HasChildren(parent);
+    (void)graph->GetChildCount(parent);
+    (void)graph->HasParent(child);
+    (void)graph->IsAncestorOf(parent, child);
+    (void)graph->GetLinks(other);
+    (void)graph->AreLinked(parent, other);
+    (void)graph->HasLinks(parent);
+    (void)graph->Empty();
+    (void)graph->GetCacheStats();
+    (void)graph->GetParentChildCount();
+    (void)graph->GetParentCount();
+    (void)graph->GetLinkedEntityCount();
+
+    EXPECT_EQ(graph->StructureVersion(), version);
+}
+
+TEST_F(RelationshipGraphTest, StructureVersionStableAcrossLinkMutation)
+{
+    // Links are not part of the parent/child hierarchy the traversal caches
+    // key off of (see the "Links don't affect hierarchy traversal caches"
+    // comments in AddLink/RemoveLink) -- they must not move the version.
+    auto entities = CreateEntities(2);
+    auto a = entities[0];
+    auto b = entities[1];
+
+    const std::uint32_t version = graph->StructureVersion();
+    graph->AddLink(a, b);
+    EXPECT_EQ(graph->StructureVersion(), version);
+    graph->RemoveLink(a, b);
+    EXPECT_EQ(graph->StructureVersion(), version);
+}
+
+TEST_F(RelationshipGraphTest, StructureVersionStableAcrossRejectedMutations)
+{
+    // Nothing structural actually changed for any of these -- rejected input,
+    // self-parenting, and a would-be cycle are all no-ops.
+    Astra::Entity valid(1, 1);
+    Astra::Entity invalid;
+
+    const std::uint32_t before = graph->StructureVersion();
+    graph->SetParent(invalid, valid);
+    graph->SetParent(valid, invalid);
+    graph->SetParent(valid, valid);
+    graph->RemoveParent(valid); // no parent set -- no-op
+    EXPECT_EQ(graph->StructureVersion(), before);
+}
+
+TEST_F(RelationshipGraphTest, StructureVersionIncrementsOnAttach)
+{
+    auto entities = CreateEntities(2);
+    auto parent = entities[0];
+    auto child = entities[1];
+
+    const std::uint32_t before = graph->StructureVersion();
+    graph->SetParent(child, parent);
+    EXPECT_GT(graph->StructureVersion(), before);
+}
+
+TEST_F(RelationshipGraphTest, StructureVersionIncrementsOnDetach)
+{
+    auto entities = CreateEntities(2);
+    auto parent = entities[0];
+    auto child = entities[1];
+    graph->SetParent(child, parent);
+
+    const std::uint32_t before = graph->StructureVersion();
+    graph->RemoveParent(child);
+    EXPECT_GT(graph->StructureVersion(), before);
+}
+
+TEST_F(RelationshipGraphTest, StructureVersionIncrementsOnReparent)
+{
+    auto entities = CreateEntities(3);
+    auto parent1 = entities[0];
+    auto parent2 = entities[1];
+    auto child = entities[2];
+    graph->SetParent(child, parent1);
+
+    const std::uint32_t before = graph->StructureVersion();
+    graph->SetParent(child, parent2);
+    EXPECT_GT(graph->StructureVersion(), before);
+    EXPECT_EQ(graph->GetParent(child), parent2);
+}
+
+TEST_F(RelationshipGraphTest, StructureVersionIncrementsOnEntityDestroyed)
+{
+    auto entities = CreateEntities(2);
+    auto parent = entities[0];
+    auto child = entities[1];
+    graph->SetParent(child, parent);
+
+    const std::uint32_t before = graph->StructureVersion();
+    graph->OnEntityDestroyed(parent); // removes a parent/child edge
+    EXPECT_GT(graph->StructureVersion(), before);
+}
+
+TEST_F(RelationshipGraphTest, StructureVersionIncrementsOnClear)
+{
+    auto entities = CreateEntities(2);
+    graph->SetParent(entities[1], entities[0]);
+
+    const std::uint32_t before = graph->StructureVersion();
+    graph->Clear();
+    EXPECT_GT(graph->StructureVersion(), before);
 }
