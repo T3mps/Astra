@@ -446,38 +446,6 @@ namespace Astra
             return (it != m_types.end() && !it->second.binders.empty()) ? it->second.binders.back().module : nullptr;
         }
 
-        // Public erase: for module-owned NON-component metas (RegisterMeta
-        // teardown). Refuses a component-linked hash -- erasing one would
-        // dangle every cached ComponentDescriptor::meta for a live component.
-        // TRANSITIONAL: deleted in the next task once ComponentModule releases
-        // through the binder stack instead.
-        bool Erase(uint64_t hash)
-        {
-            std::unique_lock lock(m_mutex);
-            if (m_typeToComponentId.Find(hash) != m_typeToComponentId.end())
-            {
-                ASTRA_ENSURE_ALWAYS(false,
-                    "MetaRegistry::Erase refused: hash is component-linked (use the "
-                    "component clear path, not a manual erase)");
-                return false;
-            }
-            return m_types.Erase(hash) != 0;
-        }
-
-        // TRANSITIONAL clear-path erase (deleted in the next task with its
-        // last caller): removes the entry AND both link rows.
-        bool EraseUnchecked(uint64_t hash)
-        {
-            std::unique_lock lock(m_mutex);
-            auto it = m_types.Find(hash);
-            if (it == m_types.end())
-            {
-                return false;
-            }
-            EraseEntryLocked(it);
-            return true;
-        }
-
         /**
          * Gets type metadata by hash.
          * Thread-safe.

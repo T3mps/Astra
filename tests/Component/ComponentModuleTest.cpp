@@ -394,7 +394,7 @@ TEST(ComponentModule, InstallOwnedRefusesOverAlignedDescriptor)
     desc.id = 0;
     desc.size = 64;
     desc.alignment = Astra::CACHE_LINE_SIZE * 2;
-    EXPECT_FALSE(creg->InstallOwned(0, 1u, desc, nullptr));
+    EXPECT_EQ(creg->InstallOwned(0, 1u, desc, Astra::Detail::CurrentModuleIdentity().token), Astra::InstallResult::Refused);
     EXPECT_EQ(creg->Size(), 0u);
 }
 
@@ -510,8 +510,9 @@ TEST(ComponentModule, InstallOwnedRefusesInvalidId)
     InstalledContext ctx;
     auto creg = std::make_shared<Astra::ComponentRegistry>();
     Astra::ComponentDescriptor desc{};
-    EXPECT_FALSE(creg->InstallOwned(Astra::INVALID_COMPONENT, 1u, desc, nullptr));
-    EXPECT_FALSE(creg->InstallOwned(static_cast<Astra::ComponentID>(Astra::MAX_COMPONENTS), 1u, desc, nullptr));
+    const Astra::ModuleToken me = Astra::Detail::CurrentModuleIdentity().token;
+    EXPECT_EQ(creg->InstallOwned(Astra::INVALID_COMPONENT, 1u, desc, me), Astra::InstallResult::Refused);
+    EXPECT_EQ(creg->InstallOwned(static_cast<Astra::ComponentID>(Astra::MAX_COMPONENTS), 1u, desc, me), Astra::InstallResult::Refused);
     EXPECT_EQ(creg->Size(), 0u);
 }
 

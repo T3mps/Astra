@@ -55,24 +55,3 @@ TEST(MetaRebind, RebindInPlaceInstallsWhenAbsent)
     ASSERT_NE(installed, nullptr);
     EXPECT_EQ(reg.Get(0xA110C8ED00000001ull), installed);
 }
-
-TEST(MetaRebind, EraseGuardsComponentLinkedHashes)
-{
-    auto& reg = Astra::MetaRegistry::Instance();
-    // Synthetic non-component entry: public Erase succeeds.
-    Astra::TypeMeta loose;
-    loose.typeHash = 0xA110C8ED00000002ull;
-    loose.typeName = "Astra_Test_ModMeta::SyntheticLoose";
-    ASSERT_NE(reg.RebindInPlace(std::move(loose)), nullptr);
-    EXPECT_TRUE(reg.Erase(0xA110C8ED00000002ull));
-    EXPECT_EQ(reg.Get(0xA110C8ED00000002ull), nullptr);
-
-    // Component-linked entry (MetaProbe was linked to 9999 above): public
-    // Erase REFUSES; EraseUnchecked removes entry + link rows.
-    const uint64_t hash = Astra::TypeID<Astra_Test_ModMeta::MetaProbe>::Hash();
-    EXPECT_FALSE(reg.Erase(hash));
-    ASSERT_NE(reg.Get(hash), nullptr);
-    EXPECT_TRUE(reg.EraseUnchecked(hash));
-    EXPECT_EQ(reg.Get(hash), nullptr);
-    EXPECT_EQ(reg.GetByComponentId(static_cast<Astra::ComponentID>(9999)), nullptr);
-}

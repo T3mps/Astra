@@ -22,6 +22,9 @@
 
 namespace Astra
 {
+    // Outcome of ComponentRegistry::InstallOwned (spec 2026-09-09 §3.4).
+    enum class InstallResult : uint8_t { Refused, Installed, Overrode, Replaced };
+
     class ComponentRegistry
     {
     public:
@@ -57,11 +60,25 @@ namespace Astra
                 return;
             if (m_registered[id].load(std::memory_order_acquire))
                 return;                                // warm path: lock-free
-            std::lock_guard<std::mutex> lock(m_registrationMutex);
-            if (m_registered[id].load(std::memory_order_relaxed))
-                return;                                // double-check under lock
-            RegisterComponentImpl<T>(id);              // may refuse (over-aligned) -- that's fine
-            m_registered[id].store(true, std::memory_order_release);  // "attempt resolved for id"
+            ModuleToken rebuildAs = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_registrationMutex);
+                if (m_registered[id].load(std::memory_order_relaxed))
+                    return;                            // double-check under lock
+                rebuildAs = RegisterComponentImpl<T>(id);   // may refuse (over-aligned) -- that's fine
+                m_registered[id].store(true, std::memory_order_release);  // "attempt resolved for id"
+            }
+            if (rebuildAs != nullptr)
+            {
+                // This module's binder just became the TOP binder for a type
+                // some other module drained: the content must carry this
+                // module's closures. Built here, OUTSIDE the registration lock
+                // (user reflection code), and swapped only if still top
+                // (spec 2026-09-09 §3.4). The token is the one the bind was
+                // made under, threaded out rather than re-read.
+                TypeMeta fresh = Detail::BuildMetaThunk<T>();
+                MetaRegistry::Instance().Rebind(TypeID<T>::Hash(), rebuildAs, std::move(fresh));
+            }
         }
 
         // Bulk, single-threaded setup path: do NOT call from workers. Each
@@ -123,14 +140,14 @@ namespace Astra
         // clearing the presence bit already makes the lookup miss. Re-registration
         // simply overwrites the same hash -> id entry with the same id.
         //
-        // This function has no captured TypeContext the way ComponentModule does
-        // (it captures one at Open()); its meta rebuild/erase work therefore runs
-        // through the ambient MetaRegistry::Instance() AFTER the registration lock
-        // is released. That is correct here specifically because the caller of a
-        // range purge is, by construction, the HOST -- the module that installed
-        // the shared TypeContext in the first place -- and never the plugin being
-        // unloaded, so MetaRegistry::Instance() resolves to the same context the
-        // surviving descriptors' metas already live in.
+        // Meta work runs through the ambient MetaRegistry::Instance() AFTER the
+        // registration lock is released. That is correct here specifically
+        // because the caller of a range purge is, by construction, the HOST --
+        // the module that installed the shared TypeContext -- and never the
+        // plugin being unloaded. Each dropped entry is released against ITS
+        // OWN module's binder (the token recorded at registration), so one
+        // purge that hits several modules' entries releases each correctly
+        // (spec 2026-09-09 §3.5 flow 5).
         //
         // Returns the number of descriptors dropped (shadowed + live).
         size_t UnregisterModuleRange(const void* base, size_t size)
@@ -161,7 +178,7 @@ namespace Astra
                        inRange(reinterpret_cast<uintptr_t>(d.visitFields));
             };
 
-            SmallVector<MetaRestore, 4> metaWork;
+            SmallVector<MetaRelease, 4> metaWork;
             size_t dropped = 0;
             {
                 std::lock_guard<std::mutex> lock(m_registrationMutex);
@@ -176,6 +193,8 @@ namespace Astra
                         {
                             if (isOwned(list[i].desc))
                             {
+                                if (list[i].desc.meta)
+                                    metaWork.push_back(MetaRelease{list[i].desc.hash, list[i].module});
                                 list.erase(list.begin() + static_cast<ptrdiff_t>(i));
                                 ++dropped;
                             }
@@ -189,25 +208,15 @@ namespace Astra
                     // Live entry is in range: replace it via the same
                     // restore-newest-shadow-or-clear path ReleaseModule uses
                     // (rather than unconditionally blanking). m_owner[id] and
-                    // m_metaThunk[id] are updated inside RestoreOrClearSlot
-                    // either way, so a purged thunk can never be invoked again.
+                    // m_metaModule[id] are updated inside RestoreOrClearSlot.
                     RestoreOrClearSlot(static_cast<ComponentID>(id), metaWork);
                     ++dropped;
                 }
             }
 
-            for (auto& w : metaWork)              // outside the lock: user reflection code
+            for (const auto& w : metaWork)         // outside the lock: may run user reflection code
             {
-                if (w.buildMeta)                  // survivor restored: rebind its meta
-                {
-                    TypeMeta fresh = w.buildMeta();
-                    MetaRegistry::Instance().RebindInPlace(std::move(fresh));
-                    MetaRegistry::Instance().LinkToComponent(w.hash, w.id);
-                }
-                else                               // cleared to empty: meta goes too
-                {
-                    MetaRegistry::Instance().EraseUnchecked(w.hash);
-                }
+                MetaRegistry::Instance().Release(w.hash, w.module);
             }
 
             return dropped;
@@ -385,56 +394,61 @@ namespace Astra
 
         // Snapshot of a slot's previously-live entry, taken when a different
         // owner overrides it (InstallOwned) so ReleaseModule can restore it.
-        struct ShadowEntry { uint32_t owner; ComponentDescriptor desc; MetaBuildFn buildMeta; };
-        // Post-lock meta work ReleaseModule hands back to its caller: either
-        // rebuild+rebind (buildMeta set, a survivor was restored) or erase
-        // (buildMeta null, the slot cleared to empty).
-        struct MetaRestore { MetaBuildFn buildMeta; uint64_t hash; ComponentID id; };
+        // `module` is the token the entry's meta ref was acquired under.
+        struct ShadowEntry { uint32_t owner; ComponentDescriptor desc; ModuleToken module; };
+        // Post-lock meta work ReleaseModule / UnregisterModuleRange hand back
+        // to their caller: one Release per departing live-or-shadowed entry
+        // that held a meta ref (spec 2026-09-09 §3.4). The meta stack decides
+        // what a release means (held / rebound / erased); the registry only
+        // reports the departure.
+        struct MetaRelease { uint64_t hash; ModuleToken module; };
 
         // ComponentModule plumbing. Entry contract: desc.name must be a live
         // NUL-terminated const char* for the duration of this call -- it is
         // re-pointed to registry-owned storage under the lock before this
         // function returns (see the by-value-desc paragraph below), so the
         // caller's storage need not outlive the call, only span it.
-        // Full semantics (Task 3):
-        //   1. id >= MAX_COMPONENTS -> refused (false).
-        //   2. Slot empty            -> plain install.
-        //   3. Live owner == owner   -> in-place replace of the live entry
-        //                               (no shadow: this module is just
+        // Full semantics:
+        //   1. id >= MAX_COMPONENTS -> Refused.
+        //   2. Slot empty            -> Installed (plain install).
+        //   3. Live owner == owner   -> Replaced: in-place replace of the live
+        //                               entry (no shadow: this module is just
         //                               re-registering/rebinding its own type).
-        //   4. Live owner != owner   -> the CURRENT live entry (owner, desc,
-        //                               thunk) is pushed onto this id's shadow
-        //                               stack before the new entry overwrites
-        //                               the slot, so a later ReleaseModule can
-        //                               restore it.
+        //   4. Live owner != owner   -> Overrode: the CURRENT live entry
+        //                               (owner, desc, module) is pushed onto
+        //                               this id's shadow stack before the new
+        //                               entry overwrites the slot, so a later
+        //                               ReleaseModule can restore it.
+        // The caller acquires a meta ref on Installed and Overrode only; on
+        // Replaced the ref already exists and the image is the same.
         // By-value desc: desc.name is caller-owned temporary storage (RegisterOne's
         // stack std::string's c_str()) and is copied into registry-owned storage
         // here, under the lock, before it is written into any slot. A pushed
         // SHADOW copy needs no such re-storage: it is a copy of the CURRENT live
         // entry, whose desc.name already points at registry-owned m_componentNames
         // storage from that entry's own prior InstallOwned call.
-        // Returns false when the id is invalid/refused, or when the descriptor
-        // is over-aligned. buildMeta may be null.
-        bool InstallOwned(ComponentID id, uint32_t owner, ComponentDescriptor desc, MetaBuildFn buildMeta)
+        // Returns Refused when the id is invalid, or when the descriptor is
+        // over-aligned.
+        InstallResult InstallOwned(ComponentID id, uint32_t owner, ComponentDescriptor desc, ModuleToken module)
         {
             // Birth-context affinity (all-config) -- see RegisterComponent.
             if (!ASTRA_ENSURE_ALWAYS(GetTypeContext() == m_birthContext,
                     "ComponentRegistry: InstallOwned from a foreign-context module"))
-                return false;
+                return InstallResult::Refused;
             if (id >= MAX_COMPONENTS) ASTRA_UNLIKELY
             {
-                return false;
+                return InstallResult::Refused;
             }
             // Defense in depth: this is a PUBLIC entry point, so it repeats
             // MakeDescriptor's over-alignment refusal instead of trusting every
-            // caller to re-test it (RegisterComponentImpl:526 and
+            // caller to re-test it (RegisterComponentImpl and
             // ComponentModule::RegisterOne both do, but a hand-built descriptor
             // need not have come through MakeDescriptor at all). Chunk storage
             // can only honor alignments up to CACHE_LINE_SIZE; installing a
             // descriptor above it would hand back misaligned component memory.
             if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY
             {
-                return false;
+                return InstallResult::Refused;
             }
 
             // The override notice is BUILT under the lock (DescribeOverride
@@ -442,42 +456,52 @@ namespace Astra
             // the lock releases: ASTRA_LOG_INFO reaches a user-installed
             // LogSink, and user code must never run under m_registrationMutex.
             std::string overrideNotice;
+            InstallResult result = InstallResult::Installed;
             {
                 std::lock_guard<std::mutex> lock(m_registrationMutex);
                 // std::string_view from a null pointer is UB, and a hand-built
                 // descriptor may legitimately arrive with desc.name unset.
                 desc.name = StoreComponentName(desc.name ? desc.name : "");
 
-                if (m_present.Test(id) && m_owner[id] != owner)
+                if (m_present.Test(id))
                 {
-                    overrideNotice = DescribeOverride(owner, m_owner[id], m_components[id].name);
-                    m_shadow[id].push_back(ShadowEntry{m_owner[id], m_components[id], m_metaThunk[id]});
+                    if (m_owner[id] != owner)
+                    {
+                        overrideNotice = DescribeOverride(owner, m_owner[id], m_components[id].name);
+                        m_shadow[id].push_back(ShadowEntry{m_owner[id], m_components[id], m_metaModule[id]});
+                        result = InstallResult::Overrode;
+                    }
+                    else
+                    {
+                        result = InstallResult::Replaced;
+                    }
                 }
 
                 m_components[id] = desc;
                 m_present.Set(id);
                 m_hashToID[desc.hash] = id;
                 m_owner[id] = owner;
-                m_metaThunk[id] = buildMeta;
+                m_metaModule[id] = module;
                 m_registered[id].store(true, std::memory_order_release);
             }
             if (!overrideNotice.empty())
             {
                 ASTRA_LOG_INFO(overrideNotice);
             }
-            return true;
+            return result;
         }
 
         // Per-owner cleanup for module unload (ComponentModule::Reset). Under
         // m_registrationMutex: strips this owner's SHADOWED entries wherever
         // they sit in the stack, then -- for every id where this owner's entry
         // is LIVE -- either restores the newest remaining shadow entry or clears
-        // the slot to empty. The meta rebuild/erase work is returned rather than
-        // performed here so the caller can run it OUTSIDE all locks (user
-        // reflection code may run arbitrary work in a MetaBuildFn thunk).
-        SmallVector<MetaRestore, 4> ReleaseModule(uint32_t owner)
+        // the slot to empty. One MetaRelease per departing entry that held a
+        // meta ref is returned rather than performed here so the caller can
+        // run it OUTSIDE all locks (MetaRegistry::Release may run a MetaBuildFn
+        // thunk -- user reflection code).
+        SmallVector<MetaRelease, 4> ReleaseModule(uint32_t owner)
         {
-            SmallVector<MetaRestore, 4> metaWork;
+            SmallVector<MetaRelease, 4> metaWork;
             std::lock_guard<std::mutex> lock(m_registrationMutex);
             for (size_t id = 0; id < MAX_COMPONENTS; ++id)
             {
@@ -486,8 +510,14 @@ namespace Astra
                 {
                     auto& list = it->second;
                     for (size_t i = list.size(); i-- > 0;)
+                    {
                         if (list[i].owner == owner)
+                        {
+                            if (list[i].desc.meta)
+                                metaWork.push_back(MetaRelease{list[i].desc.hash, list[i].module});
                             list.erase(list.begin() + static_cast<ptrdiff_t>(i));
+                        }
+                    }
                     if (list.empty()) m_shadow.Erase(it);
                 }
                 if (!m_present.Test(id) || m_owner[id] != owner)
@@ -500,49 +530,37 @@ namespace Astra
 
     private:
         // Replaces the LIVE entry at `id` with the newest remaining shadow
-        // entry, or clears the slot to empty if none remain -- appending the
-        // resulting meta rebuild-or-erase work to `metaWork` rather than
-        // performing it here, so callers can run it OUTSIDE the registration
-        // lock (a MetaBuildFn thunk is user reflection code). Must be called
-        // while m_registrationMutex is already held. Shared by ReleaseModule
-        // (owner-scoped release) and UnregisterModuleRange (address-range
-        // purge) -- both replace whatever is live at `id` with whatever
-        // legitimately survives underneath it, and record the same transition.
+        // entry, or clears the slot to empty if none remain -- recording the
+        // DEPARTING entry's meta release in `metaWork` rather than performing
+        // it here, so callers can run it OUTSIDE the registration lock. Must
+        // be called while m_registrationMutex is already held. Shared by
+        // ReleaseModule (owner-scoped release) and UnregisterModuleRange
+        // (address-range purge). No meta rebind happens here: the survivor's
+        // module is already a binder on the meta stack, and Release rebinds
+        // to it if the departing binder was on top (spec 2026-09-09 §3.4).
         // See UnregisterModuleRange's doc comment above for the RAII-discipline
-        // / double-fault contract a restored shadow entry depends on: it is
-        // still mapped only because its module was released through RAII (or
-        // purged) before this restore, never assumed here.
-        void RestoreOrClearSlot(ComponentID id, SmallVector<MetaRestore, 4>& metaWork)
+        // / double-fault contract a restored shadow entry depends on.
+        void RestoreOrClearSlot(ComponentID id, SmallVector<MetaRelease, 4>& metaWork)
         {
+            if (m_components[id].meta)
+                metaWork.push_back(MetaRelease{m_components[id].hash, m_metaModule[id]});
+
             if (auto it = m_shadow.Find(id); it != m_shadow.end() && !it->second.empty())
             {
                 ShadowEntry restored = std::move(it->second.back());
                 it->second.pop_back();
                 if (it->second.empty()) m_shadow.Erase(it);
-                m_components[id] = restored.desc;        // same address, new contents
-                m_owner[id]      = restored.owner;
-                m_metaThunk[id]  = restored.buildMeta;
-                if (restored.buildMeta)
-                    metaWork.push_back({restored.buildMeta, restored.desc.hash, id});
+                m_components[id]  = restored.desc;        // same address, new contents
+                m_owner[id]       = restored.owner;
+                m_metaModule[id]  = restored.module;
             }
             else
             {
-                const uint64_t clearedHash = m_components[id].hash;
                 m_components[id] = ComponentDescriptor{};
                 m_present.Reset(id);
                 m_owner[id] = 0;
-                m_metaThunk[id] = nullptr;
+                m_metaModule[id] = nullptr;
                 m_registered[id].store(false, std::memory_order_release);
-                // buildMeta == nullptr ⇒ caller runs EraseUnchecked(hash)
-                // outside this lock (spec §3.6: cleared-to-empty types
-                // take their meta with them).
-                // SCOPE CAVEAT: the meta lives in the SHARED TypeContext, not
-                // in this registry. If several ComponentRegistry instances
-                // share one context, a clear-to-empty here erases a TypeMeta
-                // that ANOTHER registry's still-live descriptor may cache in
-                // desc.meta. One registry per context is the supported shape
-                // for module-owned reflected components.
-                metaWork.push_back({nullptr, clearedHash, id});
             }
         }
 
@@ -567,8 +585,12 @@ namespace Astra
             return msg;
         }
 
+        // Returns the module token the caller must Rebind under after
+        // dropping the registration lock (BoundNeedsRebuild -- this module's
+        // binder became the top binder for a type some other module drained),
+        // or nullptr when no rebuild is needed or the type was refused.
         template<Component T>
-        void RegisterComponentImpl(ComponentID id)
+        ModuleToken RegisterComponentImpl(ComponentID id)
         {
             ASTRA_ASSERT(id < MAX_COMPONENTS,
                          "Component ID space exhausted (MAX_COMPONENTS); raise ASTRA_MAX_COMPONENTS");
@@ -577,32 +599,68 @@ namespace Astra
                 // Refuse registration so failure is observable (descriptor
                 // lookup returns nullptr; Registry::AddComponent returns
                 // nullptr) instead of silently corrupting ComponentMask bits.
-                return;
+                return nullptr;
             }
 
-            ComponentDescriptor desc = MakeDescriptor<T>(id, MetaRegistry::Instance().Get<T>());
-            if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY  // MakeDescriptor refused (over-aligned)
+            // Over-aligned refusal BEFORE any meta side effect (mirrors
+            // ComponentModule's hoisted gate): a refused type must push no
+            // binder. MakeDescriptor repeats the test as defense in depth.
+            constexpr size_t descriptorAlignment = std::is_empty_v<T> ? size_t(1) : alignof(T);
+            if constexpr (descriptorAlignment > CACHE_LINE_SIZE)
             {
-                return;
+                return nullptr;
             }
-
-            // Pointer-stable c_str() storage, reused by content -- see
-            // StoreComponentName (a rebuilt/reloaded type's name string is
-            // identical to what's already stored, so this does not grow).
-            desc.name = StoreComponentName(TypeID<T>::Name());
-
-            // Also link MetaRegistry to ComponentID for reverse lookup
-            if (desc.meta)
+            else
             {
-                MetaRegistry::Instance().LinkToComponent(desc.hash, id);
-            }
+                // Anonymous registration binds under THIS module's identity
+                // (the template is instantiated in the caller's module, so
+                // CurrentModuleIdentity() is the caller's copy) and takes one
+                // ref for this slot (spec 2026-09-09 §3.4). No thunk runs here:
+                // we are under m_registrationMutex.
+                const Detail::ModuleIdentity who = Detail::CurrentModuleIdentity();
+                const MetaBuildFn thunk = Detail::MetaFactory<T>::fn ? &Detail::BuildMetaThunk<T> : nullptr;
+                const TypeMeta* meta = nullptr;
+                bool needsRebuild = false;
+                {
+                    // A Refused bind (type reflected in some other module but
+                    // never drained into this context, and no factory here)
+                    // registers the component UNREFLECTED -- meta null, no link,
+                    // no ref -- exactly what a null Get<T>() produced before.
+                    const BindResult bound = MetaRegistry::Instance().Bind(TypeID<T>::Hash(), who, thunk, nullptr);
+                    if (bound.outcome != BindOutcome::Refused)
+                    {
+                        meta = bound.meta;
+                        needsRebuild = (bound.outcome == BindOutcome::BoundNeedsRebuild);
+                    }
+                }
 
-            // Directly indexed; the array slot is pointer-stable for life.
-            m_components[id] = desc;
-            m_present.Set(id);
-            m_hashToID[desc.hash] = id;
-            m_owner[id] = 0;  // anonymous: this path never goes through a ComponentModule
-            m_metaThunk[id] = Detail::MetaFactory<T>::fn ? &Detail::BuildMetaThunk<T> : nullptr;
+                ComponentDescriptor desc = MakeDescriptor<T>(id, meta);
+                if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY  // MakeDescriptor refused (unreachable: gated above)
+                {
+                    return nullptr;
+                }
+
+                // Pointer-stable c_str() storage, reused by content -- see
+                // StoreComponentName (a rebuilt/reloaded type's name string is
+                // identical to what's already stored, so this does not grow).
+                desc.name = StoreComponentName(TypeID<T>::Name());
+
+                // Link MetaRegistry to ComponentID for reverse lookup and take
+                // this slot's ref on the binder Bind just ensured.
+                if (desc.meta)
+                {
+                    MetaRegistry::Instance().LinkToComponent(desc.hash, id);
+                    MetaRegistry::Instance().Acquire(desc.hash, who.token);
+                }
+
+                // Directly indexed; the array slot is pointer-stable for life.
+                m_components[id] = desc;
+                m_present.Set(id);
+                m_hashToID[desc.hash] = id;
+                m_owner[id] = 0;  // anonymous: this path never goes through a ComponentModule
+                m_metaModule[id] = who.token;
+                return needsRebuild ? who.token : nullptr;
+            }
         }
 
         // Copies `name` into pointer-stable, NUL-terminated storage and returns
@@ -739,12 +797,16 @@ namespace Astra
 
         // ComponentModule plumbing. m_owner tracks who owns the LIVE entry at
         // each id (0 = anonymous, i.e. registered via RegisterComponent, never
-        // through a module); m_metaThunk retains a per-slot rebuild callback
-        // (null when the type isn't reflected) so a later hot-reload can
-        // regenerate that slot's TypeMeta. Both are written only under
-        // m_registrationMutex (RegisterComponentImpl / InstallOwned).
+        // through a module); m_metaModule records the module token the LIVE
+        // entry's meta ref was acquired under, so the departing entry can be
+        // released against the right binder (spec 2026-09-09 §3.4). Both are
+        // written only under m_registrationMutex (RegisterComponentImpl /
+        // InstallOwned / RestoreOrClearSlot). NOTE: the registry destructor
+        // releases NOTHING -- anonymous entries outlive their registry exactly
+        // as before (registry-less GetMeta readers depend on it); over-holding
+        // is the safe direction (spec §3.6 c).
         uint32_t m_owner[MAX_COMPONENTS] = {};
-        MetaBuildFn m_metaThunk[MAX_COMPONENTS] = {};
+        ModuleToken m_metaModule[MAX_COMPONENTS] = {};
         uint32_t m_nextModuleId = 1;         // module ids; issued under m_registrationMutex
         std::deque<std::string> m_moduleNames;  // index = moduleId - 1; diagnostics
 
