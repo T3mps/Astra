@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Repo `D:\dev\starworks\Astra`, branch `feature/meta-binder` off `dev` (dev @ `20cd3ee`). Work in a `git worktree` (spec §5 / house rule: a dirty main tree once produced a green build that validated nothing). `Astra.sln`/`ide/` are gitignored: after creating the worktree, and again after **adding any new test file** (the test project globs `tests/**.cpp` at generation time), run `D:\dev\_shared\tools\premake5.exe vs2022` inside the worktree.
+- Repo `D:\dev\starworks\Astra`, branch `feature/meta-binder` off `dev` HEAD (`f5f6ea5`, the commit that adds this plan; `20cd3ee` is `07b9240` plus the spec commit only, so the 852-test baseline cited below is the same tree). Work in a `git worktree` (spec §5 / house rule: a dirty main tree once produced a green build that validated nothing). `Astra.sln`/`ide/` are gitignored: after creating the worktree, and again after **adding any new test file** (the test project globs `tests/**.cpp` at generation time), run `D:\dev\_shared\tools\premake5.exe vs2022` inside the worktree.
 - Build: `"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" Astra.sln -p:Configuration=Debug -p:Platform=x64 -m -v:m -nologo` (whole solution; `-t:AstraTest` does not work). Test binary: `bin\Debug-windows-x86_64\AstraTest\AstraTest.exe`. Filter with `--gtest_filter=Suite.Name`.
 - Header-only library: **every task must leave the whole tree compiling and 852+ tests green** (`AstraTest.exe --gtest_brief=1`). There is no partial build; a task that removes an API must rewire its callers in the same task.
 - Baseline before Task 1: Debug 852/852 (verified 2026-09-09 on `07b9240`). `CompressionTest.PerformanceBenchmark` is a known flake under CPU load; a lone failure of only that test is not a regression (rerun isolated).
@@ -24,6 +24,8 @@
   Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01CcMKuqRThS9DA3z4aorh7t
   ```
+  That trailer is the attribution of the session that WROTE this plan. The executing session substitutes its own model name and session link.
+- Concurrency scope: beyond the reentrant-thunk unit test (Task 2) and the two-module smoke, the cases "two concurrent Releases on one hash", "Release racing Acquire", and "erase-then-reinstall during a thunk window" were walked at plan review and none corrupts state; all are out-of-contract under spec §3.6's single-threaded registration rule and are deliberately not tested.
 - Finish (after Task 6): whole-branch review at opus effort (registration + concurrency diff), controller-independent three-config verify, local fast-forward merge to `dev`, delete the branch, **do not push**.
 
 ---
@@ -248,7 +250,7 @@ git commit -m "feat(core): module identity + residency seam -- SetTypeContext de
 **Spec:** §3.2, §3.3 (plus two additive ops: `Rebind` for the deferred-rebuild path and read-only diagnostics for tests/tools; Task 6 records them in the spec).
 
 **Files:**
-- Modify: `include/Astra/Reflection/MetaRegistry.hpp` (whole class body :23-405; `Erase`/`EraseUnchecked` are **kept in this task** so `ComponentModule`/`ComponentRegistry` still compile — Task 3 deletes them)
+- Modify: `include/Astra/Reflection/MetaRegistry.hpp` (whole class body :23-393; `Erase`/`EraseUnchecked` are **kept in this task** so `ComponentModule`/`ComponentRegistry` still compile — Task 3 deletes them)
 - Create: `tests/Reflection/MetaBinderTest.cpp`
 
 **Interfaces:**
@@ -291,7 +293,7 @@ namespace
 
     Astra::TypeMeta Make(size_t fieldCount)
     {
-        Astra::TypeMeta m;
+        Astra::TypeMeta m{};   // value-init: TypeMeta has no member initializers
         m.typeHash  = kHash;
         m.typeName  = "Astra_Test_Binder::Probe";
         m.size      = 8;
@@ -468,7 +470,9 @@ TEST(MetaBinder, ReentrantBindDuringReleaseSkipsTheStaleSwap)
 {
     // Release(B) pops B, sees A as the new top, and runs A's thunk with the
     // mutex released. That thunk pushes C on top. On relock the top is no
-    // longer A, so the swap MUST be skipped: content stays as it was.
+    // longer A, so the swap MUST be skipped: content stays as it was. The
+    // outcome is still Rebound (the release completed and a rebind was
+    // attempted; the swap itself was superseded -- see Release's contract).
     Astra::MetaRegistry reg;
     g_reentrantTarget = &reg;
     Astra::TypeMeta one = BuildOne();
@@ -661,8 +665,9 @@ namespace Astra
 
         /**
          * Registers a new type or returns the existing registration.
-         * Thread-safe. Installs a binder-less entry (nothing holds it; nothing
-         * ever erases it) -- the raw manual path, mostly for tests.
+         * Thread-safe. Installs a binder-less entry: nothing holds it, and it
+         * is erased only if a later Bind attaches a binder that then releases
+         * to an empty stack -- the raw manual path, mostly for tests.
          * @param hash Type hash
          * @param name Type name
          * @return Reference to the TypeMeta (new or existing)
@@ -863,9 +868,13 @@ namespace Astra
         // stays, nothing else changes); unpinned -> the binder is removed --
         // Dropped if it was not top; if it WAS top and other binders remain,
         // content is rebuilt from the new top's thunk OUTSIDE this mutex,
-        // then swapped under it only if that binder is still top (Rebound);
-        // a new top with no build thunk cannot rebuild -> Retained + warning
-        // (§3.6). An empty stack erases the entry and both link rows
+        // then swapped under it only if that binder is still top (Rebound).
+        // Rebound means the rebind was ATTEMPTED from the new top: if the top
+        // changed during the thunk window (a thunk may re-enter Bind), that
+        // newer binder owns the content and the attempted build is dropped --
+        // still reported Rebound, because the departing binder's release
+        // completed. A new top with no build thunk cannot rebuild -> Retained
+        // + warning (§3.6). An empty stack erases the entry and both link rows
         // (Erased). Unknown hash/module, or a binder already at zero refs,
         // -> Unbound (the latter ENSUREs: release without acquire).
         ReleaseOutcome Release(uint64_t hash, ModuleToken module)
@@ -939,7 +948,12 @@ namespace Astra
                     *it->second.meta = std::move(fresh);
                 }
                 // else: the top changed while the thunk ran (a re-entrant
-                // Bind) -- that binder owns the content now; drop ours.
+                // Bind) -- that binder owns the content now; drop ours. The
+                // token compare is NOT ABA-proof against an erase-and-reinstall
+                // at this hash during the window, and need not be: `fresh`
+                // came from that module's own thunk and is identity-checked,
+                // so swapping it into a reinstalled entry of the same identity
+                // is still correct.
             }
             return ReleaseOutcome::Rebound;
         }
@@ -1367,7 +1381,7 @@ with
     EXPECT_EQ(creg->InstallOwned(static_cast<Astra::ComponentID>(Astra::MAX_COMPONENTS), 1u, desc, me), Astra::InstallResult::Refused);
 ```
 
-Delete `TEST(MetaRebind, EraseGuardsComponentLinkedHashes)` (lines 59-78 of `tests/Reflection/MetaRebindTest.cpp`) entirely; its replacement is `MetaBinder.ComponentLinkedHashWithLiveRefsIsHeldNotErased` from Task 2. Also delete the now-stale comment in `RebindInPlaceKeepsAddressAndLink` that says "(and the 9999 link above)" only if it references the deleted test — it does not; leave it.
+Delete `TEST(MetaRebind, EraseGuardsComponentLinkedHashes)` (lines 59-78 of `tests/Reflection/MetaRebindTest.cpp`) entirely; its replacement is `MetaBinder.ComponentLinkedHashWithLiveRefsIsHeldNotErased` from Task 2.
 
 - [ ] **Step 2: Build to confirm the compile failure**
 
@@ -1400,23 +1414,24 @@ Expected: FAILS — `'Astra::InstallResult': is not a class or namespace name` (
                 return;
             if (m_registered[id].load(std::memory_order_acquire))
                 return;                                // warm path: lock-free
-            bool needsRebuild = false;
+            ModuleToken rebuildAs = nullptr;
             {
                 std::lock_guard<std::mutex> lock(m_registrationMutex);
                 if (m_registered[id].load(std::memory_order_relaxed))
                     return;                            // double-check under lock
-                needsRebuild = RegisterComponentImpl<T>(id);   // may refuse (over-aligned) -- that's fine
+                rebuildAs = RegisterComponentImpl<T>(id);   // may refuse (over-aligned) -- that's fine
                 m_registered[id].store(true, std::memory_order_release);  // "attempt resolved for id"
             }
-            if (needsRebuild)
+            if (rebuildAs != nullptr)
             {
                 // This module's binder just became the TOP binder for a type
                 // some other module drained: the content must carry this
                 // module's closures. Built here, OUTSIDE the registration lock
                 // (user reflection code), and swapped only if still top
-                // (spec 2026-09-09 §3.4).
+                // (spec 2026-09-09 §3.4). The token is the one the bind was
+                // made under, threaded out rather than re-read.
                 TypeMeta fresh = Detail::BuildMetaThunk<T>();
-                MetaRegistry::Instance().Rebind(TypeID<T>::Hash(), Detail::CurrentModuleIdentity().token, std::move(fresh));
+                MetaRegistry::Instance().Rebind(TypeID<T>::Hash(), rebuildAs, std::move(fresh));
             }
         }
 ```
@@ -1660,12 +1675,12 @@ and replace the body from `SmallVector<MetaRestore, 4> metaWork;` through the cl
 3d. Replace `RegisterComponentImpl<T>` (:570-606) with:
 
 ```cpp
-        // Returns true when the caller must rebuild this type's meta content
-        // from this module's factory after dropping the registration lock
-        // (BoundNeedsRebuild -- this module's binder became the top binder
-        // for a type some other module drained).
+        // Returns the module token the caller must Rebind under after
+        // dropping the registration lock (BoundNeedsRebuild -- this module's
+        // binder became the top binder for a type some other module drained),
+        // or nullptr when no rebuild is needed or the type was refused.
         template<Component T>
-        bool RegisterComponentImpl(ComponentID id)
+        ModuleToken RegisterComponentImpl(ComponentID id)
         {
             ASTRA_ASSERT(id < MAX_COMPONENTS,
                          "Component ID space exhausted (MAX_COMPONENTS); raise ASTRA_MAX_COMPONENTS");
@@ -1674,7 +1689,7 @@ and replace the body from `SmallVector<MetaRestore, 4> metaWork;` through the cl
                 // Refuse registration so failure is observable (descriptor
                 // lookup returns nullptr; Registry::AddComponent returns
                 // nullptr) instead of silently corrupting ComponentMask bits.
-                return false;
+                return nullptr;
             }
 
             // Over-aligned refusal BEFORE any meta side effect (mirrors
@@ -1683,7 +1698,7 @@ and replace the body from `SmallVector<MetaRestore, 4> metaWork;` through the cl
             constexpr size_t descriptorAlignment = std::is_empty_v<T> ? size_t(1) : alignof(T);
             if constexpr (descriptorAlignment > CACHE_LINE_SIZE)
             {
-                return false;
+                return nullptr;
             }
             else
             {
@@ -1712,7 +1727,7 @@ and replace the body from `SmallVector<MetaRestore, 4> metaWork;` through the cl
                 ComponentDescriptor desc = MakeDescriptor<T>(id, meta);
                 if (desc.alignment > CACHE_LINE_SIZE) ASTRA_UNLIKELY  // MakeDescriptor refused (unreachable: gated above)
                 {
-                    return false;
+                    return nullptr;
                 }
 
                 // Pointer-stable c_str() storage, reused by content -- see
@@ -1734,7 +1749,7 @@ and replace the body from `SmallVector<MetaRestore, 4> metaWork;` through the cl
                 m_hashToID[desc.hash] = id;
                 m_owner[id] = 0;  // anonymous: this path never goes through a ComponentModule
                 m_metaModule[id] = who.token;
-                return needsRebuild;
+                return needsRebuild ? who.token : nullptr;
             }
         }
 ```
@@ -2193,18 +2208,53 @@ TEST(MetaRebind, ReflectTypeStoresFactoryAndInstallsBaseline)
     EXPECT_EQ(again, meta);
     EXPECT_EQ(reg.BinderCount(hash), 1u);
 }
+
+namespace Astra_Test_ModMeta
+{
+    enum class ManualMode : uint8_t { Alpha = 0, Beta = 1 };   // reflected by hand below; never a component
+}
+
+TEST(MetaRebind, ReflectEnumStoresFactoryAndInstallsBaseline)
+{
+    using Mode = Astra_Test_ModMeta::ManualMode;
+    ASSERT_FALSE(static_cast<bool>(Astra::Detail::MetaFactory<Mode>::fn));
+    Astra::TypeMeta* meta = Astra::ReflectEnum<Mode>(
+        [](Astra::Detail::EnumInfoBuilder<Mode>& eb)
+        {
+            eb.Value("Alpha", Mode::Alpha);   // what ASTRA_REFLECT_ENUM_VALUE expands to
+            eb.Value("Beta",  Mode::Beta);
+        });
+    ASSERT_NE(meta, nullptr);
+    EXPECT_TRUE(meta->isEnum);
+    ASSERT_NE(meta->enumInfo, nullptr);
+
+    // The retained factory must rebuild the SAME enum meta -- this is the
+    // b.Enum(eb.Build()) path a hot-reload rebind would run, and it has no
+    // other in-tree caller.
+    ASSERT_TRUE(static_cast<bool>(Astra::Detail::MetaFactory<Mode>::fn));
+    Astra::TypeMeta rebuilt = Astra::Detail::MetaFactory<Mode>::fn();
+    EXPECT_TRUE(rebuilt.isEnum);
+    ASSERT_NE(rebuilt.enumInfo, nullptr);
+    EXPECT_EQ(rebuilt.typeHash, meta->typeHash);
+
+    auto& reg = Astra::MetaRegistry::Instance();
+    EXPECT_EQ(reg.TopBinder(meta->typeHash), Astra::Detail::CurrentModuleIdentity().token);
+    EXPECT_EQ(reg.Refs(meta->typeHash, Astra::Detail::CurrentModuleIdentity().token), 0u);
+}
 ```
 
 - [ ] **Step 2: Build and run to verify they fail**
 
 Run: Debug build, `AstraTest.exe --gtest_filter=MetaRebind.*`
-Expected: `DrainInstallsBaselineBinderForThisModule` FAILS (`BinderCount == 0`: the drain still calls binder-less `Register`); `ReflectTypeStoresFactoryAndInstallsBaseline` FAILS at the factory assertion.
+Expected: `DrainInstallsBaselineBinderForThisModule` FAILS (`BinderCount == 0`: the drain still calls binder-less `Register`); `ReflectTypeStoresFactoryAndInstallsBaseline` and `ReflectEnumStoresFactoryAndInstallsBaseline` FAIL at their factory assertions.
 
 - [ ] **Step 3: Rewire the drain**
 
 In `MetaRegistry.hpp`, in `Detail::StaticTypeRegistrar<T>::StaticTypeRegistrar`, replace
 
 ```cpp
+                // TypeMeta is move-only; hold it via shared_ptr so the
+                // deferred registration stays copyable for std::function.
                 auto meta = std::make_shared<TypeMeta>(builder.Build());
                 EnqueuePendingMeta([meta](TypeContext& ctx)
                 {
@@ -2227,7 +2277,6 @@ with
                                                &BuildMetaThunk<T>, std::move(*meta));
                 });
 ```
-(Keep the existing "TypeMeta is move-only" comment if it is already there; do not duplicate it.)
 
 - [ ] **Step 4: Rewire `ReflectType` / `ReflectEnum`**
 
@@ -2300,7 +2349,7 @@ Expected: all PASSED. The `ComponentModule` suite must still pass with the drain
 - [ ] **Step 6: Run the whole suite**
 
 Run: `AstraTest.exe --gtest_brief=1`
-Expected: 869 tests, all PASSED (867 + 2).
+Expected: 870 tests, all PASSED (867 + 3).
 
 - [ ] **Step 7: Commit**
 
@@ -2534,7 +2583,7 @@ Expected: all five new tests PASS on the first run — the implementation is com
 - [ ] **Step 3: Run the whole suite in Debug**
 
 Run: `AstraTest.exe --gtest_brief=1`
-Expected: 874 tests, all PASSED (869 + 5).
+Expected: 875 tests, all PASSED (870 + 5).
 
 - [ ] **Step 4: Commit**
 
@@ -2637,7 +2686,7 @@ MSBuild.exe Astra.sln -p:Configuration=Debug   -p:Platform=x64 -m -v:m -nologo &
 MSBuild.exe Astra.sln -p:Configuration=Release -p:Platform=x64 -m -v:m -nologo && bin\Release-windows-x86_64\AstraTest\AstraTest.exe --gtest_brief=1
 MSBuild.exe Astra.sln -p:Configuration=Dist    -p:Platform=x64 -m -v:m -nologo && bin\Dist-windows-x86_64\AstraTest\AstraTest.exe    --gtest_brief=1
 ```
-Expected: 0 build errors in each; Debug 874/874; Release and Dist = Debug minus the Debug-only tests. That delta was 3 at the pre-branch baseline (842/839/839 on `6b66d4f`); it must be UNCHANGED by this branch (no new Debug-only tests were added), so expect 871/871. Record the three counts in the commit message.
+Expected: 0 build errors in each; Debug 875/875; Release and Dist = Debug minus the Debug-only tests. There are exactly 3 Debug-only tests at `07b9240` (852 Debug; the count was independently re-derived at plan review), and this branch adds none, so expect 872/872. Record the three counts in the commit message.
 
 - [ ] **Step 6: Commit**
 
@@ -2648,8 +2697,10 @@ git commit -m "docs: meta binder scoping shipped -- supersede the single-registr
 
 ---
 
-## After the plan
+## After the plan (Finish)
 
-The sanitizer lane (ASan/UBSan/TSan, clang on Linux) is CI-only and runs on push; it cannot run on this MSVC machine. The concurrency smoke here is `ComponentModule.ConcurrentRegisterFromTwoModules` plus the reentrancy unit test; the lane picks both up whenever `dev` is next pushed.
-
-Whole-branch review at opus effort (this diff touches registration, the meta mutex, and the reload paths), fix wave if needed, then a controller-independent three-config verify in a clean worktree, local fast-forward merge `feature/meta-binder` → `dev`, delete the branch, **do not push**. Arcane follow-up is a separate decision (spec §5): re-vendor is a plugin ABI bump; `SetTypeContext(ctx, Resident)` in `Runtime::Impl` plus a Runtime-owned engine `ComponentModule` would re-open the 2026-08-10 ratification.
+1. Whole-branch review at opus effort (this diff touches registration, the meta mutex, and the reload paths); fix wave if needed.
+2. Controller-independent three-config verify in a clean worktree.
+3. Local fast-forward merge `feature/meta-binder` → `dev`; delete the branch; **do not push**.
+4. **OWED, cannot run here -- spec §4 sanitizer gate.** The lane (ASan/UBSan/TSan) is clang-on-Linux only (`premake5.lua` `--sanitize`, gmake `-fsanitize` flags; no MSVC path), and Finish forbids the push that triggers CI. Trigger: the next push of `dev`. What it guards: the `Release` unlock → thunk → relock window and the two-module registration smoke. Until it runs, that window is covered only by `MetaBinder.ReentrantBindDuringReleaseSkipsTheStaleSwap` and `ComponentModule.ConcurrentRegisterFromTwoModules`. Deferral acknowledged by the user at plan review, 2026-09-10.
+5. **Arcane vendored-copy sync -- executed from the Arcane side, gated on the user's go (spec decision 3 scoped Arcane out; the sync is mechanical, the ratification is not).** From `D:\dev\starworks\Arcane`: run `Scripts\sync-astra.ps1` after step 3; bump the plugin ABI to the next number with a history line in `ArcaneClient/src/Arcane/Plugin/PluginABI.hpp` (reason: `ComponentRegistry` layout changed -- `m_metaThunk` → `m_metaModule`, `MetaRegistry` entries carry a binder stack -- so a plugin's inlined template code manipulates a registry whose layout changed; same class as the v10 entry); expect ~63 CRLF-only `.hpp` diffs and verify content identity with `git diff --ignore-cr-at-eol`; regenerate, build, and run Arcane's suite. No Arcane logic changes: Arcane calls none of the changed internals (verified 2026-09-09). Whether Arcane then declares `SetTypeContext(ctx, Resident)` in `Runtime::Impl` and moves to a Runtime-owned engine `ComponentModule` re-opens the 2026-08-10 ratification and is a separate decision.
