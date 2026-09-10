@@ -28,6 +28,14 @@ namespace
         return m;
     }
     Astra::TypeMeta BuildOne()   { return Make(1); }
+    // A survivor thunk that builds a differently-SHAPED type for kHash: the
+    // relock in Release must call this out instead of silently dropping it.
+    Astra::TypeMeta BuildMismatched()
+    {
+        Astra::TypeMeta m = Make(1);
+        m.size = 16;
+        return m;
+    }
     Astra::TypeMeta BuildTwo()   { return Make(2); }
     Astra::TypeMeta BuildThree() { return Make(3); }
 
@@ -128,6 +136,14 @@ TEST(MetaBinder, PinnedBinderIsRetainedAndOverriderRebindsBackToIt)
     EXPECT_EQ(reg.Get(kHash), address);
     EXPECT_EQ(reg.BinderCount(kHash), 1u);
     EXPECT_EQ(reg.Refs(kHash, &s_imageA), 0u);
+
+    // The REACHABLE zero-refs case: the pinned binder survives at refs 0, so
+    // one more release finds it and refuses -- Unbound, nothing changed, and
+    // the ENSURE line in the output is the observable refusal.
+    EXPECT_EQ(reg.Release(kHash, &s_imageA), Astra::ReleaseOutcome::Unbound);
+    EXPECT_EQ(reg.Refs(kHash, &s_imageA), 0u);
+    EXPECT_EQ(reg.BinderCount(kHash), 1u);
+    EXPECT_EQ(reg.Get(kHash), address);
 }
 
 TEST(MetaBinder, BindRefusesIdentityMismatchAndPushesNothing)
@@ -175,8 +191,11 @@ TEST(MetaBinder, ReleaseOnUnknownTokenOrHashIsUnbound)
     EXPECT_EQ(reg.Refs(kHash, &s_imageA), 1u);
     EXPECT_EQ(reg.BinderCount(kHash), 1u);
 
-    // A binder at zero refs is not "held": releasing it again is a caller
-    // bug, reported as Unbound (ENSURE logs, continues) and changes nothing.
+    // The last ref took the last binder with it, so the ENTRY is gone: the
+    // second release exits at the entry-absent check and reports Unbound
+    // WITHOUT reaching the zero-refs ENSURE (that one needs a binder that
+    // survived at zero refs -- see
+    // PinnedBinderIsRetainedAndOverriderRebindsBackToIt for the reachable case).
     EXPECT_EQ(reg.Release(kHash, &s_imageA), Astra::ReleaseOutcome::Erased);
     EXPECT_EQ(reg.Release(kHash, &s_imageA), Astra::ReleaseOutcome::Unbound);
 }
@@ -370,4 +389,79 @@ TEST(MetaBinder, InstallBaselineOnBinderlessEntryKeepsContent)
     EXPECT_EQ(reg.BinderCount(kHash), 1u);
     EXPECT_EQ(reg.TopBinder(kHash), &s_imageA);
     EXPECT_EQ(reg.Refs(kHash, &s_imageA), 0u);
+}
+TEST(MetaBinder, ReleaseOfNonTopBinderIsDropped)
+{
+    // Final-review wave: the Dropped outcome had no direct coverage. A binder
+    // BELOW the top departs -- nothing rebuilds, nothing swaps, the top keeps
+    // owning the content.
+    Astra::MetaRegistry reg;
+    Astra::TypeMeta one = BuildOne();
+    ASSERT_EQ(reg.Bind(kHash, Who(&s_imageA), &BuildOne, &one).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &s_imageA));
+    Astra::TypeMeta two = BuildTwo();
+    ASSERT_EQ(reg.Bind(kHash, Who(&s_imageB), &BuildTwo, &two).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &s_imageB));
+    ASSERT_EQ(reg.TopBinder(kHash), &s_imageB);
+
+    EXPECT_EQ(reg.Release(kHash, &s_imageA), Astra::ReleaseOutcome::Dropped);
+    EXPECT_EQ(reg.Get(kHash)->fields.size(), 2u);     // content untouched: B still owns it
+    EXPECT_EQ(reg.TopBinder(kHash), &s_imageB);
+    EXPECT_EQ(reg.BinderCount(kHash), 1u);
+}
+
+TEST(MetaBinder, ReleaseRefusesIdentityMismatchFromSurvivorThunk)
+{
+    // Final-review wave: Release's relock used ONE fused predicate, so a
+    // survivor whose own thunk builds a differently-shaped type for this hash
+    // was indistinguishable from the benign "top changed during the thunk
+    // window" race and was dropped in silence. That is a real collision: the
+    // swap is refused LOUDLY (log + ENSURE, after the mutex is released) and
+    // the release still completes -- Rebound may carry a refused swap.
+    Astra::MetaRegistry reg;
+    Astra::TypeMeta one = BuildOne();
+    ASSERT_EQ(reg.Bind(kHash, Who(&s_imageA), &BuildMismatched, &one).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &s_imageA));
+    Astra::TypeMeta two = BuildTwo();
+    ASSERT_EQ(reg.Bind(kHash, Who(&s_imageB), &BuildTwo, &two).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &s_imageB));
+    ASSERT_EQ(reg.Get(kHash)->fields.size(), 2u);
+
+    // ENSURE logs and continues: that line IS the observable refusal.
+    EXPECT_EQ(reg.Release(kHash, &s_imageB), Astra::ReleaseOutcome::Rebound);
+    EXPECT_EQ(reg.Get(kHash)->fields.size(), 2u);     // A's mismatched build was NOT swapped in
+    EXPECT_EQ(reg.Get(kHash)->size, 8u);              // incumbent identity intact
+    EXPECT_EQ(reg.TopBinder(kHash), &s_imageA);
+    EXPECT_EQ(reg.BinderCount(kHash), 1u);
+}
+
+TEST(MetaBinder, BindUpgradesNullBuildBinderThunk)
+{
+    // Final-review wave: a module that registers a reflected component BEFORE
+    // its reflect data is compiled in gets a null-build binder. When it later
+    // binds WITH a thunk, that binder is upgraded in place -- otherwise it
+    // stays unable to source content and strands the entry in §3.6's degraded
+    // state the moment it reaches the top.
+    int imageD = 0;
+
+    Astra::MetaRegistry reg;
+    Astra::TypeMeta one = BuildOne();
+    ASSERT_EQ(reg.Bind(kHash, Who(&s_imageA), &BuildOne, &one).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &s_imageA));
+
+    ASSERT_EQ(reg.Bind(kHash, Who(&imageD), nullptr, nullptr).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &imageD));
+    ASSERT_EQ(reg.TopBinder(kHash), &s_imageA);       // null-build: inserted BELOW the top
+
+    // D now has a factory. Not top, no fresh -> plain Bound, no content swap,
+    // no second binder.
+    EXPECT_EQ(reg.Bind(kHash, Who(&imageD), &BuildTwo, nullptr).outcome, Astra::BindOutcome::Bound);
+    EXPECT_EQ(reg.BinderCount(kHash), 2u);
+    EXPECT_EQ(reg.Get(kHash)->fields.size(), 1u);     // still A's content
+
+    // A departs. Pre-upgrade this was Retained + "nobody can rebuild"; D can.
+    EXPECT_EQ(reg.Release(kHash, &s_imageA), Astra::ReleaseOutcome::Rebound);
+    EXPECT_EQ(reg.Get(kHash)->fields.size(), 2u);     // rebuilt from D's thunk
+    EXPECT_EQ(reg.TopBinder(kHash), &imageD);
+    EXPECT_EQ(reg.BinderCount(kHash), 1u);
 }

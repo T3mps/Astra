@@ -200,7 +200,8 @@ reversed; `Bind`, `Acquire`, `InstallBaseline` never run a thunk and may be
 called under the registration mutex; `Release` may run a thunk and is
 therefore called only after every registry lock is dropped; inside `Release`
 the thunk runs with the meta mutex released and the swap re-validates the
-top afterwards.
+top afterwards. Log sinks count as user code: every collision/ENSURE
+diagnostic is composed under the mutex and emitted after it is released.
 
 ### 3.4 Registry slot accounting
 
@@ -294,7 +295,10 @@ live-or-shadowed entry holds exactly one ref on its module's binder:
   strictly better than today's outright erase. A later baseline from a module
   that does have a factory rescues such an entry: `InstallBaseline` pushes it
   on top and swaps the content (the only case where a baseline replaces
-  existing content).
+  existing content). The same rescue applies to an entry whose content came
+  from the raw `Register`/`RebindInPlace` path and that has since acquired
+  only null-build binders -- consistent with "content nobody can rebuild
+  anyway", reachable only from the manual path.
 - **Preserved as today, on purpose.** (a) A transient module that drains
   metas it never adopts leaves refs-0 unpinned binders forever: immortal,
   dangling if that module unmaps -- documented misuse. (b) A leaked handle

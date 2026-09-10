@@ -586,6 +586,14 @@ namespace
     int s_pluginImage = 0;
 }
 
+// ORDERING GUARD for every test below that uses these anchors: declare the
+// InstalledContext fixture BEFORE any ScopedModuleIdentity. SetTypeContext
+// drains this binary's pending static metas into the context, and the drain
+// records CurrentModuleIdentity() -- so were this fixture ever the process's
+// first drain while a Resident identity was in scope, every static meta in
+// the binary would get a PINNED binder under a stand-in token and could
+// never be erased, silently breaking the erase-on-last-release tests.
+
 TEST(ComponentModule, ResidentEngineRosterSurvivesEveryRegistryTeardown)
 {
     // Arcane shape: ~N short-lived Runtimes, each with its own registry and
@@ -628,6 +636,9 @@ TEST(ComponentModule, ResidentEngineRosterSurvivesEveryRegistryTeardown)
         second.Reset();
         EXPECT_EQ(meta.Get(hash), address);                               // Retained: pinned at zero refs
         EXPECT_EQ(meta.Refs(hash, &s_engineImage), 0u);
+        // Retained BECAUSE pinned -- not the look-alike §3.6 Retained, where
+        // the survivors are all null-build and nothing can rebuild the content.
+        EXPECT_TRUE(meta.IsPinned(hash, &s_engineImage));
         EXPECT_EQ(Astra::GetMeta(hash), address);                         // registry-less lookup works
         EXPECT_EQ(meta.GetByComponentId(id), address);                    // link rows intact
 
@@ -766,4 +777,55 @@ TEST(ComponentModule, RegistryDestructionReleasesNothing)
     }                                                                     // registry dies WITHOUT releasing
     EXPECT_EQ(meta.Refs(hash, me), before + 1);
     EXPECT_NE(Astra::GetMeta(hash), nullptr);
+}
+
+TEST(ComponentModule, InstallOwnedRefusesSameOwnerMetaNullnessFlip)
+{
+    // Final-review wave: a same-owner in-place Replaced takes NO new meta ref
+    // because the slot's meta nullness is assumed unchanged. It CAN flip --
+    // mod.Register<T>() before T has a factory, a runtime ReflectType<T>, then
+    // Register<T>() again -- and after that RestoreOrClearSlot emits a release
+    // nobody acquired. Harmless inside one registry (ENSURE + Unbound), but
+    // the stray decrement is keyed by the same MODULE TOKEN, so it can drop
+    // ANOTHER registry's ref and erase a meta that is still cached. Refused
+    // all-config, with the slot left untouched.
+    //
+    // Driven through InstallOwned directly with two hand-built descriptors:
+    // reaching the flip through ComponentModule::Register would need a type
+    // whose factory appears mid-test, and the binary has no ComponentID
+    // budget for a fresh one.
+    using T = Astra_Test_ModMeta2::ReflectedOwned;
+    InstalledContext ctx;
+    const uint64_t hash = Astra::TypeID<T>::Hash();
+    const auto id = Astra::TypeID<T>::Value();
+    const Astra::TypeMeta* live = Astra::MetaRegistry::Instance().Get(hash);
+    ASSERT_NE(live, nullptr) << "precondition: T's static reflection has drained into this context";
+
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    const uint32_t owner = creg->OpenModuleId("NullnessFlip");
+    int image = 0;                                   // stand-in module token
+
+    Astra::ComponentDescriptor unreflected{};
+    unreflected.id = id;
+    unreflected.hash = hash;
+    unreflected.size = sizeof(T);
+    unreflected.alignment = alignof(T);
+    unreflected.name = "NullnessFlipProbe";
+    unreflected.meta = nullptr;                      // registered before the factory existed
+    ASSERT_EQ(creg->InstallOwned(id, owner, unreflected, &image), Astra::InstallResult::Installed);
+    ASSERT_NE(creg->GetComponentDescriptor(id), nullptr);
+    ASSERT_EQ(creg->GetComponentDescriptor(id)->meta, nullptr);
+
+    Astra::ComponentDescriptor reflected = unreflected;
+    reflected.meta = live;                           // same owner, nullness FLIPPED
+
+    // ENSURE logs and continues: that line IS the observable refusal.
+    EXPECT_EQ(creg->InstallOwned(id, owner, reflected, &image), Astra::InstallResult::Refused);
+    ASSERT_NE(creg->GetComponentDescriptor(id), nullptr);
+    EXPECT_EQ(creg->GetComponentDescriptor(id)->meta, nullptr);   // slot untouched
+    EXPECT_EQ(creg->GetOwner(id), owner);
+
+    // The unflipped same-owner replace still works.
+    EXPECT_EQ(creg->InstallOwned(id, owner, unreflected, &image), Astra::InstallResult::Replaced);
+    EXPECT_EQ(creg->GetComponentDescriptor(id)->meta, nullptr);
 }

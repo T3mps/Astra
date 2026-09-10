@@ -285,6 +285,15 @@ namespace Astra
 
         // ==== ComponentModule plumbing (spec 2026-08-09) ====================
 
+        // THE descriptor-alignment rule -- the single definition both
+        // registration paths and MakeDescriptor read, so the anonymous path
+        // and the module path refuse EXACTLY the same set of types, no more
+        // and no less. An empty/tag type gets 1: it has no column, so its
+        // declared alignment is storage-irrelevant and an over-aligned empty
+        // tag stays acceptable to both paths.
+        template<Component T>
+        static constexpr size_t DescriptorAlignmentV = std::is_empty_v<T> ? size_t(1) : alignof(T);
+
         // Pure descriptor build: size/alignment/triviality/hash/version/fn-pointers,
         // extracted from RegisterComponentImpl so ComponentModule can build the
         // same descriptor for an OWNED registration. Static (no `this`): does not
@@ -307,7 +316,7 @@ namespace Astra
             desc.id = id;
             // Empty components should report size 0 to avoid memory allocation
             desc.size = std::is_empty_v<T> ? 0 : sizeof(T);
-            desc.alignment = std::is_empty_v<T> ? 1 : alignof(T);
+            desc.alignment = DescriptorAlignmentV<T>;
             // All-config guard: chunk storage can only honor alignments up to
             // CACHE_LINE_SIZE; refuse registration so failure is observable
             // (descriptor lookup returns nullptr; Registry::AddComponent returns
@@ -414,13 +423,23 @@ namespace Astra
         //   3. Live owner == owner   -> Replaced: in-place replace of the live
         //                               entry (no shadow: this module is just
         //                               re-registering/rebinding its own type).
+        //                               REFUSED instead if that replace would
+        //                               flip desc.meta's nullness -- see below.
         //   4. Live owner != owner   -> Overrode: the CURRENT live entry
         //                               (owner, desc, module) is pushed onto
         //                               this id's shadow stack before the new
         //                               entry overwrites the slot, so a later
         //                               ReleaseModule can restore it.
         // The caller acquires a meta ref on Installed and Overrode only; on
-        // Replaced the ref already exists and the image is the same.
+        // Replaced the ref already exists and the image is the same. That last
+        // clause only holds while the slot's meta NULLNESS is unchanged: a
+        // same-owner replace that flips it (registered before the type had a
+        // factory, then reflected, then registered again -- or the reverse)
+        // would leave RestoreOrClearSlot emitting a release nobody acquired, or
+        // swallowing one that was taken. Within one registry that is merely
+        // loud (ENSURE + Unbound), but the stray decrement lands on the binder
+        // keyed by the SAME token, so it can drop ANOTHER registry's ref and
+        // erase a meta that is still cached. The flip is refused all-config.
         // By-value desc: desc.name is caller-owned temporary storage (RegisterOne's
         // stack std::string's c_str()) and is copied into registry-owned storage
         // here, under the lock, before it is written into any slot. A pushed
@@ -456,6 +475,7 @@ namespace Astra
             // the lock releases: ASTRA_LOG_INFO reaches a user-installed
             // LogSink, and user code must never run under m_registrationMutex.
             std::string overrideNotice;
+            bool refusedReplace = false;
             InstallResult result = InstallResult::Installed;
             {
                 std::lock_guard<std::mutex> lock(m_registrationMutex);
@@ -473,16 +493,33 @@ namespace Astra
                     }
                     else
                     {
+                        // Ref parity: a same-owner replace takes NO new meta
+                        // ref, which is only sound while the slot's meta
+                        // nullness is unchanged (see the contract above). The
+                        // DECISION is made here, under the lock; the ENSURE
+                        // that reports it runs after the lock scope closes --
+                        // its failure handler is user code, exactly like the
+                        // override notice's log sink.
+                        refusedReplace = ((m_components[id].meta != nullptr) != (desc.meta != nullptr));
                         result = InstallResult::Replaced;
                     }
                 }
 
-                m_components[id] = desc;
-                m_present.Set(id);
-                m_hashToID[desc.hash] = id;
-                m_owner[id] = owner;
-                m_metaModule[id] = module;
-                m_registered[id].store(true, std::memory_order_release);
+                if (!refusedReplace)   // refused: the slot is left untouched
+                {
+                    m_components[id] = desc;
+                    m_present.Set(id);
+                    m_hashToID[desc.hash] = id;
+                    m_owner[id] = owner;
+                    m_metaModule[id] = module;
+                    m_registered[id].store(true, std::memory_order_release);
+                }
+            }
+            if (refusedReplace)
+            {
+                ASTRA_ENSURE_ALWAYS(false,
+                    "InstallOwned: same-owner replace changed meta nullness -- ref accounting would desync");
+                return InstallResult::Refused;
             }
             if (!overrideNotice.empty())
             {
@@ -605,8 +642,7 @@ namespace Astra
             // Over-aligned refusal BEFORE any meta side effect (mirrors
             // ComponentModule's hoisted gate): a refused type must push no
             // binder. MakeDescriptor repeats the test as defense in depth.
-            constexpr size_t descriptorAlignment = std::is_empty_v<T> ? size_t(1) : alignof(T);
-            if constexpr (descriptorAlignment > CACHE_LINE_SIZE)
+            if constexpr (DescriptorAlignmentV<T> > CACHE_LINE_SIZE)
             {
                 return nullptr;
             }

@@ -128,14 +128,6 @@ namespace Astra
         }
 
     private:
-        // The descriptor alignment MakeDescriptor will compute for T. Mirrors
-        // its expression EXACTLY, empty-type case included, so the module path
-        // refuses precisely the set of types the anonymous path refuses --
-        // no more, no less (an over-aligned EMPTY tag is storage-free and is
-        // accepted by both).
-        template<Component T>
-        static constexpr size_t DescriptorAlignmentV = std::is_empty_v<T> ? size_t(1) : alignof(T);
-
         // Over-aligned refusal, HOISTED above EVERY side effect. Alignment is a
         // purely compile-time property -- it needs neither a ComponentID nor a
         // TypeMeta -- so this MUST precede Phase A. A type that is both
@@ -147,7 +139,11 @@ namespace Astra
         template<Component T>
         void RegisterOne()
         {
-            if constexpr (DescriptorAlignmentV<T> <= CACHE_LINE_SIZE)
+            // ComponentRegistry::DescriptorAlignmentV IS the rule (it no
+            // longer merely mirrors one): MakeDescriptor and the anonymous
+            // RegisterComponentImpl gate read that same variable template, so
+            // this path refuses precisely the set of types they refuse.
+            if constexpr (ComponentRegistry::DescriptorAlignmentV<T> <= CACHE_LINE_SIZE)
             {
                 RegisterOneChecked<T>();
             }
