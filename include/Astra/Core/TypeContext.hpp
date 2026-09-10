@@ -13,6 +13,7 @@
 #include "../Container/FlatMap.hpp"
 #include "Base.hpp"
 #include "Log.hpp"
+#include "ModuleIdentity.hpp"
 
 #if defined(__cpp_rtti) || defined(_CPPRTTI)
 #include <typeinfo>
@@ -195,9 +196,13 @@ namespace Astra
     // pending static meta registrations into it. Must run before the
     // module's first TypeID<T>::Value() / Registry use. Passing nullptr
     // uninstalls (reverts to DefaultTypeContext) and performs no drain.
+    // `residency` is stamped on this module's identity FIRST, so the drained
+    // baselines are pinned iff this module never unmaps (spec 2026-09-09
+    // §3.1). Declare it once, before any registration in this module.
     // Not noexcept: drained registration callbacks may allocate.
-    inline void SetTypeContext(TypeContext* ctx)
+    inline void SetTypeContext(TypeContext* ctx, ModuleResidency residency = ModuleResidency::Transient)
     {
+        Detail::CurrentModuleIdentity().residency = residency;
         Detail::CurrentTypeContextSlot() = ctx;
         if (ctx)
         {
