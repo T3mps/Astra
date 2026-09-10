@@ -180,6 +180,11 @@ ComponentIDs are **never freed** — the TypeContext hash→id mapping persists
    never unloads, so RAII cleanup bought nothing in production. Handles are
    the PLUGIN mechanism. Astra backlog note: per-registry meta scoping would
    lift the precondition if a consumer ever needs module-owned engine rosters.
+   *(DONE 2026-09-10: per-registry meta scoping shipped as the meta binder
+   stack -- see `2026-09-09-astra-meta-binder-scoping-design.md`. A resident
+   module now declares `SetTypeContext(ctx, ModuleResidency::Resident)` and
+   its metas survive the last handle; the single-registry precondition is
+   gone.)*
 2. **Plugin Init** — plugin opens its own handle, **heap-held plugin-side**
    (e.g. a file-scope `std::optional<ComponentModule>`), registers **only its
    own types**, and resets it explicitly in `GamePlugin_Shutdown`. **Never a
@@ -226,24 +231,18 @@ info level with both module names, so needless overrides are visible.
   documented as the one thing only the RAII path cleans. (This is why the
   handle must be heap-held with explicit reset, not a static whose detach-time
   destructor would "self-heal" under the loader lock — see §3.5.2.)
-- **Meta lifecycle mirrors descriptor lifecycle (plan-review finding 1,
-  adjudicated):** `TypeMeta::typeName` (and field-name views) point into the
-  registering module's static storage, so a component meta left in the
-  registry after its module unmaps dangles — and `RebindInPlace`'s identity
-  compare on the unload-before-load path would read freed pages. Resolution:
-  when a slot clears **to empty** (no shadow survivor) — in `ReleaseModule`
-  AND in the range purge — the type's meta entry is **erased** (internal
-  `EraseUnchecked`, which also removes the component link rows). Reload then
-  hits the absent path and installs fresh; no compare against stale memory,
-  and no stale meta stays reachable via `GetMeta`/`GetByName`/`ForEachType`.
-  Residual: a LEAKED handle on an unmapped module with no host purge keeps
-  its stale meta — pre-existing exposure, documented misuse; interned
-  registry-owned name storage is the follow-up hardening for that window.
-- **Public `Erase` guard (plan-review finding 4):** `MetaRegistry::Erase(hash)`
-  refuses (ENSURE + false) when the hash has live component link rows —
-  `RegisterMeta` teardown only ever erases non-component metas, so the guard
-  costs the legit path nothing and stops a caller from dangling every cached
-  `ComponentDescriptor::meta` for a live component.
+- **Meta lifecycle (SUPERSEDED 2026-09-10):** the original rule -- erase the
+  meta when a slot clears to empty -- was correct only with one registry per
+  context. It is replaced by the binder stack in
+  `2026-09-09-astra-meta-binder-scoping-design.md` §3.3: every live-or-
+  shadowed slot in every registry holds a ref on the type's meta binder for
+  its module; a binder leaves at zero refs unless its module declared
+  residency; the meta is erased only when its stack is empty. The dangling-
+  `typeName` concern that motivated erase-on-clear is preserved: a transient
+  module's last release still erases. Residual: a LEAKED handle on an
+  unmapped module keeps its stale meta -- pre-existing exposure, documented
+  misuse; interned registry-owned name storage is the follow-up hardening for
+  that window.
 - **Owner-0 restore scoping (review finding 6):** the invariant "a restored
   shadow entry's module is by definition still mapped" holds only for
   **module-owned** entries — a live handle proves its module is mapped. An

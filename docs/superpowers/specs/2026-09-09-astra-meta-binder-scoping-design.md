@@ -1,7 +1,7 @@
 # Meta binder scoping: multi-registry-safe TypeMeta lifetime
 
 **Date:** 2026-09-09
-**Status:** design approved in brainstorm (user, 2026-09-09); spec pending user review
+**Status:** implemented 2026-09-10 (plan `docs/superpowers/plans/2026-09-10-astra-meta-binder-scoping.md`, branch feature/meta-binder)
 **Origin:** the "per-registry meta scoping" backlog note in
 `2026-08-09-astra-component-module-raii-design.md` §3.5.1 and §3.6 ("one
 registry per context is the supported shape"), and Arcane's reverted
@@ -146,7 +146,10 @@ struct BindResult { BindOutcome outcome; TypeMeta* meta; };
 // Drain / ReflectType path. Installs the entry if absent (content = fresh,
 // this module's binder as the only one). If the entry exists: identity-check,
 // then push a refs-0 binder AT THE BOTTOM (first-wins content) -- a no-op if
-// this module already has a binder. Never swaps existing content.
+// this module already has a binder. Never swaps existing content, with ONE
+// exception (§3.6 degraded state): when the stack is non-empty and EVERY
+// existing binder is null-build, nothing can rebuild the content, so the new
+// binder is pushed on TOP and the content is swapped to `fresh` (rescue).
 BindResult InstallBaseline(uint64_t hash, Detail::ModuleIdentity who,
                            MetaBuildFn build, TypeMeta&& fresh);
 
@@ -174,6 +177,18 @@ bool Acquire(uint64_t hash, ModuleToken module);
 // (Rebound). Zero and pinned -> Retained (nothing else changes). Empty stack
 // -> erase entry + both link rows (Erased). refs still > 0 -> Held.
 ReleaseOutcome Release(uint64_t hash, ModuleToken module);
+
+// Deferred half of BoundNeedsRebuild: swap content to `fresh` iff `module`'s
+// binder is (still) top. Identity-checked. Called by RegisterComponent after
+// it drops the registration lock.
+bool Rebind(uint64_t hash, ModuleToken module, TypeMeta&& fresh);
+
+// Read-only diagnostics (tests, tools): binder count, a module's refs,
+// whether a module's binder is pinned, and the top binder's token.
+size_t      BinderCount(uint64_t hash) const;
+uint32_t    Refs(uint64_t hash, ModuleToken module) const;
+bool        IsPinned(uint64_t hash, ModuleToken module) const;
+ModuleToken TopBinder(uint64_t hash) const;
 ```
 
 `Register(TypeMeta&&)` and `RebindInPlace(TypeMeta&&)` stay as the content
@@ -276,7 +291,10 @@ live-or-shadowed entry holds exactly one ref on its module's binder:
   (`Retained`, address stays valid) and an `ASTRA_LOG_WARN` names the hash
   (not the `typeName`, which may already point into unmapped memory). That
   module inherited the drainer's lifetime by construction; documented misuse,
-  strictly better than today's outright erase.
+  strictly better than today's outright erase. A later baseline from a module
+  that does have a factory rescues such an entry: `InstallBaseline` pushes it
+  on top and swaps the content (the only case where a baseline replaces
+  existing content).
 - **Preserved as today, on purpose.** (a) A transient module that drains
   metas it never adopts leaves refs-0 unpinned binders forever: immortal,
   dangling if that module unmaps -- documented misuse. (b) A leaked handle
@@ -300,13 +318,22 @@ live-or-shadowed entry holds exactly one ref on its module's binder:
 - `SetTypeContext(TypeContext*, ModuleResidency = Transient)` -- additive.
 - `Detail::ModuleIdentity`, `Detail::CurrentModuleIdentity()`,
   `Detail::ScopedModuleIdentity` -- new (Detail).
-- `MetaRegistry`: `+InstallBaseline`, `+Bind`, `+Acquire`, `+Release`,
-  `+BindOutcome/BindResult/ReleaseOutcome`; `-Erase`, `-EraseUnchecked`.
-  `RebindInPlace`, `Register`, `LinkToComponent`, reads, `Clear` unchanged.
-- `ComponentRegistry`: `InstallOwned` returns `InstallResult` and takes a
-  `ModuleToken`; `ReleaseModule` returns `SmallVector<MetaRelease,4>`;
-  `MetaRestore` -> `MetaRelease{hash, module}`; `ShadowEntry` + per-slot
-  arrays carry the token. `UnregisterModuleRange` signature unchanged.
+- `MetaRegistry`: `+InstallBaseline, +Bind, +Acquire, +Release, +Rebind,
+  +BinderCount/Refs/IsPinned/TopBinder, +MetaBinder/BindOutcome/BindResult/
+  ReleaseOutcome; -Erase, -EraseUnchecked.` The four accessors are read-only
+  diagnostics (tests, tools): `BinderCount(hash)`, `Refs(hash, module)`,
+  `IsPinned(hash, module)`, `TopBinder(hash)`. `RebindInPlace`, `Register`,
+  `LinkToComponent`, reads, `Clear` unchanged.
+- `ComponentRegistry`: `InstallOwned` returns `InstallResult`, takes a
+  `ModuleToken`, and **drops its `MetaBuildFn` parameter** (the stack owns
+  thunks; per-slot `m_metaThunk` and `ShadowEntry::buildMeta` are gone,
+  replaced by the module token). `RegisterComponentImpl` now returns the
+  bind token (`ModuleToken`, nullptr when no rebuild is needed) instead of
+  `void`, which `RegisterComponent` uses to run the deferred `Rebind` after
+  it drops the registration lock. `ReleaseModule` returns
+  `SmallVector<MetaRelease,4>`; `MetaRestore` -> `MetaRelease{hash, module}`;
+  `ShadowEntry` + per-slot arrays carry the token. `UnregisterModuleRange`
+  signature unchanged.
 - `ComponentModule`: `Open`/`Register`/`RegisterMeta`/`Reset` signatures
   unchanged (source-compatible for plugins); captures `ModuleIdentity`.
 - Deleted text: the "one registry per context is the supported shape" caveat

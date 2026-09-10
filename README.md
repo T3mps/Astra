@@ -399,6 +399,11 @@ context. The pending queue is module-local; registrations enqueued before
 `SetTypeContext` is called (e.g. from `ASTRA_REFLECT` macros in static
 initializers) are flushed when the context is installed.
 
+A module that never unmaps (the engine EXE/DLL) should install with
+`Astra::SetTypeContext(ctx, Astra::ModuleResidency::Resident)`: its reflected
+metas then survive the last `ComponentModule` handle, so registry-less
+`Astra::GetMeta` keeps resolving. Plugins keep the default `Transient`.
+
 **Hot-reload sequence:** serialize world -> unload DLL -> load new DLL ->
 `SetTypeContext` -> in the new image's `Init`, open a module handle and
 register the types whose descriptors may have changed -> deserialize:
