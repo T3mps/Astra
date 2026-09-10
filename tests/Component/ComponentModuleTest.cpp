@@ -571,3 +571,199 @@ TEST(ComponentModuleDeathTest, AccessorAssertsOnForeignContext)
     Astra::SetTypeContext(&Astra::DefaultTypeContext());
 }
 #endif
+
+// ============================================================================
+// Meta binder scoping (spec 2026-09-09 §4 tests 9-13): several registries on
+// ONE context. ScopedModuleIdentity lets this single binary play a resident
+// "engine" image and a transient "plugin" image -- distinct addresses are
+// distinct module tokens. Reuses the two reflected component types declared
+// above (zero new ids).
+// ============================================================================
+
+namespace
+{
+    int s_engineImage = 0;   // stand-in image anchors
+    int s_pluginImage = 0;
+}
+
+TEST(ComponentModule, ResidentEngineRosterSurvivesEveryRegistryTeardown)
+{
+    // Arcane shape: ~N short-lived Runtimes, each with its own registry and
+    // its own engine handle, against one process-wide context. After the
+    // LAST handle goes, registry-less GetMeta must still resolve. Both
+    // teardown orders.
+    using T = Astra_Test_ModMeta2::ReflectedOwned;
+    InstalledContext ctx;
+    Astra::Detail::ScopedModuleIdentity engine(&s_engineImage, Astra::ModuleResidency::Resident);
+    const uint64_t hash = Astra::TypeID<T>::Hash();
+    const auto id = Astra::TypeID<T>::Value();
+    auto& meta = Astra::MetaRegistry::Instance();
+
+    for (int order = 0; order < 2; ++order)
+    {
+        auto regA = std::make_shared<Astra::ComponentRegistry>();
+        auto regB = std::make_shared<Astra::ComponentRegistry>();
+        auto hA = Astra::ComponentModule::Open(regA, "EngineA");
+        auto hB = Astra::ComponentModule::Open(regB, "EngineB");
+        ASSERT_TRUE(static_cast<bool>(hA));
+        ASSERT_TRUE(static_cast<bool>(hB));
+        hA.Register<T>();
+        hB.Register<T>();
+        const Astra::TypeMeta* address = meta.Get(hash);
+        ASSERT_NE(address, nullptr);
+        EXPECT_EQ(regA->GetComponentDescriptor(id)->meta, address);
+        EXPECT_EQ(regB->GetComponentDescriptor(id)->meta, address);
+        EXPECT_EQ(meta.Refs(hash, &s_engineImage), 2u);
+        EXPECT_TRUE(meta.IsPinned(hash, &s_engineImage));
+
+        Astra::ComponentModule& first  = (order == 0) ? hA : hB;
+        Astra::ComponentModule& second = (order == 0) ? hB : hA;
+        const std::shared_ptr<Astra::ComponentRegistry>& survivor = (order == 0) ? regB : regA;
+
+        first.Reset();
+        EXPECT_EQ(meta.Get(hash), address);                               // Held: still there, same address
+        EXPECT_EQ(survivor->GetComponentDescriptor(id)->meta, address);   // the other registry is unharmed
+        EXPECT_EQ(meta.Refs(hash, &s_engineImage), 1u);
+
+        second.Reset();
+        EXPECT_EQ(meta.Get(hash), address);                               // Retained: pinned at zero refs
+        EXPECT_EQ(meta.Refs(hash, &s_engineImage), 0u);
+        EXPECT_EQ(Astra::GetMeta(hash), address);                         // registry-less lookup works
+        EXPECT_EQ(meta.GetByComponentId(id), address);                    // link rows intact
+
+        auto regC = std::make_shared<Astra::ComponentRegistry>();
+        auto hC = Astra::ComponentModule::Open(regC, "EngineC");
+        hC.Register<T>();
+        EXPECT_EQ(regC->GetComponentDescriptor(id)->meta, address);       // a third registry: same address
+        EXPECT_EQ(meta.Refs(hash, &s_engineImage), 1u);
+    }                                                                     // hC/regC die here: refs back to 0
+}
+
+TEST(ComponentModule, TransientPluginMetaOutlivesFirstRegistryOnly)
+{
+    // The original bug: a plugin-owned type in TWO registries. The first
+    // teardown must not erase what the second still caches; the second
+    // teardown erases.
+    using T = Astra_Test_ModMeta2::ReflectedEphemeral;
+    InstalledContext ctx;
+    Astra::Detail::ScopedModuleIdentity plugin(&s_pluginImage, Astra::ModuleResidency::Transient);
+    const uint64_t hash = Astra::TypeID<T>::Hash();
+    const auto id = Astra::TypeID<T>::Value();
+    auto& meta = Astra::MetaRegistry::Instance();
+    ASSERT_EQ(meta.Get(hash), nullptr) << "precondition: MetaErasedWhenSlotPopsToEmpty runs earlier and leaves no entry";
+
+    auto regA = std::make_shared<Astra::ComponentRegistry>();
+    auto regB = std::make_shared<Astra::ComponentRegistry>();
+    auto hA = Astra::ComponentModule::Open(regA, "PluginA");
+    auto hB = Astra::ComponentModule::Open(regB, "PluginB");
+    hA.Register<T>();
+    hB.Register<T>();
+    const Astra::TypeMeta* address = meta.Get(hash);
+    ASSERT_NE(address, nullptr);
+    EXPECT_EQ(meta.Refs(hash, &s_pluginImage), 2u);
+    EXPECT_FALSE(meta.IsPinned(hash, &s_pluginImage));
+
+    hA.Reset();
+    EXPECT_EQ(meta.Get(hash), address);                                   // Held: B still caches it
+    EXPECT_EQ(regB->GetComponentDescriptor(id)->meta, address);
+    EXPECT_EQ(meta.Refs(hash, &s_pluginImage), 1u);
+
+    hB.Reset();
+    EXPECT_EQ(meta.Get(hash), nullptr);                                   // Erased with the last ref
+    EXPECT_EQ(meta.GetByComponentId(id), nullptr);
+    EXPECT_EQ(meta.BinderCount(hash), 0u);
+}
+
+TEST(ComponentModule, OverriderDepartsWhileAnotherRegistryHolds)
+{
+    // Engine (resident) registers T anonymously in A and B; a transient
+    // plugin overrides T in A only. When the plugin departs, A restores the
+    // engine survivor, the meta rebinds to the engine's thunk, and B's cached
+    // pointer never moved.
+    using T = Astra_Test_ModMeta2::ReflectedOwned;
+    InstalledContext ctx;
+    const uint64_t hash = Astra::TypeID<T>::Hash();
+    const auto id = Astra::TypeID<T>::Value();
+    auto& meta = Astra::MetaRegistry::Instance();
+
+    auto regA = std::make_shared<Astra::ComponentRegistry>();
+    auto regB = std::make_shared<Astra::ComponentRegistry>();
+    {
+        Astra::Detail::ScopedModuleIdentity engine(&s_engineImage, Astra::ModuleResidency::Resident);
+        regA->RegisterComponent<T>();
+        regB->RegisterComponent<T>();
+    }
+    const Astra::TypeMeta* address = meta.Get(hash);
+    ASSERT_NE(address, nullptr);
+    EXPECT_EQ(meta.TopBinder(hash), &s_engineImage);
+    const uint32_t engineRefs = meta.Refs(hash, &s_engineImage);
+    ASSERT_GE(engineRefs, 2u);
+
+    {
+        Astra::Detail::ScopedModuleIdentity plugin(&s_pluginImage, Astra::ModuleResidency::Transient);
+        auto hP = Astra::ComponentModule::Open(regA, "PluginOverride");
+        hP.Register<T>();                                                 // shadow push over the engine's slot in A
+        EXPECT_EQ(meta.TopBinder(hash), &s_pluginImage);
+        EXPECT_EQ(meta.Refs(hash, &s_pluginImage), 1u);
+        EXPECT_NE(regA->GetOwner(id), 0u);
+        EXPECT_EQ(regA->GetComponentDescriptor(id)->meta, address);
+    }                                                                     // plugin departs
+    EXPECT_EQ(meta.TopBinder(hash), &s_engineImage);                      // Rebound to the engine's thunk
+    EXPECT_EQ(meta.Refs(hash, &s_pluginImage), 0u);
+    EXPECT_EQ(meta.Get(hash), address);
+    EXPECT_EQ(regA->GetOwner(id), 0u);                                    // engine survivor restored in A
+    EXPECT_EQ(regA->GetComponentDescriptor(id)->meta, address);
+    EXPECT_EQ(regB->GetComponentDescriptor(id)->meta, address);           // B never moved
+    EXPECT_EQ(meta.Refs(hash, &s_engineImage), engineRefs);               // engine refs untouched
+}
+
+TEST(ComponentModule, RangePurgeReleasesEachEntryAgainstItsOwnModule)
+{
+    // A non-RAII plugin registered anonymously under ITS token; the host's
+    // range purge must release against the PLUGIN's binder, and the meta
+    // survives because other binders still hold the type.
+    using T = Astra_Test_ModMeta2::ReflectedOwned;
+    InstalledContext ctx;
+    const uint64_t hash = Astra::TypeID<T>::Hash();
+    const auto id = Astra::TypeID<T>::Value();
+    auto& meta = Astra::MetaRegistry::Instance();
+    const uint32_t before = meta.Refs(hash, &s_pluginImage);
+
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    {
+        Astra::Detail::ScopedModuleIdentity plugin(&s_pluginImage, Astra::ModuleResidency::Transient);
+        creg->RegisterComponent<T>();
+    }
+    EXPECT_EQ(meta.Refs(hash, &s_pluginImage), before + 1);
+    const Astra::TypeMeta* address = meta.Get(hash);
+    ASSERT_NE(address, nullptr);
+    const auto* liveDesc = creg->GetComponentDescriptor(id);
+    ASSERT_NE(liveDesc, nullptr);
+    const void* base = reinterpret_cast<const void*>(
+        reinterpret_cast<uintptr_t>(liveDesc->defaultConstruct) & ~uintptr_t(0xFFFF));
+    const size_t dropped = creg->UnregisterModuleRange(base, size_t(1) << 30);
+    EXPECT_GE(dropped, 1u);
+    EXPECT_EQ(creg->GetComponentDescriptor(id), nullptr);
+    EXPECT_EQ(meta.Refs(hash, &s_pluginImage), before);                   // released against the plugin's binder
+    EXPECT_EQ(meta.Get(hash), address);                                   // other binders still hold: not erased
+}
+
+TEST(ComponentModule, RegistryDestructionReleasesNothing)
+{
+    // Spec 2026-09-09 §3.6 (c): anonymous entries outlive their registry
+    // exactly as before -- Arcane's registry-less GetMeta readers depend on
+    // it. Over-holding is the safe direction.
+    using T = Astra_Test_ModMeta2::ReflectedOwned;
+    InstalledContext ctx;
+    const uint64_t hash = Astra::TypeID<T>::Hash();
+    auto& meta = Astra::MetaRegistry::Instance();
+    const Astra::ModuleToken me = Astra::Detail::CurrentModuleIdentity().token;
+    const uint32_t before = meta.Refs(hash, me);
+    {
+        auto creg = std::make_shared<Astra::ComponentRegistry>();
+        creg->RegisterComponent<T>();
+        EXPECT_EQ(meta.Refs(hash, me), before + 1);
+    }                                                                     // registry dies WITHOUT releasing
+    EXPECT_EQ(meta.Refs(hash, me), before + 1);
+    EXPECT_NE(Astra::GetMeta(hash), nullptr);
+}
