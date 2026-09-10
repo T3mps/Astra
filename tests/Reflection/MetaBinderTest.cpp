@@ -348,3 +348,26 @@ TEST(MetaBinder, InstallBaselineRescuesAllNullBuildStack)
     EXPECT_EQ(reg.TopBinder(kHash), &s_imageC);
     EXPECT_EQ(reg.BinderCount(kHash), 3u);
 }
+
+TEST(MetaBinder, InstallBaselineOnBinderlessEntryKeepsContent)
+{
+    // Fix round 2, spec 2026-09-09 §3.6: an EMPTY binder stack (a
+    // binder-less entry from Register/RebindInPlace) is not a degraded
+    // stack -- there is no departed top and nothing to rescue. It must take
+    // the ordinary bottom-insert/first-wins path, the same as any other
+    // stack with a rebuildable binder, NOT the rescue-and-swap path.
+    Astra::MetaRegistry reg;
+    ASSERT_NE(reg.Register(BuildOne()), nullptr);
+    const Astra::TypeMeta* address = reg.Get(kHash);
+    ASSERT_NE(address, nullptr);
+    EXPECT_EQ(address->fields.size(), 1u);
+    EXPECT_EQ(reg.BinderCount(kHash), 0u);
+
+    const Astra::BindResult r = reg.InstallBaseline(kHash, Who(&s_imageA), &BuildTwo, BuildTwo());
+    EXPECT_EQ(r.outcome, Astra::BindOutcome::Bound);
+    EXPECT_EQ(reg.Get(kHash), address);                // same address
+    EXPECT_EQ(address->fields.size(), 1u);             // content NOT swapped
+    EXPECT_EQ(reg.BinderCount(kHash), 1u);
+    EXPECT_EQ(reg.TopBinder(kHash), &s_imageA);
+    EXPECT_EQ(reg.Refs(kHash, &s_imageA), 0u);
+}

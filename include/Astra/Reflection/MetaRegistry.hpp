@@ -176,14 +176,16 @@ namespace Astra
         // Drain / ReflectType path. Entry absent: install from `fresh` with
         // `who`'s binder (refs 0, pinned iff Resident) as the only one. Entry
         // present: identity-check `fresh`, then, if `who` has no binder yet,
-        // push one -- normally AT THE BOTTOM (first-wins content, no swap),
-        // UNLESS every existing binder is null-build (spec 2026-09-09 §3.6
-        // degraded state: the stack survived a departed top with nothing left
-        // that can rebuild its content). In that case first-wins would strand
-        // the entry with unrebuildable content forever, so this binder goes
-        // ON TOP instead and the content is swapped to `fresh`, rescuing the
-        // entry. A no-op if `who` already has a binder either way. Never runs
-        // a thunk.
+        // push one -- normally AT THE BOTTOM (first-wins content, no swap;
+        // this also covers a binder-less entry from Register/RebindInPlace,
+        // where the stack is empty and this binder becomes its only one),
+        // UNLESS the stack is NON-EMPTY and every existing binder is
+        // null-build (spec 2026-09-09 §3.6 degraded state: a real binder
+        // stack survived a departed top with nothing left that can rebuild
+        // its content). In that case first-wins would strand the entry with
+        // unrebuildable content forever, so this binder goes ON TOP instead
+        // and the content is swapped to `fresh`, rescuing the entry. A no-op
+        // if `who` already has a binder either way. Never runs a thunk.
         BindResult InstallBaseline(uint64_t hash, Detail::ModuleIdentity who, MetaBuildFn build, TypeMeta&& fresh)
         {
             std::unique_lock lock(m_mutex);
@@ -202,13 +204,18 @@ namespace Astra
             }
             if (FindBinder(e, who.token) == e.binders.size())
             {
-                if (AllBindersNullBuild(e))
+                if (NonEmptyAndAllNullBuild(e))
                 {
                     e.binders.push_back(MakeBinder(who, build));
                     *e.meta = std::move(fresh);
                 }
                 else
                 {
+                    // Empty stack (a binder-less entry from Register/
+                    // RebindInPlace) or a stack with a rebuildable binder:
+                    // either way, the default applies -- bottom insert,
+                    // first-wins content, no swap. For an empty stack this
+                    // binder is trivially the entry's only one.
                     e.binders.insert(e.binders.begin(), MakeBinder(who, build));
                 }
             }
@@ -703,11 +710,18 @@ namespace Astra
             return e.binders.size();
         }
 
-        // True when no binder in the stack can source content (spec
-        // 2026-09-09 §3.6 degraded state) -- vacuously true for an empty
-        // stack, which never occurs on InstallBaseline's existing-entry path.
-        static bool AllBindersNullBuild(const Entry& e) noexcept
+        // True when the stack is NON-EMPTY and no binder in it can source
+        // content (spec 2026-09-09 §3.6 degraded state). Deliberately false
+        // (not vacuously true) for an empty stack: a binder-less entry
+        // (Register/RebindInPlace, no binder pushed yet) has nothing to
+        // rescue, so it must take the ordinary bottom-insert/first-wins path
+        // in InstallBaseline, not the rescue path.
+        static bool NonEmptyAndAllNullBuild(const Entry& e) noexcept
         {
+            if (e.binders.empty())
+            {
+                return false;
+            }
             for (const MetaBinder& b : e.binders)
             {
                 if (b.build != nullptr) return false;
