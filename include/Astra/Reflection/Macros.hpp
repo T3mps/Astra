@@ -199,17 +199,29 @@ namespace Astra
     /**
      * Manually registers a type with the reflection system.
      * Use this for types where macros are inconvenient (e.g., templates).
+     * Retains the builder as this module's rebuild factory and installs a
+     * baseline binder under this module's identity, exactly like the
+     * ASTRA_REFLECT_TYPE static path (spec 2026-09-09 §3.5 flow 1).
      *
      * @tparam T The type to register
      * @param builderFunc Function that configures the TypeMetaBuilder
-     * @return Pointer to the registered TypeMeta
+     * @return Pointer to the registered TypeMeta (existing entry on an
+     *         idempotent re-registration; nullptr on identity collision)
      */
     template<typename T, typename BuilderFunc>
     inline TypeMeta* ReflectType(BuilderFunc&& builderFunc)
     {
+        Detail::MetaFactory<T>::fn = [f = builderFunc]() {
+            Detail::TypeMetaBuilder<T> b;
+            f(b);
+            return b.Build();
+        };
         Detail::TypeMetaBuilder<T> builder;
         builderFunc(builder);
-        return MetaRegistry::Instance().Register(builder.Build());
+        TypeMeta fresh = builder.Build();
+        const uint64_t hash = fresh.typeHash;
+        return MetaRegistry::Instance().InstallBaseline(hash, Detail::CurrentModuleIdentity(),
+                                                        &Detail::BuildMetaThunk<T>, std::move(fresh)).meta;
     }
 
     /**
@@ -217,15 +229,25 @@ namespace Astra
      *
      * @tparam EnumType The enum type to register
      * @param enumBuilderFunc Function that configures the EnumInfoBuilder
-     * @return Pointer to the registered TypeMeta
+     * @return Pointer to the registered TypeMeta (see ReflectType)
      */
     template<typename EnumType, typename EnumBuilderFunc>
     inline TypeMeta* ReflectEnum(EnumBuilderFunc&& enumBuilderFunc)
     {
+        Detail::MetaFactory<EnumType>::fn = [f = enumBuilderFunc]() {
+            Detail::TypeMetaBuilder<EnumType> b;
+            Detail::EnumInfoBuilder<EnumType> eb;
+            f(eb);
+            b.Enum(eb.Build());
+            return b.Build();
+        };
         Detail::TypeMetaBuilder<EnumType> builder;
         Detail::EnumInfoBuilder<EnumType> enumBuilder;
         enumBuilderFunc(enumBuilder);
         builder.Enum(enumBuilder.Build());
-        return MetaRegistry::Instance().Register(builder.Build());
+        TypeMeta fresh = builder.Build();
+        const uint64_t hash = fresh.typeHash;
+        return MetaRegistry::Instance().InstallBaseline(hash, Detail::CurrentModuleIdentity(),
+                                                        &Detail::BuildMetaThunk<EnumType>, std::move(fresh)).meta;
     }
 }

@@ -885,7 +885,13 @@ namespace Astra
                 auto meta = std::make_shared<TypeMeta>(builder.Build());
                 EnqueuePendingMeta([meta](TypeContext& ctx)
                 {
-                    ctx.Meta().Register(std::move(*meta));
+                    // Runs in the ENQUEUING module: the queue is module-local
+                    // and is drained by that module's own SetTypeContext /
+                    // Instance(), so the identity read here is this module's
+                    // -- token AND residency (spec 2026-09-09 §3.5 flow 1).
+                    // Installs a refs-0 baseline binder; first-wins content.
+                    ctx.Meta().InstallBaseline(meta->typeHash, CurrentModuleIdentity(),
+                                               &BuildMetaThunk<T>, std::move(*meta));
                 });
             }
         };
