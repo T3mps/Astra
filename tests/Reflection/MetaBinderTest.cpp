@@ -302,3 +302,49 @@ TEST(MetaBinder, ComponentLinkedHashWithLiveRefsIsHeldNotErased)
     EXPECT_EQ(reg.Release(kHash, &s_imageA), Astra::ReleaseOutcome::Erased); // slot clears
     EXPECT_EQ(reg.GetByComponentId(static_cast<Astra::ComponentID>(5)), nullptr);
 }
+
+TEST(MetaBinder, InstallBaselineRescuesAllNullBuildStack)
+{
+    // Fix round 1, spec 2026-09-09 §3.6: once every remaining binder is
+    // null-build, first-wins bottom-insert would strand the entry with
+    // unrebuildable content forever. A later InstallBaseline must instead
+    // take the top and rescue the content.
+    //
+    // A fourth module image is needed here: A departs, D (null-build) is
+    // the sole survivor, C rescues, and B installs a normal baseline
+    // afterward -- all four identities must stay distinct through the test.
+    int imageD = 0;
+
+    Astra::MetaRegistry reg;
+    Astra::TypeMeta one = BuildOne();
+    ASSERT_EQ(reg.Bind(kHash, Who(&s_imageA), &BuildOne, &one).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &s_imageA));
+
+    // D has no factory: lands below top, can never source content.
+    ASSERT_EQ(reg.Bind(kHash, Who(&imageD), nullptr, nullptr).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &imageD));
+
+    // A departs: only D (null-build) remains -- degraded state.
+    EXPECT_EQ(reg.Release(kHash, &s_imageA), Astra::ReleaseOutcome::Retained);
+    const Astra::TypeMeta* address = reg.Get(kHash);
+    ASSERT_NE(address, nullptr);
+    EXPECT_EQ(address->fields.size(), 1u);
+    EXPECT_EQ(reg.TopBinder(kHash), &imageD);
+
+    // A later baseline drain rescues the entry: takes the TOP, not the
+    // bottom, and swaps in its own content.
+    const Astra::BindResult rescue = reg.InstallBaseline(kHash, Who(&s_imageC), &BuildTwo, BuildTwo());
+    EXPECT_EQ(rescue.outcome, Astra::BindOutcome::Bound);
+    EXPECT_EQ(reg.Get(kHash), address);               // same address
+    EXPECT_EQ(address->fields.size(), 2u);             // content rescued
+    EXPECT_EQ(reg.TopBinder(kHash), &s_imageC);
+    EXPECT_EQ(reg.BinderCount(kHash), 2u);
+
+    // Normal path is unchanged: with a non-null-build binder on top, a new
+    // baseline still goes to the bottom and does not disturb content.
+    const Astra::BindResult normal = reg.InstallBaseline(kHash, Who(&s_imageB), &BuildThree, BuildThree());
+    EXPECT_EQ(normal.outcome, Astra::BindOutcome::Bound);
+    EXPECT_EQ(address->fields.size(), 2u);             // untouched
+    EXPECT_EQ(reg.TopBinder(kHash), &s_imageC);
+    EXPECT_EQ(reg.BinderCount(kHash), 3u);
+}

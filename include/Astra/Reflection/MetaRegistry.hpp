@@ -175,9 +175,15 @@ namespace Astra
 
         // Drain / ReflectType path. Entry absent: install from `fresh` with
         // `who`'s binder (refs 0, pinned iff Resident) as the only one. Entry
-        // present: identity-check `fresh`, then push a refs-0 binder AT THE
-        // BOTTOM (first-wins content) -- a no-op if `who` already has one.
-        // Never swaps existing content. Never runs a thunk.
+        // present: identity-check `fresh`, then, if `who` has no binder yet,
+        // push one -- normally AT THE BOTTOM (first-wins content, no swap),
+        // UNLESS every existing binder is null-build (spec 2026-09-09 §3.6
+        // degraded state: the stack survived a departed top with nothing left
+        // that can rebuild its content). In that case first-wins would strand
+        // the entry with unrebuildable content forever, so this binder goes
+        // ON TOP instead and the content is swapped to `fresh`, rescuing the
+        // entry. A no-op if `who` already has a binder either way. Never runs
+        // a thunk.
         BindResult InstallBaseline(uint64_t hash, Detail::ModuleIdentity who, MetaBuildFn build, TypeMeta&& fresh)
         {
             std::unique_lock lock(m_mutex);
@@ -196,7 +202,15 @@ namespace Astra
             }
             if (FindBinder(e, who.token) == e.binders.size())
             {
-                e.binders.insert(e.binders.begin(), MakeBinder(who, build));
+                if (AllBindersNullBuild(e))
+                {
+                    e.binders.push_back(MakeBinder(who, build));
+                    *e.meta = std::move(fresh);
+                }
+                else
+                {
+                    e.binders.insert(e.binders.begin(), MakeBinder(who, build));
+                }
             }
             return { BindOutcome::Bound, e.meta.get() };
         }
@@ -687,6 +701,18 @@ namespace Astra
                 if (e.binders[i].module == module) return i;
             }
             return e.binders.size();
+        }
+
+        // True when no binder in the stack can source content (spec
+        // 2026-09-09 §3.6 degraded state) -- vacuously true for an empty
+        // stack, which never occurs on InstallBaseline's existing-entry path.
+        static bool AllBindersNullBuild(const Entry& e) noexcept
+        {
+            for (const MetaBinder& b : e.binders)
+            {
+                if (b.build != nullptr) return false;
+            }
+            return true;
         }
 
         // The identity fields a TypeMeta carries: matching => the same type
