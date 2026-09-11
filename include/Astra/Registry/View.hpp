@@ -917,8 +917,8 @@ namespace Astra
 
                 const auto& entities = chunk->GetEntities();
 
-                InvokeEntityCallback(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{},
-                                     reqTicks, optTicks, now);
+                InvokeEntityCallback<Stamp>(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{},
+                                            reqTicks, optTicks, now);
             }
         }
 
@@ -996,8 +996,8 @@ namespace Astra
 
             const auto& entities = chunk->GetEntities();
 
-            InvokeEntityCallback(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{},
-                                 reqTicks, optTicks, now);
+            InvokeEntityCallback<true>(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{},
+                                       reqTicks, optTicks, now);
         }
 
         // Empty (tag) required components have no storage, so
@@ -1084,7 +1084,11 @@ namespace Astra
                 ? chunk->GetTicks(cm.idToColumn[TypeID<std::remove_const_t<std::tuple_element_t<OptIs, OptionalTypes>>>::Value()]) : nullptr), ...);
         }
 
-        template<typename EntitiesVec, typename ReqTuple, typename OptTuple, typename Func, size_t... ReqIs, size_t... OptIs>
+        // `Stamp` mirrors the chunk loops' parameter: with Stamp=false (Single()'s
+        // count/locate pass -- Ruling E, extended to the exact tier) the deviation-5
+        // optional mark is not instantiated either; a Mut<T> handed to the counting
+        // lambda is never touched, so required yields need no gate.
+        template<bool Stamp, typename EntitiesVec, typename ReqTuple, typename OptTuple, typename Func, size_t... ReqIs, size_t... OptIs>
         ASTRA_FORCEINLINE void InvokeEntityCallback(const EntitiesVec& entities, const ReqTuple& reqPtrs, const OptTuple& optPtrs,
                                                     size_t count, Func&& func, std::index_sequence<ReqIs...>, [[maybe_unused]] std::index_sequence<OptIs...> os,
                                                     [[maybe_unused]] EntityTicks* const* reqTicks = nullptr, [[maybe_unused]] EntityTicks* const* optTicks = nullptr,
@@ -1102,7 +1106,8 @@ namespace Astra
             {
                 for (size_t i = 0; i < count; ++i)
                 {
-                    MarkTrackedOptionals(optPtrs, optTicks, i, now, os);
+                    if constexpr (Stamp)
+                        MarkTrackedOptionals(optPtrs, optTicks, i, now, os);
                     // Materialise the yields as lvalues (a tuple of T&... / Mut<T>...) so
                     // `auto&`, `T&` (Mut's implicit conversion) and by-value `Mut<T>`
                     // parameters all bind; std::apply hands them over as T& / Mut<T>&.
@@ -1171,7 +1176,8 @@ namespace Astra
             return base ? &base[i] : static_cast<OptT*>(nullptr);
         }
 
-        template<typename EntitiesVec, typename ReqTuple, typename OptTuple, typename Func, size_t... ReqIs, size_t... OptIs>
+        // Same `Stamp` gate as InvokeEntityCallback (Ruling E, extended).
+        template<bool Stamp, typename EntitiesVec, typename ReqTuple, typename OptTuple, typename Func, size_t... ReqIs, size_t... OptIs>
         ASTRA_FORCEINLINE void InvokeEntityCallbackFiltered(const EntitiesVec& entities, const ReqTuple& reqPtrs, const OptTuple& optPtrs,
                                                             size_t begin, size_t end, ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm,
                                                             Func&& func, std::index_sequence<ReqIs...>, [[maybe_unused]] std::index_sequence<OptIs...> os,
@@ -1193,7 +1199,8 @@ namespace Astra
                     // Per-entity optional pointers first: an enableable tracked optional
                     // that is disabled for this entity is nulled here and must not mark.
                     std::tuple<std::tuple_element_t<OptIs, OptionalTypes>*...> opt{ FilteredOptionalArg<OptIs>(optPtrs, i, chunk, cm)... };
-                    MarkTrackedOptionals(opt, optTicks, i, now, os);
+                    if constexpr (Stamp)
+                        MarkTrackedOptionals(opt, optTicks, i, now, os);
                     std::tuple<typename YieldType<std::tuple_element_t<ReqIs, RequiredTypes>>::type...> req{ YieldRequired<ReqIs>(reqPtrs, reqTicks, i, now)... };
                     std::apply([&](auto&... r) { func(entities[i], r..., std::get<OptIs>(opt)...); }, req);
                 }
@@ -1286,7 +1293,7 @@ namespace Astra
             if (allZero)
             {
                 // Tier 1: all relevant columns fully enabled -> pre-existing body, no bit tests.
-                InvokeEntityCallback(entities, reqPtrs, optPtrs, count, func, reqSeq, optSeq, reqTicks, optTicks, now);
+                InvokeEntityCallback<Stamp>(entities, reqPtrs, optPtrs, count, func, reqSeq, optSeq, reqTicks, optTicks, now);
                 return;
             }
 
@@ -1295,7 +1302,7 @@ namespace Astra
             Detail::ForEachEnabledRun(reqWords, NReq, count,
                 [&](size_t begin, size_t end)
                 {
-                    InvokeEntityCallbackFiltered(entities, reqPtrs, optPtrs, begin, end, chunk, cm, func, reqSeq, optSeq, reqTicks, optTicks, now);
+                    InvokeEntityCallbackFiltered<Stamp>(entities, reqPtrs, optPtrs, begin, end, chunk, cm, func, reqSeq, optSeq, reqTicks, optTicks, now);
                 });
         }
 

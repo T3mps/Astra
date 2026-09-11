@@ -814,3 +814,57 @@ TEST(ChangeDetectionMut, ConstRangeForOverTrackedTypeStillIteratesAndMarksNothin
         EXPECT_EQ(VersionOf<TrackedPos>(reg, e), 2u);         // const: no stamp
     }
 }
+
+// Fix round 1 (Ruling E extended): Single()'s Stamp=false count/locate pass is not
+// a write at EITHER tier -- no coarse stamp AND no per-entity mark, even for a
+// present non-const tracked optional (deviation 5 marks only on a real walk).
+TEST(ChangeDetectionMut, SingleCountPassNeverMarksTrackedOptionals)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto a = reg.CreateEntity<Position, TrackedPos>();
+    auto b = reg.CreateEntity<Position, TrackedPos>();
+
+    AdvanceTo(reg, 3);
+    auto r = reg.CreateView<const Position, Astra::Optional<TrackedPos>>().Single();   // unfiltered ForEachWithOptional<false>
+    ASSERT_TRUE(r.IsErr());
+    EXPECT_EQ(*r.GetError(), Astra::QueryError::MultipleMatched);
+    for (auto e : {a, b})
+    {
+        EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 2u);   // counting is not a write: no mark
+        EXPECT_EQ(VersionOf<TrackedPos>(reg, e), 2u);         // ...and no stamp
+    }
+}
+
+TEST(ChangeDetectionMut, SingleCountPassNeverMarksTrackedOptionalsOnEnabledFilteredPath)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto a = reg.CreateEntity<Position, TrackedVel>();
+    auto b = reg.CreateEntity<Position, TrackedVel>();
+    auto c = reg.CreateEntity<Position, TrackedVel>();
+
+    // Optional<TrackedVel> (enableable) makes the view enabled-filtered: Single()'s
+    // count pass runs VisitChunkFiltered<false>. All enabled => Tier 1 body.
+    AdvanceTo(reg, 3);
+    auto view = reg.CreateView<const Position, Astra::Optional<TrackedVel>>();
+    auto r1 = view.Single();
+    ASSERT_TRUE(r1.IsErr());
+    EXPECT_EQ(*r1.GetError(), Astra::QueryError::MultipleMatched);
+    for (auto e : {a, b, c})
+    {
+        EXPECT_EQ(TicksOf<TrackedVel>(reg, e).changed, 2u);
+        EXPECT_EQ(VersionOf<TrackedVel>(reg, e), 2u);
+    }
+
+    // One disabled => mixed chunk => Tier 3 (InvokeEntityCallbackFiltered). SetEnabled stamps nothing.
+    ASSERT_TRUE(reg.SetEnabled<TrackedVel>(b, false));
+    auto r2 = view.Single();
+    ASSERT_TRUE(r2.IsErr());
+    EXPECT_EQ(*r2.GetError(), Astra::QueryError::MultipleMatched);
+    for (auto e : {a, b, c})
+    {
+        EXPECT_EQ(TicksOf<TrackedVel>(reg, e).changed, 2u);
+        EXPECT_EQ(VersionOf<TrackedVel>(reg, e), 2u);
+    }
+}
