@@ -1,7 +1,7 @@
 # Change detection: two-tier change ticks with `Changed<T>` / `Added<T>` filters
 
 **Date:** 2026-09-10
-**Status:** design approved in brainstorm (user, 2026-09-10); spec pending user review; plan not yet written
+**Status:** implemented on feat/change-detection (plan docs/superpowers/plans/2026-09-10-astra-change-detection.md)
 **Program:** Bevy-style system queries, Stage 3 (Stage 1 View enrichment @ `638aa12`, Stage 2 SystemParam binder @ `3b5ef5b`). Origin: [[astra-north-star]] ergonomics pillar; the single biggest step toward "A" per the 2026-09-10 assessment.
 **Evidence base (preserved in `bench-compare/spike-changeticks/`):** `cd-research.md` (Bevy / Unity DOTS / flecs / EnTT, cited), `cd-mockups.md` (three API mockups with Arcane before/after), `spike.cpp` + `results.csv` + `spike-notes.md` (throwaway synthetic spike, one unpinned box, directional), and the decision page https://claude.ai/code/artifact/49a7e945-f69f-4c0e-b1cc-37448a12996d .
 
@@ -142,7 +142,7 @@ Query modifiers next to `With<T>`/`Not<T>` (Query.hpp:308-356). They require `T`
 (match-only like `With`), contribute nothing to `ViewAccess`, and carry a tick:
 
 ```cpp
-auto v = ctx.GetRegistry().CreateView<Changed<WorldTransform>, SpriteRenderer, Not<Hidden>>();
+auto v = ctx.GetRegistry().CreateView<const WorldTransform, Changed<WorldTransform>, SpriteRenderer, Not<Hidden>>();
 v.ForEach(ctx, [](const WorldTransform& wt, SpriteRenderer& sr) { ... });   // since = ctx.LastRun()
 v.Since(tick).ForEach(...);                                                   // explicit tick (Registry&-only systems)
 ```
@@ -250,3 +250,86 @@ columns, moves/deserialize; (5) `Mut<T>`, marking accessors, `Modified`/`SetIfNe
 per-entity filter tier; (6) benchmarks + acceptance test + docs. Arcane adoption
 (change detection + module residency together, ABI bump, delete PreviousTransform and
 the shadow arrays, const the render view) is a separate movement afterwards.
+
+## 6. Implemented as (deviations and controller rulings recorded during Tasks 1-9)
+
+The plan's Global Constraints flagged five deviations from this spec's literal text ahead of
+implementation; all five shipped exactly as flagged, and are recorded here against the sections
+they touch. Five further controller rulings were made during implementation to resolve cases this
+spec under-specified; they are additive clarifications, not deviations from any explicit rule
+above.
+
+**Deviation 1 (§3.1/§3.5 — Task 5).** Tick advance is once per parallel execution-plan GROUP, not
+once per individual system run. Systems within one group have no read/write conflict by
+construction (that is what makes them a group), so ordering among them is undefined regardless;
+sharing one tick keeps `CurrentTick()` exact for every view-entry stamp taken while the group runs
+concurrently. A per-system atomic tick would let a sibling system's tick leak into another
+system's own stamps within the same group and make a system see its own writes on its very next
+run — worse, not better, than the group-shared tick. Every observable guarantee in §3.6 holds
+under this scheme.
+
+**Deviation 2 (§3.2 — Tasks 2/6).** Chunk versions (`Tick* m_columnVersion`) live in the chunk
+arena as specified; tracked per-entity tick pointers (`EntityTicks* Column::ticks`) live on
+`Column` rather than being carved as a second arena region — mirrors exactly how
+`Column::disabledWords` already works for enableable components, at the same accepted +8-bytes-
+per-`Column`-slot fixed-metadata cost the enableable feature already pays.
+
+**Deviation 3 (§3.4/§3.6 — Task 4).** `Changed<T>`/`Added<T>` are filter-only AND iteration-only
+this stage: `T` must also be listed as a required term (bare/`const`/`IncludeDisabled`) in the
+same view — hence the §3.4 example above now reads `CreateView<const WorldTransform,
+Changed<WorldTransform>, SpriteRenderer, Not<Hidden>>`, not the original text's
+`CreateView<Changed<WorldTransform>, ...>` (which named `wt` in the lambda with nothing in the
+view actually fetching it). `Size`/`Empty`/`Contains`/`Get`/`Single`/range-for on a
+change-filtered view are all compile-time refused (each would need a tick with no natural source);
+use `ForEach(ctx, fn)` or `Since(tick).ForEach(fn)`. Tag types are refused for the same reason
+§3.2 gives: no column, no version to compare.
+
+**Deviation 4 (§3.2 — Tasks 2/6).** Same-archetype relocations (`CompactChunks`,
+`MoveEntitiesBetweenChunks`) fold the *newer* of the source/destination column version and copy
+per-entity ticks across, rather than stamping with the tick current at compaction time. Stamping
+with "now" would be a false negative: an entity written at tick 100 and later compacted into a
+fresh (version-0) chunk would read as unchanged to a reader whose last run was tick 90, which §3.6
+explicitly forbids. Folding the newer version closes that gap.
+
+**Deviation 5 (§3.3/§3.6 — Task 7).** `Optional<T>` for a tracked, non-const `T` marks the entity
+unconditionally when the optional is present, rather than only when the caller actually writes
+through it. The yield is a raw `T*` (no `Mut<T>` wrapper is possible through a bare pointer), so
+there is no conversion hook to gate the mark on real use — the same class of accepted false
+positive §3.6 already documents for `Mut<T>`'s implicit conversion. Request `Optional<const T>`
+to read a present-but-tracked optional without marking it.
+
+**Ruling E (Task 7 fix round 1 — §3.3 row 2, `Single()`).** `View::Single()`'s internal
+count/locate pass, which walks every candidate chunk to determine Empty vs. exactly-one vs.
+MultipleMatched, runs completely unstamped and unmarked at both tiers — counting is not a write.
+Only the one entity actually returned gets stamped/marked, and that happens through the ordinary
+`Get(entity)` call `Single()` makes once it has its answer. Nothing is touched on the `Empty` or
+`MultipleMatched` paths, and no chunk other than the returned entity's is touched on success.
+
+**Ruling F (§3.3 row 1, enableable-filtered `ForEach`).** A stamped, non-const `ForEach` over a
+view that is also enabled-filtered stamps every chunk it *visits*, including a chunk whose
+enabled-entity intersection for that pass turns out to be empty — matching the spec's literal
+"every chunk it visits" at chunk granularity, not per actually-yielded run. A follow-up may narrow
+this to stamp only on the first non-empty run within a chunk; not done in this stage.
+
+**Ruling G (§3.5, scheduler).** `SystemScheduler::Execute` advances the tick once more per
+execution-plan segment *after* the segment's executor has returned and *before* the deferred
+command-buffer flush for that segment. Without this, a command flushed after a segment — or any
+write the caller's own code makes to the registry once `Execute()` has returned — could read as
+not-newer-than the `lastRun` the segment's systems just recorded, a false negative §3.6 does not
+sanction. The extra advance guarantees flushed commands and any post-`Execute()` write are always
+newer than every system's `lastRun`.
+
+**Ruling H (§3.5, scheduler).** At the start of every `Execute()` call, if a system's cached
+`lastRun` is not strictly older (`IsNewer`) than the registry's current tick, `Execute()` resets
+every system's `lastRun` to 0 before running. This closes a false-negative gap the pointer-identity
+registry-switch check alone cannot catch: a `Registry` destroyed and a new one constructed at the
+same memory address (or simply restarted at tick 1, the common case for two freshly-constructed
+registries) would otherwise leave every cached `lastRun` looking newer than or equal to the new
+registry's ticks, silently hiding the new registry's first frame of changes from every system.
+
+**Ruling I (§3.6, iteration).** Range-for over a view that yields a change-tracked component
+non-const is a compile-time error, not a silent under-report. The range-for iterator hands back a
+plain `T&` (unlike `ForEach`, which hands out `Mut<T>`) and has no hook on which to mark a change,
+so — rather than let a tracked type go through range-for and quietly never mark — it is refused at
+compile time, naming `ForEach` (yields `Mut<T>`) or a `const T` request as the fix. A range-for
+over `const T` (tracked or not) is unaffected and marks nothing, by design.

@@ -235,6 +235,12 @@ Structural mutation (create/destroy entity, add/remove component) during `ForEac
 - `Optional<T>` - Include component T if present (can be nullptr)
 - `AnyOf<T...>` - Require at least one of the specified components
 - `OneOf<T...>` - Require exactly one of the specified components
+- `Changed<T>` / `Added<T>` - Match only entities whose `T` changed / was added since a tick (see "Change detection" under Advanced Features below). Filter-what-you-fetch: `T` must *also* be listed as a fetched term in the view (`Changed<T>` requires `T` for matching, like `With<T>`, but contributes nothing to `ViewAccess` by itself) -- `CreateView<const Position, Changed<Position>>()`, not `CreateView<Changed<Position>>()`. A view with a change filter is iteration-only this stage (no `Size`/`Empty`/`Contains`/`Get`/`Single`/range-for -- each is a compile error naming the fix): use `view.ForEach(ctx, fn)` from a `SystemContext&` system (reads `ctx.LastRun()`) or the explicit form:
+
+```cpp
+auto v = registry.CreateView<const WorldTransform, Astra::Changed<WorldTransform>>();
+v.Since(lastFrameTick).ForEach([](const WorldTransform& wt) { /* only entities changed since lastFrameTick */ });
+```
 
 ### Relationships
 
@@ -355,6 +361,98 @@ declare **disjoint** component masks and runs them concurrently. The rules:
   ambiguity* and is not honored — express it via masks.
 - **Registration** (`AddSystem`) returns `Result<void, SystemError>` and must
   not race `Execute` (single-writer, like the `Registry` itself).
+
+### Change detection
+
+Astra can answer "did this component change since I last looked" at two tiers, both automatic
+from how you already declare access -- there is no separate "mark it dirty" call on the common
+path:
+
+1. **Coarse, per chunk-per-column, always on, free.** Every component column in every chunk
+   carries a 4-byte `Tick` version. It is stamped by one plain store whenever a view's access to
+   that column is non-const (declare read-only views/args `const` to opt out) or a Registry write
+   path (`Set`/`Emplace`/`Add`/`Modified`/`SetIfNeq`/Commands/archetype moves/`Deserialize`)
+   touches the entity. No opt-in, no per-entity storage.
+2. **Exact, per entity, opt-in, 8 bytes/entity/column.** A component that declares
+   `static constexpr bool AstraChangeTracked = true;` (or specializes
+   `Astra::ChangeTrackedTraits<T>`) gets a per-entity `{added, changed}` tick pair, carried across
+   archetype moves and swap-removes exactly like the enableable-components bits. The type author
+   pays this cost explicitly; every other component is unaffected.
+
+`Changed<T>`/`Added<T>` (see Query Modifiers, above) reject a whole chunk first from its coarse
+version before doing any per-entity work; only for a *tracked* `T` do they then run-scan the
+chunk's tick column for per-entity precision (unioned with any enabled-run scan already in play
+for that view). An *untracked* `T` stays chunk-granular: every entity in a stamped chunk is
+reported, including ones the writer didn't actually touch that pass -- a documented false
+positive, the same trade-off Unity DOTS and Bevy make at this tier.
+
+```cpp
+struct WorldTransform { static constexpr bool AstraChangeTracked = true; Mat4 value; };
+
+auto v = registry.CreateView<WorldTransform>();   // non-const, tracked -> hands out Mut<T>
+v.ForEach([](Astra::Mut<WorldTransform> wt) {
+    wt.Write().value = someMatrix;   // marks changed
+    (void)wt.Read();                 // never marks
+    wt.SetIfNeq(someMatrix);         // marks only if someMatrix != current
+    bool recent = wt.IsChanged(lastRun);
+});
+// existing code that takes `WorldTransform&` still compiles: Mut<T>'s implicit
+// conversion to T& marks unconditionally, so a caller that only reads through
+// it still gets a (harmless, chunk-already-stamped) mark -- use .Read() when
+// you specifically want to avoid marking.
+```
+
+`Registry::Modified<T>(e)` marks at both tiers for raw-pointer code that held a `T*` across a
+frame boundary -- call it after mutating through the pointer. `Registry::SetIfNeq<T>(e, value)`
+(and `Mut<T>::SetIfNeq`) compares first and only stores + marks on inequality (`T` must be
+`equality_comparable`); it is an explicit opt-in, never automatic (the default mark path does not
+compare-then-store, by design).
+
+**Tick semantics.** `Registry::CurrentTick()`/`AdvanceTick()` own a process-relative,
+never-serialized `uint32_t` counter starting at 1 (`0` means "never"); comparisons are the
+signed-difference `IsNewer(a, b) == (int32_t(a - b) > 0)`, valid for roughly 2^31
+`AdvanceTick()` calls between two ticks being compared before it wraps -- documented, not
+periodically corrected in this stage. `SystemContext::LastRun()`/`ThisRun()` give a scheduled
+system its own previous/current tick; `SystemScheduler` advances the counter once per *segment*
+of its execution plan (not once per individual system in that segment). A system's first run sees
+`LastRun() == 0`, so every stamped chunk reads as changed -- the whole world looks new on frame
+one, the Bevy semantic. Loading a save has the same effect: nothing tick-related is serialized,
+and every restored chunk/entity is stamped with the *loader's* tick, so the first system to look
+after a load sees everything as changed exactly once, then settles. A `Registry&`-only system (no
+`SystemContext&` overload) receives no ticks automatically; filter with an explicit tick you store
+yourself and drive `Changed`/`Added` views with `Since(tick)`.
+
+Two more scheduler guarantees: after each plan segment finishes, `Execute()` advances the tick
+once more before flushing deferred commands, so a flushed command -- or any write your own code
+makes to the registry between two `Execute()` calls -- is always newer than every system's
+`lastRun` and is never missed as a false negative. And if a `SystemScheduler` is reused against a
+newly-constructed `Registry` whose tick counter is not strictly newer than a system's cached
+`lastRun` (the common case: both start at 1), `Execute()` detects the staleness and resets every
+system's `lastRun` to 0, so the first run against the new registry still sees everything rather
+than nothing.
+
+**`Single()`** stamps only the one entity's chunk it actually returns (through `Get`); its
+internal count/locate pass is not itself a write, so nothing is stamped or marked on the `Empty`
+or `MultipleMatched` paths, and no chunk it merely passed over is touched on success either.
+
+**A stamped `ForEach` over an enableable-filtered view stamps every chunk it visits**, even one
+whose enabled-entity intersection turns out empty for that pass -- consistent with "every chunk it
+visits" at chunk granularity, not per actually-yielded run. A future change may narrow this to
+only chunks that yielded at least one entity.
+
+**Iteration-only, this stage.** A view with a change filter drops `Size`/`Empty`/`Contains`/
+`Get`/`Single`/range-for entirely -- each is a compile-time error naming the fix
+(`ForEach(ctx, fn)` or `Since(tick).ForEach(fn)`). Range-for over a *non-const* change-tracked
+yield is refused at compile time for a related reason: the range-for iterator hands back a plain
+`T&` and has no way to mark a change on dereference, so it is refused rather than silently
+under-reporting changes. Iterate a tracked component through `ForEach` (which yields `Mut<T>`) or
+request `const T` in the range-for.
+
+**Main-thread writes between frames are seen.** Because ticks only ever advance and a system's
+`lastRun` is only ever compared against, never rewound, a write your own code makes directly to a
+tracked or coarse component (e.g. an editor moving a transform) between two `Execute()` calls
+reads as changed to the very next system that looks at it -- there is no window where an
+out-of-band write goes unnoticed.
 
 ### Memory Configuration
 

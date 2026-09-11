@@ -1097,5 +1097,118 @@ candidates, and are unaffected by this lever.)
   `tests/Registry/RegistryTest.cpp`, `tests/Registry/ArchetypeManagerTest.cpp` — characterization +
   regression tests (6 total: 2 destroy-path, 1 relations-cache regression, 3 create_batch-path).
 
+## Change detection (Stage 3, 2026-09-11, branch `feat/change-detection` @ `ec5f6c1`)
+
+Merge-gate evidence for the change-detection feature (spec
+`docs/superpowers/specs/2026-09-10-astra-change-detection-design.md`, Task 9): a flat-watch
+table (does the feature regress the 11 pre-existing ops it must stay zero-cost against) plus
+Astra-only `Changed<T>` throughput at 0/10/50/100% changed, coarse (untracked) vs precise
+(tracked) tier.
+
+**Recipe** (same Dist-parity full-opt flags as every table above):
+`/std:c++20 /O2 /GL /DNDEBUG /D__SSE2__ /D__SSE4_2__ /arch:AVX /fp:fast /Zc:__cplusplus /EHsc
+/DASTRA_BUILD_DIST /I..\include /I..\vendor\Mosaic\include /I..\tests bench_astra.cpp /link /LTCG
+advapi32.lib` (the `advapi32.lib` link is the known huge-pages-probe/`advapi32` gotcha carried by
+every Astra bench/test binary).
+
+**Setup.** BASELINE: a scratch worktree at `4ac19ff` (the commit the Stage 3 plan was written
+against; `f3e311d` on top of it is docs-only, no code) with the PRE-EDIT `bench_astra.cpp` (no
+`run_change_detection()`, no `random_get_const` — copied before this task touched the file) +
+`bench_common.hpp` + an adjusted `build_one.bat`. BRANCH: the working tree at `ec5f6c1` plus this
+task's bench-only edits (untracked `bench_astra.cpp`). Both binaries built fresh from the
+identical recipe above, one after the other, immediately before the campaign.
+
+**Quiet check.** `typeperf "\Processor(_Total)\% Processor Time" -sc 5` read 15–19% both
+immediately before and immediately after the 6-round campaign (steady, not a transient spike —
+`Get-Process | sort CPU -desc` attributed it to the user's own background apps: a running game,
+Discord, a browser, none of which this task is authorized to close). This is above the ~10%
+target; retried the quiet check twice a few seconds apart with no improvement, and proceeded
+because (a) the load was steady across the whole campaign rather than concentrated in one round,
+and (b) the interleaved baseline→branch→baseline… protocol exposes both binaries to the same
+background conditions within every round, so a paired comparison stays meaningful even though the
+absolute numbers carry more noise than the ~10%-quiet sessions elsewhere in this file. Flagged
+here as a caveat on every row below, not hidden.
+
+**6 interleaved rounds** (baseline → branch, ×6), N = 1,000,000 unless noted. Raw rows:
+`bench-compare/cd_gate.csv` (untracked), `roundN,{baseline|branch},astra,<op>,<N>,<ns>,<items>`.
+
+| Op | N | Baseline median [min, max] (ns) | Branch median [min, max] (ns) | Overlap |
+|---|---|---|---|---|
+| create | 1M | 56.430 [55.810, 58.822] | 57.837 [56.876, 59.999] | YES |
+| create_batch | 1M | 22.566 [22.009, 23.559] | 22.952 [22.375, 24.148] | YES |
+| add_component | 1M | 42.560 [41.766, 43.480] | 51.832 [51.477, 58.381] | **NO** |
+| remove_component | 1M | 28.014 [27.718, 29.012] | 29.566 [29.065, 29.854] | **NO** (marginal — 0.05 ns gap) |
+| destroy | 1M | 20.722 [20.340, 21.454] | 20.569 [20.289, 20.724] | YES |
+| random_get | 1M | 59.159 [57.268, 60.215] | 75.981 [72.253, 83.762] | **NO** (expected, see below) |
+| random_get_const | 1M | — | 58.947 [58.112, 60.228] | YES vs. baseline `random_get` |
+| iterate1 | 1M | 0.459 [0.447, 0.489] | 0.378 [0.369, 0.418] | **NO** (branch faster) |
+| iterate1 | 10M | 0.716 [0.697, 0.727] | 0.716 [0.688, 0.753] | YES |
+| iterate2 | 1M | 0.907 [0.869, 1.037] | 1.012 [0.883, 1.287] | YES |
+| iterate2 | 10M | 1.208 [1.165, 1.309] | 1.255 [1.142, 1.399] | YES |
+| iterate3 | 1M | 0.957 [0.882, 0.991] | 1.036 [0.935, 1.212] | YES |
+| iterate3 | 10M | 1.329 [1.280, 1.396] | 1.343 [1.335, 1.402] | YES |
+| parallel_iterate2 | 1M | 0.253 [0.235, 0.390] | 0.291 [0.236, 0.451] | YES |
+| parallel_iterate2 | 10M | 0.867 [0.862, 0.871] | 0.853 [0.849, 0.886] | YES |
+| system_tick_seq | 1M | 1.612 [1.553, 1.992] | 1.732 [1.472, 1.890] | YES |
+
+**Verdicts, per the "record as measured, don't fix here" rule (spec Task 9 Step 4):**
+
+- **`random_get` — NO, expected.** The non-const `GetComponent<T>` now stamps the entity's chunk
+  version (spec §3.3 row 3), one plain store per call it did not pay before. `random_get_const`
+  (branch, `std::as_const(*reg).GetComponent<T>`) measures 58.947 [58.112, 60.228], which
+  **overlaps the baseline's un-instrumented `random_get`** (59.159 [57.268, 60.215]) — confirming
+  the entire gap is the mandated stamp and nothing else moved. Consumers that only read should use
+  the const accessor or a const view, exactly as the spec recommends.
+- **`add_component` — NO, real, not flagged as "expected sensitive" in the task brief.**
+  `AddComponent<Health>` is a cross-archetype move ({Position,Velocity} → {Position,Velocity,
+  Health}); per spec §3.3 every carried column of the destination chunk is stamped on
+  add/emplace/set, not just the new one (matches the shipped, tested behavior in
+  `ChangeDetectionChunkVersion.AddAndRemoveComponentStampTheDestinationChunk`). Baseline pays 0
+  stamp stores on this path; branch pays 3 (Position, Velocity, Health) plus the tracked-column
+  gate. Median moved 42.560 → 51.832 ns/entity (+21.8%), clearly outside the baseline band. This
+  is architecturally expected given the spec's write-side table, but the *magnitude* was not
+  independently verified against a "within noise" claim anywhere in the plan — recorded here
+  exactly as measured for the controller to weigh, not adjusted.
+- **`remove_component` — NO, marginal.** Same move-stamps-destination mechanism, smaller (2
+  carried columns). Gap is 0.053 ns between the baseline's max (29.012) and the branch's min
+  (29.065) — bands touch almost exactly at the boundary. Recorded as a real non-overlap per the
+  literal rule, but an order of magnitude tighter than `add_component`'s.
+- **`iterate1` @ 1M — NO, branch *faster*, likely noise.** 0.378 vs. 0.459 ns/entity median; at
+  10M scale the same op overlaps cleanly (0.716 vs. 0.716, effectively identical). `iterate1`'s
+  chunk-stamp shape (one store per visited chunk for a non-const single-component view) doesn't
+  change between baseline and branch for an all-untracked archetype — `ArchetypeColumnMeta::
+  trackedColumnCount == 0` makes the tracked-column loop a single false compare either way — so a
+  *speedup* at 1M with parity at 10M (12× the chunks, far less per-call noise) reads as sampling
+  noise under the ~17%-load quiet-check caveat above, not a structural change. Recorded as
+  measured, not discarded.
+- Every other flat-watch op (`create`, `create_batch`, `destroy`, `iterate2`, `iterate3` at both
+  scales, `parallel_iterate2` at both scales, `system_tick_seq`) overlaps.
+
+### `Changed<T>` throughput (branch only, median [min, max] of the same 6 rounds)
+
+`run_cd_variant<Vel>()` marks the first `pct%` of entities in creation order (clustered, matching
+the acceptance test's shape) **inside the measured region deliberately** — the throughput number
+therefore includes the marking pass itself, the same shape the pre-implementation spike measured
+(`bench-compare/spike-changeticks/spike.cpp`), not an isolated read-only iteration cost.
+`cd_untracked_*` uses plain `Velocity` (coarse tier only, chunk-granular reject); `cd_tracked_*`
+uses a file-local `TrackedVelocity` (`AstraChangeTracked = true`; coarse reject **and** the
+per-entity run-scan). N = 1,000,000, reps = 7.
+
+| Op | % changed | Median [min, max] (ns/entity) |
+|---|---|---|
+| `cd_untracked_changed_0` | 0% | 0.000 [0.000, 0.000] |
+| `cd_untracked_changed_10` | 10% | 0.549 [0.542, 0.581] |
+| `cd_untracked_changed_50` | 50% | 3.041 [2.912, 3.085] |
+| `cd_untracked_changed_100` | 100% | 6.074 [5.932, 6.343] |
+| `cd_tracked_changed_0` | 0% | 0.000 [0.000, 0.000] |
+| `cd_tracked_changed_10` | 10% | 0.818 [0.794, 0.853] |
+| `cd_tracked_changed_50` | 50% | 4.361 [4.234, 5.112] |
+| `cd_tracked_changed_100` | 100% | 8.856 [8.580, 9.051] |
+
+At 0% changed, the chunk-reject fast path costs nothing measurable at either tier. At 100%, the
+tracked tier costs ~46% more than the coarse tier (8.856 vs. 6.074 ns/entity) — the expected price
+of the per-entity run-scan running (and finding everything newer) on top of the coarse chunk
+accept, exactly the two-tier trade-off the spec's Decision 2 describes.
+
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`. **Build with the full-opt flag set above (2026-07-24 baseline), not bare `/O2`.**

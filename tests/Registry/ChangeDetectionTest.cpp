@@ -959,3 +959,37 @@ TEST(ChangeDetectionTrackedFilter, MixedTrackedAndUntrackedTermsAndParallelParit
     both.Since(2).ParallelForEach([&](const TrackedPos&, const Position&) { par.fetch_add(1); });
     EXPECT_EQ(par.load(), 200u);
 }
+
+// ---- Task 9: zero-cost when unused -----------------------------------------
+
+TEST(ChangeDetectionZeroCost, PlainViewsInstantiateNoFilterOrTrackedYieldPath)
+{
+    using Plain   = Astra::View<Position, const Velocity>;
+    using Filtered = Astra::View<const Position, Astra::Changed<Position>>;
+    static_assert(!Plain::HasChangeFilter);
+    static_assert(Filtered::HasChangeFilter);
+    // An all-const view stamps nothing: IsMutableYield is false for every arg.
+    static_assert(!Astra::Detail::IsMutableYield<const Position>);
+    static_assert(Astra::Detail::IsMutableYield<Position>);
+    static_assert(!Astra::Detail::IsMutableYield<Astra::Test::Player>);   // tag: no column, never stamped
+    // Untracked types are yielded as plain references, never Mut.
+    static_assert(std::is_same_v<std::tuple_element_t<0, Plain::AccessTuple>, Position*>);
+    SUCCEED();
+}
+
+TEST(ChangeDetectionZeroCost, UntrackedArchetypeCarvesNoTickColumnsAndVersionRegionIsSmall)
+{
+    Astra::Registry reg;
+    auto e = reg.CreateEntity<Position, Velocity>();
+    const auto* rec = reg.GetArchetypeManager()->GetEntityRecord(e);
+    const auto& cm = rec->archetype->GetColumnMeta();
+    EXPECT_EQ(cm.trackedColumnCount, 0u);
+    for (uint16_t c = 0; c < cm.columnCount; ++c)
+    {
+        EXPECT_FALSE(rec->chunk->IsTracked(c));
+        EXPECT_EQ(rec->chunk->GetTicksOffset(c), std::numeric_limits<size_t>::max());
+    }
+    // Version region: exactly columnCount Ticks, 8-byte aligned, inside the arena.
+    EXPECT_EQ(rec->chunk->GetColumnVersionOffset() % 8, 0u);
+    EXPECT_LE(rec->chunk->GetColumnVersionOffset() + cm.columnCount * sizeof(Tick), rec->chunk->GetChunkBytes());
+}
