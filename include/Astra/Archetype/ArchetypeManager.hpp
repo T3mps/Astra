@@ -19,6 +19,7 @@
 #include "../Container/Bitmap.hpp"
 #include "../Container/FlatMap.hpp"
 #include "../Container/SmallVector.hpp"
+#include "../Core/Tick.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Entity/Entity.hpp"
 #include "../Entity/EntityRecord.hpp"
@@ -640,6 +641,20 @@ namespace Astra
         ASTRA_NODISCARD uint32_t GetStructuralChangeCounter() const noexcept
         {
             return m_structuralChangeCounter.load(std::memory_order_acquire);
+        }
+
+        // ---- Change-detection time (spec 2026-09-10 §3.1) ----
+        // The one counter every stamp in this registry reads. Advanced by the
+        // scheduler between system groups (SystemExecutor::BeginSystemGroup) or by
+        // Registry::AdvanceTick for unscheduled use; NEVER advanced concurrently
+        // with a running system (plain, non-atomic by contract). Starts at 1 so a
+        // zero-initialised chunk/entity (tick 0 == "never") is older than any stamp.
+        ASTRA_NODISCARD Tick CurrentTick() const noexcept { return m_tick; }
+        Tick AdvanceTick() noexcept
+        {
+            if (++m_tick == 0) ASTRA_UNLIKELY
+                m_tick = 1;   // skip "never" on wraparound
+            return m_tick;
         }
 
         /**
@@ -1640,6 +1655,7 @@ namespace Astra
         std::atomic<uint32_t> m_structuralChangeCounter{0};  // Fast path check
         std::atomic<uint32_t> m_archetypeRemovalCounter{0};  // Bumped when archetypes are deleted; views must fully re-collect
         uint32_t m_generation = 1;  // Generation counter for new archetypes
+        Tick m_tick = 1;   // change-detection time; see CurrentTick()
 
         template<typename... QueryArgs>
         friend class View;

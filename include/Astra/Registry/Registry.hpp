@@ -1216,6 +1216,11 @@ namespace Astra
         ASTRA_NODISCARD ArchetypeManager* GetArchetypeManager() noexcept { return m_archetypeManager.get(); }
         ASTRA_NODISCARD const ArchetypeManager* GetArchetypeManager() const noexcept { return m_archetypeManager.get(); }
 
+        // Change-detection time (spec 2026-09-10 §3.1): forwarded from the owning
+        // ArchetypeManager so views (which hold the manager) and the registry agree.
+        ASTRA_NODISCARD Tick CurrentTick() const noexcept { return m_archetypeManager->CurrentTick(); }
+        Tick AdvanceTick() noexcept { return m_archetypeManager->AdvanceTick(); }
+
         /**
          * Block source for CommandBuffer storage (Commands C1 fix): stable
          * blocks that never move until released. Command buffers bound to

@@ -15,6 +15,7 @@
 #include "Core/Signal.hpp"
 #include "Core/TypeContext.hpp"  // host API: SetTypeContext/GetTypeContext (multi-module/DLL)
 #include "Core/TypeID.hpp"
+#include "Core/Tick.hpp"
 #include "Core/WorkScheduler.hpp"  // host API: IWorkScheduler seam
 
 // Memory management
