@@ -868,3 +868,94 @@ TEST(ChangeDetectionMut, SingleCountPassNeverMarksTrackedOptionalsOnEnabledFilte
         EXPECT_EQ(VersionOf<TrackedVel>(reg, e), 2u);
     }
 }
+
+// ---- Task 8: per-entity tier (tracked Changed/Added, union with enabled runs) ----
+
+TEST(ChangeDetectionTrackedFilter, ChangedIsPerEntityInsideAStampedChunk)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(500);
+    ASSERT_EQ((reg.CreateEntities<TrackedPos, Position>(500, std::span{ents})), 500u);
+
+    // Mark exactly 7 scattered entities at tick 3 (the chunk gets stamped by GetComponent).
+    AdvanceTo(reg, 3);
+    std::vector<size_t> marked = {0, 3, 64, 65, 127, 300, 499};
+    for (size_t i : marked) reg.GetComponent<TrackedPos>(ents[i])->x = 1.0f;
+
+    auto v = reg.CreateView<const TrackedPos, Astra::Changed<TrackedPos>>();
+    std::vector<Astra::Entity> seen;
+    v.Since(2).ForEach([&](Astra::Entity e, const TrackedPos&) { seen.push_back(e); });
+    ASSERT_EQ(seen.size(), marked.size());               // per-entity precision, not the whole chunk
+    for (size_t k = 0; k < marked.size(); ++k) EXPECT_EQ(seen[k], ents[marked[k]]);   // ascending index order
+
+    EXPECT_EQ(CountSince(v, 3), 0u);
+    EXPECT_EQ(CountSince(v, 0), 500u);                   // first run still sees everything
+}
+
+TEST(ChangeDetectionTrackedFilter, AddedIsPerEntityAndIgnoresLaterChanges)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> old(200);
+    ASSERT_EQ((reg.CreateEntities<TrackedPos, Position>(200, std::span{old})), 200u);
+    AdvanceTo(reg, 3);
+    auto fresh = reg.CreateEntity<TrackedPos, Position>();    // lands in the same archetype/chunk, added == 3
+    for (auto e : old) reg.GetComponent<TrackedPos>(e)->x = 2.0f;   // changed == 3 for the old ones too
+
+    auto added = reg.CreateView<const TrackedPos, Astra::Added<TrackedPos>>();
+    std::vector<Astra::Entity> seen;
+    added.Since(2).ForEach([&](Astra::Entity e, const TrackedPos&) { seen.push_back(e); });
+    ASSERT_EQ(seen.size(), 1u);
+    EXPECT_EQ(seen[0], fresh);
+
+    auto changed = reg.CreateView<const TrackedPos, Astra::Changed<TrackedPos>>();
+    EXPECT_EQ(CountSince(changed, 2), 201u);
+}
+
+TEST(ChangeDetectionTrackedFilter, UnionWithEnabledRunsSkipsDisabledAndUnchanged)
+{
+    // TrackedVel is BOTH change-tracked and enableable: the run scan must be the
+    // intersection of enabled AND changed, visited in ascending order.
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(300);
+    ASSERT_EQ((reg.CreateEntities<TrackedVel, Position>(300, std::span{ents})), 300u);
+    AdvanceTo(reg, 3);
+    for (size_t i = 0; i < 300; i += 2) reg.GetComponent<TrackedVel>(ents[i])->dx = 1.0f;   // even: changed
+    for (size_t i = 0; i < 300; i += 3) ASSERT_TRUE(reg.SetEnabled<TrackedVel>(ents[i], false));   // multiples of 3: disabled
+
+    auto v = reg.CreateView<const TrackedVel, Astra::Changed<TrackedVel>>();
+    std::vector<Astra::Entity> seen;
+    v.Since(2).ForEach([&](Astra::Entity e, const TrackedVel&) { seen.push_back(e); });
+    size_t expected = 0;
+    for (size_t i = 0; i < 300; ++i) if (i % 2 == 0 && i % 3 != 0) ++expected;
+    EXPECT_EQ(seen.size(), expected);
+    for (size_t k = 1; k < seen.size(); ++k) EXPECT_LT(seen[k - 1].GetID(), seen[k].GetID());   // ascending
+
+    // IncludeDisabled lifts the enabled filter: every even entity, disabled or not.
+    auto all = reg.CreateView<Astra::IncludeDisabled<TrackedVel>, Astra::Changed<TrackedVel>>();
+    EXPECT_EQ(CountSince(all, 2), 150u);
+}
+
+TEST(ChangeDetectionTrackedFilter, MixedTrackedAndUntrackedTermsAndParallelParity)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(2000);
+    ASSERT_EQ((reg.CreateEntities<TrackedPos, Position>(2000, std::span{ents})), 2000u);
+    AdvanceTo(reg, 3);
+    for (size_t i = 0; i < 2000; i += 10) reg.GetComponent<TrackedPos>(ents[i])->x = 1.0f;   // 200 tracked marks
+
+    // Untracked Position term: chunk-granular (every chunk was stamped at creation, tick 2 -> not newer than 2).
+    auto both = reg.CreateView<const TrackedPos, const Position, Astra::Changed<TrackedPos>, Astra::Changed<Position>>();
+    EXPECT_EQ(CountSince(both, 2), 0u);   // Position's chunk versions are 2 -> reject
+    AdvanceTo(reg, 4);
+    reg.CreateView<Position>().ForEach([](Position&) {});   // stamp Position everywhere at 4
+    EXPECT_EQ(CountSince(both, 3), 0u);   // TrackedPos marks were at 3, not newer than 3
+    EXPECT_EQ(CountSince(both, 2), 200u); // chunk passes on both; per-entity on TrackedPos
+
+    std::atomic<size_t> par{0};
+    both.Since(2).ParallelForEach([&](const TrackedPos&, const Position&) { par.fetch_add(1); });
+    EXPECT_EQ(par.load(), 200u);
+}

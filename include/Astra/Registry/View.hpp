@@ -10,6 +10,7 @@
 #include "../Archetype/Archetype.hpp"
 #include "../Archetype/ArchetypeManager.hpp"
 #include "../Component/Component.hpp"
+#include "../Container/SmallVector.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/WorkScheduler.hpp"
 #include "../Entity/Entity.hpp"
@@ -67,6 +68,14 @@ namespace Astra
     private:
         // Any per-chunk filter at all: routes iteration through VisitChunkFiltered.
         static constexpr bool HasChunkFilter = HasEnabledFilter || HasChangeFilter;
+
+        // Any Changed<T>/Added<T> term over a change-TRACKED T: inside a chunk that
+        // passed the version reject, that term is evaluated per entity from the tick
+        // column (spec §3.4 step 3). False for every untracked change filter, which
+        // stays chunk-granular and instantiates none of the per-entity mask code.
+        template<typename Tuple> struct AnyTracked;
+        template<typename... Ts> struct AnyTracked<std::tuple<Ts...>> : std::bool_constant<(IsChangeTrackedV<Ts> || ...)> {};
+        static constexpr bool HasTrackedChangeTerm = AnyTracked<ChangedTypes>::value || AnyTracked<AddedTypes>::value;
 
         // Any yielded, non-const, change-tracked component: routes iteration through
         // the view-owned chunk loops (Archetype::ForEachStamped cannot yield Mut) and
@@ -1222,6 +1231,35 @@ namespace Astra
                 && AllNewer(chunk, cm, since, static_cast<AddedTypes*>(nullptr));
         }
 
+        // ============ Change-detection per-entity tier (spec §3.4 step 3, instantiated only when HasTrackedChangeTerm) ============
+
+        // Per-entity tier (spec §3.4 step 3): for one tracked term, set the bit of
+        // every entity whose tick is NOT newer than `since`. Branchless per slot; the
+        // resulting word set is unioned with the enabled-filter sets so the callback
+        // is invoked in maximal runs of (enabled AND changed) entities.
+        template<bool UseAdded>
+        ASTRA_FORCEINLINE static void ExcludeNotNewer(const EntityTicks* ticks, size_t count, Tick since, uint64_t* excluded, bool& anyExcluded) noexcept
+        {
+            for (size_t i = 0; i < count; ++i)
+            {
+                const Tick t = UseAdded ? ticks[i].added : ticks[i].changed;
+                const uint64_t bit = static_cast<uint64_t>(!IsNewer(t, since));
+                excluded[i >> 6] |= bit << (i & 63);
+                anyExcluded |= (bit != 0);
+            }
+        }
+
+        // One excluded-mask pass per change-TRACKED term of the tuple; untracked
+        // terms contribute nothing here (the chunk reject already decided them).
+        template<bool UseAdded, typename... Ts>
+        ASTRA_FORCEINLINE static void BuildExcluded(ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm, size_t count, Tick since,
+                                                    uint64_t* excluded, bool& anyExcluded, std::tuple<Ts...>*) noexcept
+        {
+            ((IsChangeTrackedV<Ts>
+                ? ExcludeNotNewer<UseAdded>(chunk->GetTicks(cm.idToColumn[TypeID<std::remove_const_t<Ts>>::Value()]), count, since, excluded, anyExcluded)
+                : void()), ...);
+        }
+
         // Per-chunk filter for one chunk (shared by the serial and parallel paths):
         // the Changed/Added version reject, then the three-tier enabled-only filter.
         // count==0 chunks are no-ops. `now` is the caller's hoisted CurrentTick()
@@ -1244,7 +1282,9 @@ namespace Astra
                 // newer than `since` for ANY Changed/Added term has nothing for us.
                 // Sits BEFORE the enabled whole-chunk reject and BEFORE the coarse
                 // stamp: a rejected chunk is not "visited" and must not be stamped.
-                if (!ChangeChunkPasses(chunk, cm, since)) ASTRA_UNLIKELY
+                // Unhinted on purpose: in the steady state most chunks are unchanged
+                // per frame, so the reject is the common outcome, not the rare one.
+                if (!ChangeChunkPasses(chunk, cm, since))
                     return;
             }
             else
@@ -1265,11 +1305,33 @@ namespace Astra
             const auto& entities = chunk->GetEntities();
 
             constexpr size_t NReq = std::tuple_size_v<EnabledRequiredFilter>;
-            const uint64_t* reqWords[NReq == 0 ? 1 : NReq];
+            const uint64_t* wordSets[NReq + 1];               // enabled sets + (optional) excluded set
             bool allZero = true;
-            const bool anyReqFull = ResolveRequiredFilter(chunk, cm, count, reqWords, allZero, std::make_index_sequence<NReq>{});
+            const bool anyReqFull = ResolveRequiredFilter(chunk, cm, count, wordSets, allZero, std::make_index_sequence<NReq>{});
             if (anyReqFull) ASTRA_UNLIKELY
                 return;   // Tier 2: a required column is fully disabled -> skip whole chunk
+            size_t setCount = NReq;
+
+            // Per-entity change tier (spec §3.4 step 3): for every change-TRACKED
+            // Changed<T>/Added<T> term, scan the tick column of this (version-passing)
+            // chunk into an "excluded" word set (SET bit == entity fails the term) and
+            // union it with the enabled sets below. Untracked terms were fully decided
+            // by the chunk reject above. Deliberately AFTER the whole-chunk enabled
+            // reject (an all-disabled chunk never pays the tick scan) and BEFORE the
+            // Tier-1/Tier-3 split. Not a reject: the chunk is still "visited" (Ruling B).
+            [[maybe_unused]] SmallVector<uint64_t, 64> excluded;   // 64 inline words = 4096 slots before a heap step
+            if constexpr (HasTrackedChangeTerm)
+            {
+                excluded.assign((count + 63) >> 6, 0ull);
+                bool anyExcluded = false;
+                BuildExcluded<false>(chunk, cm, count, since, excluded.data(), anyExcluded, static_cast<ChangedTypes*>(nullptr));
+                BuildExcluded<true >(chunk, cm, count, since, excluded.data(), anyExcluded, static_cast<AddedTypes*>(nullptr));
+                if (anyExcluded)
+                {
+                    wordSets[setCount++] = excluded.data();
+                    allZero = false;                       // a per-entity constraint exists: no Tier-1 whole-chunk call
+                }
+            }
 
             // Tick columns for Mut<T> / optional marks (tracked yields only); after
             // both whole-chunk rejects, like the stamp below (Ruling B).
@@ -1297,9 +1359,10 @@ namespace Astra
                 return;
             }
 
-            // Tier 3: mixed -> enabled runs of the required intersection, per-entity
-            // optional nulling inside the runs.
-            Detail::ForEachEnabledRun(reqWords, NReq, count,
+            // Tier 3: mixed -> runs of the required-enabled intersection (AND the
+            // per-entity change mask when one was appended), per-entity optional
+            // nulling inside the runs.
+            Detail::ForEachEnabledRun(wordSets, setCount, count,
                 [&](size_t begin, size_t end)
                 {
                     InvokeEntityCallbackFiltered<Stamp>(entities, reqPtrs, optPtrs, begin, end, chunk, cm, func, reqSeq, optSeq, reqTicks, optTicks, now);
