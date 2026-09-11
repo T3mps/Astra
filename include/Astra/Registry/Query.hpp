@@ -20,6 +20,8 @@ namespace Astra
     template<typename... Ts> struct Any;
     template<typename... Ts> struct OneOf;
     template<typename T> struct With;
+    template<typename T> struct Changed;
+    template<typename T> struct Added;
 
     namespace Detail
     {
@@ -47,6 +49,12 @@ namespace Astra
 
         template<typename T>
         struct IsModifier<With<T>> : std::true_type {};
+
+        template<typename T>
+        struct IsModifier<Changed<T>> : std::true_type {};
+
+        template<typename T>
+        struct IsModifier<Added<T>> : std::true_type {};
 
         template<typename T>
         inline constexpr bool IsModifier_v = IsModifier<T>::value;
@@ -78,6 +86,18 @@ namespace Astra
 
         template<typename T>
         struct ExtractComponent<With<T>>
+        {
+            using type = T;
+        };
+
+        template<typename T>
+        struct ExtractComponent<Changed<T>>
+        {
+            using type = T;
+        };
+
+        template<typename T>
+        struct ExtractComponent<Added<T>>
         {
             using type = T;
         };
@@ -233,7 +253,30 @@ namespace Astra
             using AnyGroups = typename FilterByModifier<Any, QueryArgs...>::type;
             using OneOfGroups = typename FilterByModifier<OneOf, QueryArgs...>::type;
             using WithComponents     = typename FilterByModifier<With, QueryArgs...>::type;
+            using ChangedComponents  = typename FilterByModifier<Changed, QueryArgs...>::type;
+            using AddedComponents    = typename FilterByModifier<Added, QueryArgs...>::type;
         };
+
+        // ============ Change-detection filter well-formedness (spec 2026-09-10 §3.4) ============
+        //
+        // Changed<T>/Added<T> are filter-only this stage: T must ALSO be listed as a
+        // required component of the same view (bare, const, or IncludeDisabled), so
+        // the filter never widens what the view fetches -- "filter what you fetch".
+        // Compared modulo const so `Changed<T>` pairs with `const T`.
+        template<typename T, typename Tuple> struct TupleContainsBare;
+        template<typename T, typename... Us>
+        struct TupleContainsBare<T, std::tuple<Us...>>
+            : std::bool_constant<(std::is_same_v<std::remove_const_t<T>, std::remove_const_t<Us>> || ...)> {};
+
+        template<typename ReqTuple, typename TermTuple> struct AllTermsIn;
+        template<typename ReqTuple, typename... Ts>
+        struct AllTermsIn<ReqTuple, std::tuple<Ts...>>
+            : std::bool_constant<(TupleContainsBare<Ts, ReqTuple>::value && ...)> {};
+
+        template<typename... QueryArgs>
+        inline constexpr bool ChangeTermsAreRequired =
+            AllTermsIn<typename QueryClassifier<QueryArgs...>::RequiredComponents, typename QueryClassifier<QueryArgs...>::ChangedComponents>::value &&
+            AllTermsIn<typename QueryClassifier<QueryArgs...>::RequiredComponents, typename QueryClassifier<QueryArgs...>::AddedComponents>::value;
 
         // ============ Enableable-components query-filter type sets (spec §5) ============
         //
@@ -295,6 +338,8 @@ namespace Astra
         };
         // Match-only / grouping modifiers: zero access footprint.
         template<typename T>    struct ArgAccess<With<T>> { using Read = std::tuple<>; using Write = std::tuple<>; };
+        template<typename T>    struct ArgAccess<Changed<T>> { using Read = std::tuple<>; using Write = std::tuple<>; };
+        template<typename T>    struct ArgAccess<Added<T>>   { using Read = std::tuple<>; using Write = std::tuple<>; };
         template<typename T>    struct ArgAccess<Not<T>>  { using Read = std::tuple<>; using Write = std::tuple<>; };
         template<typename... T> struct ArgAccess<Any<T...>>   { using Read = std::tuple<>; using Write = std::tuple<>; };
         template<typename... T> struct ArgAccess<OneOf<T...>> { using Read = std::tuple<>; using Write = std::tuple<>; };
@@ -325,6 +370,26 @@ namespace Astra
     struct With
     {
         static_assert(Component<T>, "With can only be used with valid components");
+    };
+
+    // Change-detection filters (spec 2026-09-10 §3.4). Match-only like With<T>: T must
+    // be present, T is NOT yielded, zero ViewAccess footprint. A chunk passes iff T's
+    // column version is newer than the querying tick ("since"); for a change-tracked T
+    // (AstraChangeTracked) the per-entity ticks are then scanned too. Iteration-only
+    // this stage: use ForEach(ctx, fn) / Since(tick).ForEach(fn). T must ALSO be listed
+    // as a required component of the same view (enforced in View).
+    template<typename T>
+    struct Changed
+    {
+        static_assert(Component<T>, "Changed can only be used with valid components");
+        static_assert(!std::is_empty_v<T>, "Changed<T>: a tag has no storage column and therefore no version to compare; "
+                                           "track a non-empty component instead");
+    };
+    template<typename T>
+    struct Added
+    {
+        static_assert(Component<T>, "Added can only be used with valid components");
+        static_assert(!std::is_empty_v<T>, "Added<T>: a tag has no storage column and therefore no version to compare");
     };
 
     // View modifier: opt a REQUIRED enableable component OUT of enabled-only
@@ -396,6 +461,14 @@ namespace Astra
             return MakeMaskFromTuple<typename Classifier::WithComponents>();
         }
 
+        // Change-filter components (Changed<T>/Added<T>): required for matching like
+        // With<T>, never yielded; the per-chunk version test lives in View.
+        static ComponentMask GetChangeMask()
+        {
+            return MakeMaskFromTuple<typename Classifier::ChangedComponents>()
+                 | MakeMaskFromTuple<typename Classifier::AddedComponents>();
+        }
+
         // Handle Any groups - must have at least one component from each group
         template<typename Tuple, size_t... Is>
         static bool CheckAnyGroups(const ComponentMask& archetypeMask, std::index_sequence<Is...>)
@@ -446,8 +519,8 @@ namespace Astra
         // Check if archetype matches this query
         static bool Matches(const ComponentMask& archetypeMask)
         {
-            // Must have all required AND all With components
-            if (!archetypeMask.HasAll(GetRequiredMask() | GetWithMask()))
+            // Must have all required AND all With AND all Changed/Added components
+            if (!archetypeMask.HasAll(GetRequiredMask() | GetWithMask() | GetChangeMask()))
                 return false;
             
             // Must NOT have any excluded components

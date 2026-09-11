@@ -50,6 +50,24 @@ namespace Astra
         static constexpr bool HasOptionalFilter = std::tuple_size_v<EnabledOptionalFilter> > 0;
         static constexpr bool HasEnabledFilter  = HasRequiredFilter || HasOptionalFilter;
 
+        // ================= Change-detection filters (spec 2026-09-10 §3.4) =================
+        //
+        // Changed<T>/Added<T> are match-only terms (T required, never yielded, zero
+        // ViewAccess footprint) that reject whole chunks whose T column version is not
+        // newer than the querying tick. HasChangeFilter is the compile-time gate, exactly
+        // like HasEnabledFilter: a view naming no Changed/Added instantiates none of the
+        // reject code. Iteration-only this stage: ForEach(ctx, fn) / Since(tick).ForEach.
+        using ChangedTypes = typename Detail::QueryClassifier<QueryArgs...>::ChangedComponents;
+        using AddedTypes   = typename Detail::QueryClassifier<QueryArgs...>::AddedComponents;
+        static_assert(Detail::ChangeTermsAreRequired<QueryArgs...>,
+            "Changed<T>/Added<T>: T must also be listed as a required component of this view "
+            "(e.g. CreateView<const T, Changed<T>, ...>) -- filter what you fetch");
+    public:
+        static constexpr bool HasChangeFilter = (std::tuple_size_v<ChangedTypes> + std::tuple_size_v<AddedTypes>) > 0;
+    private:
+        // Any per-chunk filter at all: routes iteration through VisitChunkFiltered.
+        static constexpr bool HasChunkFilter = HasEnabledFilter || HasChangeFilter;
+
         // Parallel execution thresholds - based on empirical testing
         static constexpr size_t AVG_ENTITIES_PER_CHUNK = 256;                           // Typical for 16KB chunks with ~50 byte entities
         static constexpr size_t MIN_CHUNKS_PER_THREAD = 4;                              // Each thread should process at least 4 chunks (64KB)
@@ -108,18 +126,72 @@ namespace Astra
          * after the loop; the check (and the counter read) is compiled out
          * entirely in Release/Dist builds, so this contract carries zero Release
          * cost.
+         *
+         * Change detection (spec §3.4): a view with a Changed<T>/Added<T> filter
+         * needs a "since" tick and refuses this overload at compile time -- call
+         * ForEach(ctx, fn) from a SystemContext system, or Since(tick).ForEach(fn).
          */
         template<typename Func>
-        ASTRA_FORCEINLINE void ForEach(Func&& func) { ForEachBody<true>(std::forward<Func>(func)); }
-        
+        ASTRA_FORCEINLINE void ForEach(Func&& func)
+        {
+            static_assert(!HasChangeFilter,
+                "This view has a Changed<T>/Added<T> filter and needs a 'since' tick: call "
+                "ForEach(ctx, fn) from a SystemContext system, or Since(tick).ForEach(fn).");
+            ForEachSince(Tick{0}, std::forward<Func>(func));
+        }
+
+        /**
+         * Tick-aware ForEach: `since` is taken from ctx.LastRun() (any TickContext --
+         * SystemContext, or a test stand-in), so Changed<T>/Added<T> terms see exactly
+         * what changed since this system last ran. Also valid on an unfiltered view.
+         */
+        template<TickContext Ctx, typename Func>
+        ASTRA_FORCEINLINE void ForEach(const Ctx& ctx, Func&& func) { ForEachSince(ctx.LastRun(), std::forward<Func>(func)); }
+
         template<typename Func>
         ASTRA_FORCEINLINE void ParallelForEach(Func&& func)
         {
+            static_assert(!HasChangeFilter,
+                "This view has a Changed<T>/Added<T> filter and needs a 'since' tick: call "
+                "ParallelForEach(ctx, fn) from a SystemContext system, or Since(tick).ParallelForEach(fn).");
+            ParallelForEachSince(Tick{0}, std::forward<Func>(func));
+        }
+
+        template<TickContext Ctx, typename Func>
+        ASTRA_FORCEINLINE void ParallelForEach(const Ctx& ctx, Func&& func) { ParallelForEachSince(ctx.LastRun(), std::forward<Func>(func)); }
+
+        /**
+         * Explicit-tick form for Registry&-only systems and tests:
+         * `view.Since(tick).ForEach(fn)` iterates with Changed<T>/Added<T> evaluated
+         * against `tick`. A thin non-owning handle over this view; use it immediately.
+         */
+        class SinceView
+        {
+        public:
+            SinceView(View& v, Tick since) noexcept : m_view(&v), m_since(since) {}
+            template<typename Func> void ForEach(Func&& func)         { m_view->ForEachSince(m_since, std::forward<Func>(func)); }
+            template<typename Func> void ParallelForEach(Func&& func) { m_view->ParallelForEachSince(m_since, std::forward<Func>(func)); }
+        private:
+            View* m_view;
+            Tick  m_since;
+        };
+        ASTRA_NODISCARD SinceView Since(Tick since) noexcept { return SinceView(*this, since); }
+
+    private:
+        // ForEach with an explicit "since" tick: the one stamped walk behind
+        // ForEach(fn), ForEach(ctx, fn) and Since(tick).ForEach(fn).
+        template<typename Func>
+        ASTRA_FORCEINLINE void ForEachSince(Tick since, Func&& func) { ForEachBody<true>(since, std::forward<Func>(func)); }
+
+        // ParallelForEach with an explicit "since" tick (see ForEachSince).
+        template<typename Func>
+        ASTRA_FORCEINLINE void ParallelForEachSince(Tick since, Func&& func)
+        {
             if (!m_archetypeManager) ASTRA_UNLIKELY
                 return;  // Registry destroyed
-            
+
             EnsureArchetypes();
-            
+
             if (m_archetypes.empty()) ASTRA_UNLIKELY
                 return;
 
@@ -134,12 +206,12 @@ namespace Astra
 
             if (quickCount < MIN_ENTITIES_QUICK_CHECK)
             {
-                return ForEach(adapted);
+                return ForEachSince(since, adapted);
             }
 
             // No scheduler injected: Astra spawns no threads — run sequentially inline.
             if (!m_scheduler)
-                return ForEach(adapted);
+                return ForEachSince(since, adapted);
 
             std::vector<std::pair<Archetype*, size_t>> chunkWork;
             // Better estimation based on typical entities per 16KB chunk
@@ -164,7 +236,7 @@ namespace Astra
             // Fall back to sequential for tiny workloads
             if (chunkWork.empty() || totalMatchingEntities < MIN_ENTITIES_FOR_PARALLEL || chunkWork.size() < MIN_CHUNKS_FOR_PARALLEL)
             {
-                return ForEach(adapted);
+                return ForEachSince(since, adapted);
             }
 
             m_scheduler->ParallelFor(chunkWork.size(), MIN_CHUNKS_PER_THREAD,
@@ -173,11 +245,12 @@ namespace Astra
                     for (size_t w = begin; w < end; ++w)
                     {
                         auto [archetype, chunkIndex] = chunkWork[w];
-                        ParallelForEachChunkImpl(archetype, chunkIndex, adapted, RequiredTypes{}, OptionalTypes{});
+                        ParallelForEachChunkImpl(archetype, chunkIndex, adapted, since, RequiredTypes{}, OptionalTypes{});
                     }
                 });
         }
 
+    public:
         /**
          * Like ParallelForEach, but threads a per-chunk sub-context to the body
          * (Theme B2 Phase B, Task 3 -- the machinery behind
@@ -222,9 +295,27 @@ namespace Astra
          * distinct iterationIndex values this call could have stamped, keeping
          * deferred-command SortKeys globally unique across sequential calls.
          * Callers that ignore the return value are unaffected (additive).
+         *
+         * Change detection (spec §3.4): a change-filtered view needs a "since"
+         * tick -- SystemContext::ParallelForEach calls the Tick-taking overload
+         * below; this one is compile-time refused on such a view.
          */
         template<typename Factory, typename Body>
         ASTRA_FORCEINLINE size_t ParallelForEachWithContext(Factory&& factory, Body&& body)
+        {
+            static_assert(!HasChangeFilter,
+                "This view has a Changed<T>/Added<T> filter and needs a 'since' tick: call "
+                "ParallelForEachWithContext(since, factory, body) (SystemContext::ParallelForEach does).");
+            return ParallelForEachWithContext(Tick{0}, std::forward<Factory>(factory), std::forward<Body>(body));
+        }
+
+        /**
+         * ParallelForEachWithContext with an explicit "since" tick for the view's
+         * Changed<T>/Added<T> terms (ignored by an unfiltered view). Same contract
+         * and return value as the two-argument form above.
+         */
+        template<typename Factory, typename Body>
+        ASTRA_FORCEINLINE size_t ParallelForEachWithContext(Tick since, Factory&& factory, Body&& body)
         {
             if (!m_archetypeManager) ASTRA_UNLIKELY
                 return 0;  // Registry destroyed
@@ -277,7 +368,7 @@ namespace Astra
                 {
                     body(e, std::forward<decltype(comps)>(comps)..., sub);
                 };
-                ParallelForEachChunkImpl(archetype, chunkIndex, wrapped, RequiredTypes{}, OptionalTypes{});
+                ParallelForEachChunkImpl(archetype, chunkIndex, wrapped, since, RequiredTypes{}, OptionalTypes{});
             };
 
             // No scheduler, or workload below the parallel thresholds: walk every
@@ -307,6 +398,7 @@ namespace Astra
 
         ASTRA_NODISCARD size_t Size() noexcept
         {
+            static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
             if (!m_archetypeManager) ASTRA_UNLIKELY
                 return 0;  // Registry destroyed
 
@@ -335,11 +427,13 @@ namespace Astra
 
         ASTRA_NODISCARD bool Empty() noexcept
         {
+            static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
             return Size() == 0;
         }
 
         ASTRA_NODISCARD bool Contains(Entity e) const
         {
+            static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
             return VisibleRecord(e) != nullptr;
         }
 
@@ -357,6 +451,7 @@ namespace Astra
          */
         ASTRA_FORCEINLINE Iterator begin()
         {
+            static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
             // Range-based for cannot honor the enableable disabled-bit filter:
             // ViewIterator has no access to the per-chunk disabled words, so
             // `for (auto x : view)` would visit disabled entities that
@@ -387,6 +482,7 @@ namespace Astra
          */
         ASTRA_FORCEINLINE ViewSentinel end() const noexcept
         {
+            static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
             // See begin(): range-for is compile-time refused on required
             // enableable-filtered views so it cannot silently diverge from
             // ForEach()/Size() (IM-7).
@@ -465,6 +561,7 @@ namespace Astra
          */
         ASTRA_NODISCARD Result<AccessTuple, QueryError> Get(Entity e) const
         {
+            static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
             const EntityRecord* rec = VisibleRecord(e);
             if (!rec) ASTRA_UNLIKELY
                 return Result<AccessTuple, QueryError>::Err(QueryError::NotMatched);
@@ -492,9 +589,11 @@ namespace Astra
          */
         ASTRA_NODISCARD Result<AccessTuple, QueryError> Single()
         {
+            static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
             Entity found{};
             size_t count = 0;
-            ForEachBody<false>([&](Entity e, auto&&...) { if (count == 0) found = e; ++count; });
+            // Tick{0} is inert: Single() is refused above on change-filtered views.
+            ForEachBody<false>(Tick{0}, [&](Entity e, auto&&...) { if (count == 0) found = e; ++count; });
             if (count == 0) ASTRA_UNLIKELY
                 return Result<AccessTuple, QueryError>::Err(QueryError::Empty);
             if (count > 1) ASTRA_UNLIKELY
@@ -589,7 +688,7 @@ namespace Astra
 
             auto archetypes = m_archetypeManager->GetArchetypes();
             const size_t queryComponentCount =
-                (QueryBuilder::GetRequiredMask() | QueryBuilder::GetWithMask()).Count();
+                (QueryBuilder::GetRequiredMask() | QueryBuilder::GetWithMask() | QueryBuilder::GetChangeMask()).Count();
 
             m_archetypes.reserve(archetypes.size());
 
@@ -659,9 +758,10 @@ namespace Astra
         // unstamped pass (Stamp=false: Single()'s count/locate, which is not a
         // write -- Ruling E / spec §3.3 row 2). Mirrors Archetype::ForEachBody so the
         // stamped and unstamped walks cannot drift; with Stamp=false no stamp code
-        // is instantiated anywhere below.
+        // is instantiated anywhere below. `since` is the change-filter tick
+        // (Changed<T>/Added<T> chunk reject); ignored by a view without one.
         template<bool Stamp, typename Func>
-        ASTRA_FORCEINLINE void ForEachBody(Func&& func)
+        ASTRA_FORCEINLINE void ForEachBody(Tick since, Func&& func)
         {
             if (!m_archetypeManager) ASTRA_UNLIKELY
                 return;  // Registry destroyed
@@ -681,7 +781,7 @@ namespace Astra
             auto adapted = MakeEntityOptionalAdapter(func);
             for (Archetype* archetype : m_archetypes)
             {
-                ForEachImpl<Stamp>(archetype, adapted, RequiredTypes{}, OptionalTypes{});
+                ForEachImpl<Stamp>(archetype, adapted, since, RequiredTypes{}, OptionalTypes{});
             }
 
 #ifdef ASTRA_BUILD_DEBUG
@@ -692,15 +792,16 @@ namespace Astra
         }
 
         template<bool Stamp, typename Func, typename... Required, typename... Optional>
-        ASTRA_FORCEINLINE void ForEachImpl(Archetype* archetype, Func&& func, std::tuple<Required...>, std::tuple<Optional...>)
+        ASTRA_FORCEINLINE void ForEachImpl(Archetype* archetype, Func&& func, Tick since, std::tuple<Required...>, std::tuple<Optional...>)
         {
-            if constexpr (!HasEnabledFilter)
+            if constexpr (!HasChunkFilter)
             {
-                // No enableable (non-IncludeDisabled) type in the query: the filtered
-                // path below is not instantiated at all, so this is the pre-existing
-                // loop (invariant 1) plus, when Stamp, the coarse change-detection
-                // stamp of every non-const yielded column per visited chunk
-                // (all-const: no stamp code).
+                // No enableable (non-IncludeDisabled) type and no Changed/Added term
+                // in the query: the filtered path below is not instantiated at all,
+                // so this is the pre-existing loop (invariant 1) plus, when Stamp,
+                // the coarse change-detection stamp of every non-const yielded
+                // column per visited chunk (all-const: no stamp code).
+                (void)since;
                 if constexpr (sizeof...(Optional) == 0)
                 {
                     if constexpr (Stamp)
@@ -719,7 +820,7 @@ namespace Astra
                 const auto& chunks = archetype->GetChunks();
                 for (auto& chunk : chunks)
                 {
-                    VisitChunkFiltered<Stamp>(archetype, chunk.get(), func, now,
+                    VisitChunkFiltered<Stamp>(archetype, chunk.get(), func, now, since,
                                               std::make_index_sequence<sizeof...(Required)>{},
                                               std::make_index_sequence<sizeof...(Optional)>{});
                 }
@@ -767,12 +868,13 @@ namespace Astra
         }
 
         template<typename Func, typename... Required, typename... Optional>
-        ASTRA_FORCEINLINE void ParallelForEachChunkImpl(Archetype* archetype, size_t chunkIndex, Func&& func, std::tuple<Required...>, std::tuple<Optional...>)
+        ASTRA_FORCEINLINE void ParallelForEachChunkImpl(Archetype* archetype, size_t chunkIndex, Func&& func, Tick since, std::tuple<Required...>, std::tuple<Optional...>)
         {
-            if constexpr (!HasEnabledFilter)
+            if constexpr (!HasChunkFilter)
             {
                 // Pre-existing chunk walk (invariant 1) plus the coarse change-
                 // detection stamp of every non-const yielded column for this chunk.
+                (void)since;
                 if constexpr (sizeof...(Optional) == 0)
                 {
                     archetype->ForEachChunkStamped<Required...>(chunkIndex, std::forward<Func>(func));
@@ -789,7 +891,7 @@ namespace Astra
                 const auto& chunks = archetype->GetChunks();
                 if (chunkIndex >= chunks.size()) ASTRA_UNLIKELY
                     return;
-                VisitChunkFiltered<true>(archetype, chunks[chunkIndex].get(), func, m_archetypeManager->CurrentTick(),
+                VisitChunkFiltered<true>(archetype, chunks[chunkIndex].get(), func, m_archetypeManager->CurrentTick(), since,
                                          std::make_index_sequence<sizeof...(Required)>{},
                                          std::make_index_sequence<sizeof...(Optional)>{});
             }
@@ -930,12 +1032,29 @@ namespace Astra
             }
         }
 
-        // Three-tier enabled-only filter for one chunk (shared by the serial and
-        // parallel paths). count==0 chunks are no-ops. `now` is the caller's
-        // hoisted CurrentTick() for the coarse change-detection stamp; Stamp=false
-        // (the internal count/locate pass) instantiates no stamp at all.
+        // ============ Change-detection chunk reject (spec §3.4, instantiated only when HasChangeFilter) ============
+
+        // True iff every T in the tuple has a column version newer than `since` in
+        // this chunk. Empty tuple => true (the fold's identity).
+        template<typename... Ts>
+        ASTRA_FORCEINLINE static bool AllNewer(ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm, Tick since, std::tuple<Ts...>*) noexcept
+        {
+            return (IsNewer(chunk->GetColumnVersion(cm.idToColumn[TypeID<std::remove_const_t<Ts>>::Value()]), since) && ...);
+        }
+        ASTRA_FORCEINLINE static bool ChangeChunkPasses(ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm, Tick since) noexcept
+        {
+            return AllNewer(chunk, cm, since, static_cast<ChangedTypes*>(nullptr))
+                && AllNewer(chunk, cm, since, static_cast<AddedTypes*>(nullptr));
+        }
+
+        // Per-chunk filter for one chunk (shared by the serial and parallel paths):
+        // the Changed/Added version reject, then the three-tier enabled-only filter.
+        // count==0 chunks are no-ops. `now` is the caller's hoisted CurrentTick()
+        // for the coarse change-detection stamp; Stamp=false (the internal count/
+        // locate pass) instantiates no stamp at all. `since` is the change-filter
+        // tick; a view without Changed/Added terms instantiates no reject code.
         template<bool Stamp, typename Func, size_t... ReqIs, size_t... OptIs>
-        ASTRA_FORCEINLINE void VisitChunkFiltered(Archetype* archetype, ArchetypeChunk* chunk, Func&& func, Tick now,
+        ASTRA_FORCEINLINE void VisitChunkFiltered(Archetype* archetype, ArchetypeChunk* chunk, Func&& func, Tick now, Tick since,
                                                   std::index_sequence<ReqIs...> reqSeq, std::index_sequence<OptIs...> optSeq)
         {
             const size_t count = chunk->GetCount();
@@ -943,6 +1062,18 @@ namespace Astra
                 return;
 
             const ArchetypeColumnMeta& cm = archetype->GetColumnMeta();
+
+            if constexpr (HasChangeFilter)
+            {
+                // Chunk reject first, always (spec §2.2): a chunk whose T column is not
+                // newer than `since` for ANY Changed/Added term has nothing for us.
+                // Sits BEFORE the enabled whole-chunk reject and BEFORE the coarse
+                // stamp: a rejected chunk is not "visited" and must not be stamped.
+                if (!ChangeChunkPasses(chunk, cm, since)) ASTRA_UNLIKELY
+                    return;
+            }
+            else
+                (void)since;
 
             std::array<bool, sizeof...(OptIs)> hasOptional =
             {
@@ -965,9 +1096,10 @@ namespace Astra
             if (anyReqFull) ASTRA_UNLIKELY
                 return;   // Tier 2: a required column is fully disabled -> skip whole chunk
 
-            // Coarse change-detection stamp, deliberately AFTER the whole-chunk
-            // reject above: a chunk this view skips wholesale is not "visited" and
-            // must not be stamped (it would manufacture downstream false positives).
+            // Coarse change-detection stamp, deliberately AFTER both whole-chunk
+            // rejects above (change version, enabled): a chunk this view skips
+            // wholesale is not "visited" and must not be stamped (it would
+            // manufacture downstream false positives).
             if constexpr (Stamp)
                 StampChunkForYields(chunk, cm, hasOptional, now, reqSeq, optSeq);
             else

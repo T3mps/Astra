@@ -400,3 +400,103 @@ TEST(ChangeDetectionStamp, SingleStampsOnlyTheReturnedChunkAndNothingOnFailurePa
     for (auto& chunk : pv->GetChunks())
         EXPECT_EQ(chunk->GetColumnVersion(pvPosCol), 2u);
 }
+
+// ---- Task 4: Changed<T>/Added<T> at chunk granularity ----------------------
+
+namespace
+{
+    struct FakeCtx { Tick last; Tick LastRun() const noexcept { return last; } };
+    static_assert(Astra::TickContext<FakeCtx>);
+
+    template<typename V>
+    size_t CountSince(V& view, Tick since)
+    {
+        size_t n = 0;
+        view.Since(since).ForEach([&](auto&&...) { ++n; });
+        return n;
+    }
+}
+
+TEST(ChangeDetectionFilter, ChangedYieldsStampedChunksAndSkipsUnstamped)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(2000);
+    ASSERT_EQ((reg.CreateEntities<Position, Velocity>(2000, std::span{ents})), 2000u);
+    auto* arch = reg.GetArchetypeManager()->GetEntityRecord(ents[0])->archetype;
+    ASSERT_GT(arch->GetChunks().size(), 1u);
+
+    auto changed = reg.CreateView<const Position, Astra::Changed<Position>>();
+
+    // First run: since 0 sees everything (create stamped every chunk at tick 2).
+    EXPECT_EQ(CountSince(changed, 0), 2000u);
+    // Since the creation tick itself: nothing is newer than 2.
+    EXPECT_EQ(CountSince(changed, 2), 0u);
+
+    // Write exactly one entity at tick 3: its whole CHUNK reads as changed (chunk granularity).
+    AdvanceTo(reg, 3);
+    ASSERT_TRUE(reg.Modified<Position>(ents[0]));
+    const size_t chunk0Count = arch->GetChunks()[0]->GetCount();
+    EXPECT_EQ(CountSince(changed, 2), chunk0Count);
+    EXPECT_EQ(CountSince(changed, 3), 0u);
+
+    // A non-const view over Position at tick 4 stamps every chunk -> everything changed since 3.
+    AdvanceTo(reg, 4);
+    reg.CreateView<Position>().ForEach([](Position&) {});
+    EXPECT_EQ(CountSince(changed, 3), 2000u);
+    EXPECT_EQ(CountSince(changed, 4), 0u);
+}
+
+TEST(ChangeDetectionFilter, ForEachWithContextUsesLastRunAndParallelMatchesSerial)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(2000);
+    ASSERT_EQ((reg.CreateEntities<Position, Velocity>(2000, std::span{ents})), 2000u);
+    AdvanceTo(reg, 3);
+    reg.CreateView<Velocity>().ForEach([](Velocity&) {});   // stamps Velocity everywhere at 3
+
+    auto v = reg.CreateView<const Position, const Velocity, Astra::Changed<Velocity>>();
+    size_t serial = 0, parallel = 0;
+    v.ForEach(FakeCtx{2}, [&](const Position&, const Velocity&) { ++serial; });
+    v.ParallelForEach(FakeCtx{2}, [&](const Position&, const Velocity&) { ++parallel; });
+    EXPECT_EQ(serial, 2000u);
+    EXPECT_EQ(parallel, 2000u);
+
+    serial = 0;
+    v.ForEach(FakeCtx{3}, [&](const Position&, const Velocity&) { ++serial; });
+    EXPECT_EQ(serial, 0u);
+}
+
+TEST(ChangeDetectionFilter, AddedIsChunkGranularForUntrackedTypesAndCombinesWithNotWith)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto a = reg.CreateEntity<Position>();
+    auto b = reg.CreateEntity<Position, Health>();
+    (void)a;
+
+    AdvanceTo(reg, 3);
+    ASSERT_TRUE(reg.AddComponent<Velocity>(b, Velocity{}));   // b moves into {Position, Health, Velocity} at 3
+
+    // Added<Velocity>: b's new chunk was stamped at 3.
+    auto added = reg.CreateView<const Velocity, Astra::Added<Velocity>>();
+    EXPECT_EQ(CountSince(added, 2), 1u);
+    EXPECT_EQ(CountSince(added, 3), 0u);
+
+    // Filters compose with Not/With and the enabled filter's chunk skip.
+    auto composed = reg.CreateView<const Position, Astra::Changed<Position>, Astra::With<Velocity>, Astra::Not<Astra::Test::Name>>();
+    EXPECT_EQ(CountSince(composed, 2), 1u);   // only b (a has no Velocity)
+}
+
+TEST(ChangeDetectionFilter, ChangedTermCountsTowardArchetypeMatchingAndAccess)
+{
+    // Changed<T> requires T for MATCHING (like With) but adds nothing to ViewAccess.
+    using V = Astra::View<const Position, Astra::Changed<Position>, Astra::Added<Position>>;
+    static_assert(V::HasChangeFilter);
+    static_assert(std::tuple_size_v<Astra::ViewAccess<V>::Writes> == 0);
+    static_assert(std::tuple_size_v<Astra::ViewAccess<V>::Reads> == 1);   // from `const Position` only
+    using Plain = Astra::View<const Position>;
+    static_assert(!Plain::HasChangeFilter);
+    SUCCEED();
+}
