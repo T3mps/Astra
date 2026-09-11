@@ -67,6 +67,17 @@ namespace Astra
     template<typename T>
     inline constexpr bool IsEnableableV = EnableableTraits<std::remove_const_t<T>>::value;
 
+    namespace Detail
+    {
+        // A yielded component whose access is non-const and which has storage. Only
+        // these columns get the coarse change-detection stamp when a view enters a
+        // chunk (spec 2026-09-10 §2.3): const yields never stamp, tags have no column.
+        // Lives here (not Query.hpp) because Archetype::ForEachBody needs it and
+        // Archetype.hpp cannot include Query.hpp (Query.hpp includes Archetype.hpp).
+        template<typename C>
+        inline constexpr bool IsMutableYield = !std::is_const_v<C> && !std::is_empty_v<std::remove_const_t<C>>;
+    }
+
     struct ComponentDescriptor
     {
         using ConstructFn = void(void*);

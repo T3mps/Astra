@@ -212,3 +212,124 @@ TEST(ChangeDetectionChunkVersion, EnableableArchetypeStillFitsItsCarve)
     reg.CreateView<const Astra::Test::Timer, const Position>().ForEach([&](const Astra::Test::Timer&, const Position&) { ++n; });
     EXPECT_EQ(n, 20000u);
 }
+
+// ---- Task 3: view-entry stamping + Registry accessor write side ------------
+
+TEST(ChangeDetectionStamp, NonConstViewStampsEveryVisitedChunkConstViewStampsNone)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(2000);
+    ASSERT_EQ((reg.CreateEntities<Position, Velocity>(2000, std::span{ents})), 2000u);
+    auto* arch = reg.GetArchetypeManager()->GetEntityRecord(ents[0])->archetype;
+    ASSERT_GT(arch->GetChunks().size(), 1u);
+
+    AdvanceTo(reg, 3);
+    reg.CreateView<const Position, const Velocity>().ForEach([](const Position&, const Velocity&) {});
+    for (auto& chunk : arch->GetChunks())
+    {
+        const auto& cm = arch->GetColumnMeta();
+        EXPECT_EQ(chunk->GetColumnVersion(cm.idToColumn[Astra::TypeID<Position>::Value()]), 2u);   // untouched
+        EXPECT_EQ(chunk->GetColumnVersion(cm.idToColumn[Astra::TypeID<Velocity>::Value()]), 2u);
+    }
+
+    AdvanceTo(reg, 4);
+    reg.CreateView<Position, const Velocity>().ForEach([](Position&, const Velocity&) { /* writes nothing */ });
+    for (auto& chunk : arch->GetChunks())
+    {
+        const auto& cm = arch->GetColumnMeta();
+        EXPECT_EQ(chunk->GetColumnVersion(cm.idToColumn[Astra::TypeID<Position>::Value()]), 4u);   // stamped by access, not by writing
+        EXPECT_EQ(chunk->GetColumnVersion(cm.idToColumn[Astra::TypeID<Velocity>::Value()]), 2u);   // const: untouched
+    }
+
+    AdvanceTo(reg, 5);
+    reg.CreateView<const Position, Velocity>().ParallelForEach([](const Position&, Velocity&) {});
+    for (auto& chunk : arch->GetChunks())
+        EXPECT_EQ(chunk->GetColumnVersion(arch->GetColumnMeta().idToColumn[Astra::TypeID<Velocity>::Value()]), 5u);
+
+    AdvanceTo(reg, 6);
+    for (auto [e, p] : reg.CreateView<Position>()) { (void)e; (void)p; }   // range-for stamps too
+    for (auto& chunk : arch->GetChunks())
+        EXPECT_EQ(chunk->GetColumnVersion(arch->GetColumnMeta().idToColumn[Astra::TypeID<Position>::Value()]), 6u);
+}
+
+TEST(ChangeDetectionStamp, OptionalAndEnabledFilteredPathsStampMutableColumns)
+{
+    using EnA = Astra::Test::Hierarchy;   // enableable. NOTE: With<EnA> is match-only (not a bare
+                                          // required enableable arg), so the first view below takes
+                                          // the ForEachWithOptional path; the second (<Position, EnA>)
+                                          // is what exercises the enabled-filtered VisitChunkFiltered path.
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto a = reg.CreateEntity<Position, Velocity, EnA>();
+    auto b = reg.CreateEntity<Position, EnA>();
+    (void)b;
+
+    AdvanceTo(reg, 3);
+    reg.CreateView<const Position, Astra::Optional<Velocity>, Astra::With<EnA>>().ForEach(
+        [](const Position&, Velocity*) {});
+    EXPECT_EQ(VersionOf<Velocity>(reg, a), 3u);   // present optional, non-const: stamped
+    EXPECT_EQ(VersionOf<Position>(reg, a), 2u);   // const required: not
+
+    AdvanceTo(reg, 4);
+    reg.CreateView<Position, EnA>().ForEach([](Position&, EnA&) {});   // enabled-filtered path
+    EXPECT_EQ(VersionOf<Position>(reg, a), 4u);
+    EXPECT_EQ(VersionOf<EnA>(reg, a), 4u);
+}
+
+TEST(ChangeDetectionStamp, GetAndSingleStampOnlyNonConstRequests)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto e = reg.CreateEntity<Position, Velocity>();
+
+    AdvanceTo(reg, 3);
+    auto vRead = reg.CreateView<const Position, const Velocity>();
+    ASSERT_TRUE(vRead.Get(e).IsOk());
+    EXPECT_EQ(VersionOf<Position>(reg, e), 2u);
+
+    auto vWrite = reg.CreateView<Position, const Velocity>();
+    ASSERT_TRUE(vWrite.Get(e).IsOk());
+    EXPECT_EQ(VersionOf<Position>(reg, e), 3u);
+    EXPECT_EQ(VersionOf<Velocity>(reg, e), 2u);
+
+    AdvanceTo(reg, 4);
+    ASSERT_TRUE(vWrite.Single().IsOk());
+    EXPECT_EQ(VersionOf<Position>(reg, e), 4u);
+}
+
+TEST(ChangeDetectionStamp, RegistryGetComponentNonConstStampsConstDoesNot)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto e = reg.CreateEntity<Position>();
+
+    AdvanceTo(reg, 3);
+    const Astra::Registry& creg = reg;
+    ASSERT_NE(creg.GetComponent<Position>(e), nullptr);
+    EXPECT_EQ(VersionOf<Position>(reg, e), 2u);
+
+    ASSERT_NE(reg.GetComponent<Position>(e), nullptr);
+    EXPECT_EQ(VersionOf<Position>(reg, e), 3u);
+}
+
+TEST(ChangeDetectionStamp, ModifiedStampsAndSetIfNeqStampsOnlyOnInequality)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto e = reg.CreateEntityWith(Position{1, 2, 3});
+
+    AdvanceTo(reg, 3);
+    EXPECT_TRUE(reg.Modified<Position>(e));
+    EXPECT_EQ(VersionOf<Position>(reg, e), 3u);
+    EXPECT_FALSE(reg.Modified<Velocity>(e));               // absent component: false, nothing stamped
+    EXPECT_FALSE(reg.Modified<Position>(Astra::Entity{}));   // invalid handle: false
+
+    AdvanceTo(reg, 4);
+    EXPECT_FALSE(reg.SetIfNeq<Health>(e, Health{1, 1}));     // absent: false
+    EXPECT_FALSE(reg.SetIfNeq<Position>(e, Position{1, 2, 3}));   // equal: no store, no stamp
+    EXPECT_EQ(VersionOf<Position>(reg, e), 3u);
+    EXPECT_TRUE(reg.SetIfNeq<Position>(e, Position{9, 2, 3}));    // different: stored + stamped
+    EXPECT_EQ(VersionOf<Position>(reg, e), 4u);
+    EXPECT_FLOAT_EQ(std::as_const(reg).GetComponent<Position>(e)->x, 9.0f);
+}

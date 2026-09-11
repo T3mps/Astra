@@ -521,15 +521,18 @@ namespace Astra
             return m_archetypeManager->RemoveComponents<T>(validEntities);
         }
 
+        // Non-const access counts as a write for change detection (spec §3.3):
+        // T's chunk column is stamped with the current tick. Use the const
+        // overload (e.g. via std::as_const) for a read that must not stamp.
         template<Component T>
         ASTRA_NODISCARD T* GetComponent(Entity entity)
         {
             AssertContextAffinity();
             if (!m_entityManager.IsValid(entity))
                 return nullptr;
-            return m_archetypeManager->GetComponent<T>(entity);
+            return m_archetypeManager->GetComponentMut<T>(entity);
         }
-        
+
         template<Component T>
         ASTRA_NODISCARD const T* GetComponent(Entity entity) const
         {
@@ -538,7 +541,7 @@ namespace Astra
                 return nullptr;
             return m_archetypeManager->GetComponent<T>(entity);
         }
-        
+
         template<Component T>
         ASTRA_NODISCARD bool HasComponent(Entity entity) const
         {
@@ -546,6 +549,34 @@ namespace Astra
             if (!m_entityManager.IsValid(entity))
                 return false;
             return m_archetypeManager->HasComponent<T>(entity);
+        }
+
+        // ---- Change detection, explicit write side (spec §3.3) ----
+        // For code that holds a raw T* across frames: declare the write. Stamps T's
+        // chunk column (and marks the entity for a change-tracked T -- Task 7).
+        template<Component T>
+        bool Modified(Entity entity)
+        {
+            AssertContextAffinity();
+            if (!m_entityManager.IsValid(entity)) return false;
+            return m_archetypeManager->MarkWritten(entity, TypeID<T>::Value());
+        }
+
+        // Compare-then-store opt-in: assigns and stamps ONLY when `value != current`.
+        // Returns true iff a store happened. Deliberately not the default mark path
+        // (the compare costs more than the store it skips -- spec §2.4).
+        template<Component T>
+        requires std::equality_comparable<T>
+        bool SetIfNeq(Entity entity, const T& value)
+        {
+            AssertContextAffinity();
+            if (!m_entityManager.IsValid(entity)) return false;
+            T* current = m_archetypeManager->GetComponent<T>(entity);   // non-stamping fetch
+            if (!current) return false;
+            if (*current == value) return false;
+            *current = value;
+            m_archetypeManager->MarkWritten(entity, TypeID<T>::Value());
+            return true;
         }
 
         // ===================== Enableable components (Task 2) =====================

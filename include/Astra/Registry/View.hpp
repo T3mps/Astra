@@ -405,7 +405,9 @@ namespace Astra
                 return Iterator(nullptr, 0);
 
             EnsureArchetypes();
-            return Iterator(m_archetypes.data(), m_archetypes.size());
+            // The iterator carries the current tick so it can apply the coarse
+            // change-detection stamp on every chunk it enters (non-const yields only).
+            return Iterator(m_archetypes.data(), m_archetypes.size(), m_archetypeManager->CurrentTick());
         }
 
         /**
@@ -465,6 +467,19 @@ namespace Astra
             };
         }
 
+        // Get()'s stamp: the optional-presence array is built from the entity's own
+        // archetype, then the shared per-chunk stamp is applied to its chunk.
+        template<size_t... Oi>
+        ASTRA_FORCEINLINE void StampForGet(const EntityRecord* rec, std::index_sequence<Oi...> optSeq) const
+        {
+            std::array<bool, sizeof...(Oi)> hasOptional =
+            {
+                rec->archetype->template HasComponent<std::tuple_element_t<Oi, OptionalTypes>>()...
+            };
+            StampChunkForYields(rec->chunk, rec->archetype->GetColumnMeta(), hasOptional, m_archetypeManager->CurrentTick(),
+                                std::make_index_sequence<std::tuple_size_v<RequiredTypes>>{}, optSeq);
+        }
+
     public:
         using AccessTuple = typename AccessTupleImpl<RequiredTypes, OptionalTypes>::type;
 
@@ -481,6 +496,10 @@ namespace Astra
             const EntityRecord* rec = VisibleRecord(e);
             if (!rec) ASTRA_UNLIKELY
                 return Result<AccessTuple, QueryError>::Err(QueryError::NotMatched);
+            // Coarse change-detection stamp (spec §3.3): a non-const request is a
+            // write, so stamp the entity's chunk for every non-const yielded column
+            // that is present. All-const request: compiles to nothing.
+            StampForGet(rec, std::make_index_sequence<std::tuple_size_v<OptionalTypes>>{});
             return Result<AccessTuple, QueryError>::Ok(
                 MakeAccessTuple(rec, RequiredTypes{}, OptionalTypes{},
                                 std::make_index_sequence<std::tuple_size_v<RequiredTypes>>{},
@@ -635,17 +654,41 @@ namespace Astra
             };
         }
 
+        // Coarse change-detection stamp for a chunk this view is about to iterate:
+        // every non-const required column, plus every non-const optional column that
+        // is PRESENT on this archetype. Compiles to nothing for an all-const view:
+        // the if constexpr gate below is the structural guarantee (no stamp code is
+        // instantiated), same shape as the Archetype fast path's Stamp && AnyMutable.
+        template<size_t... ReqIs, size_t... OptIs>
+        ASTRA_FORCEINLINE void StampChunkForYields(ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm,
+                                                   const std::array<bool, sizeof...(OptIs)>& hasOptional, Tick now,
+                                                   std::index_sequence<ReqIs...>, std::index_sequence<OptIs...>) const
+        {
+            constexpr bool AnyMutable = (Detail::IsMutableYield<std::tuple_element_t<ReqIs, RequiredTypes>> || ...)
+                                     || (Detail::IsMutableYield<std::tuple_element_t<OptIs, OptionalTypes>> || ...);
+            if constexpr (AnyMutable)
+            {
+                ((Detail::IsMutableYield<std::tuple_element_t<ReqIs, RequiredTypes>>
+                    ? chunk->StampColumn(cm.idToColumn[TypeID<std::remove_const_t<std::tuple_element_t<ReqIs, RequiredTypes>>>::Value()], now)
+                    : void()), ...);
+                (((Detail::IsMutableYield<std::tuple_element_t<OptIs, OptionalTypes>> && hasOptional[OptIs])
+                    ? chunk->StampColumn(cm.idToColumn[TypeID<std::remove_const_t<std::tuple_element_t<OptIs, OptionalTypes>>>::Value()], now)
+                    : void()), ...);
+            }
+        }
+
         template<typename Func, typename... Required, typename... Optional>
         ASTRA_FORCEINLINE void ForEachImpl(Archetype* archetype, Func&& func, std::tuple<Required...>, std::tuple<Optional...>)
         {
             if constexpr (!HasEnabledFilter)
             {
                 // No enableable (non-IncludeDisabled) type in the query: the filtered
-                // path below is not instantiated at all, so this is the pre-existing,
-                // byte-identical loop (invariant 1).
+                // path below is not instantiated at all, so this is the pre-existing
+                // loop (invariant 1) plus the coarse change-detection stamp of every
+                // non-const yielded column per visited chunk (all-const: no stamp code).
                 if constexpr (sizeof...(Optional) == 0)
                 {
-                    archetype->ForEach<Required...>(std::forward<Func>(func));
+                    archetype->ForEachStamped<Required...>(std::forward<Func>(func));
                 }
                 else
                 {
@@ -654,10 +697,11 @@ namespace Astra
             }
             else
             {
+                const Tick now = m_archetypeManager->CurrentTick();
                 const auto& chunks = archetype->GetChunks();
                 for (auto& chunk : chunks)
                 {
-                    VisitChunkFiltered(archetype, chunk.get(), func,
+                    VisitChunkFiltered(archetype, chunk.get(), func, now,
                                        std::make_index_sequence<sizeof...(Required)>{},
                                        std::make_index_sequence<sizeof...(Optional)>{});
                 }
@@ -673,6 +717,8 @@ namespace Astra
                 archetype->HasComponent<std::tuple_element_t<OptionalTs, OptionalTypes>>()...
             };
 
+            const Tick now = m_archetypeManager->CurrentTick();
+            const auto& cm = archetype->GetColumnMeta();
             const auto& chunks = archetype->GetChunks();
 
             for (auto& chunk : chunks)
@@ -682,6 +728,9 @@ namespace Astra
                 {
                     continue;
                 }
+
+                StampChunkForYields(chunk.get(), cm, hasOptional, now,
+                                    std::index_sequence<RequiredTs...>{}, std::index_sequence<OptionalTs...>{});
 
                 std::tuple<std::tuple_element_t<RequiredTs, RequiredTypes>*...> requiredPtrs =
                 {
@@ -703,10 +752,11 @@ namespace Astra
         {
             if constexpr (!HasEnabledFilter)
             {
-                // Pre-existing byte-identical chunk walk (invariant 1).
+                // Pre-existing chunk walk (invariant 1) plus the coarse change-
+                // detection stamp of every non-const yielded column for this chunk.
                 if constexpr (sizeof...(Optional) == 0)
                 {
-                    archetype->ForEachChunk<Required...>(chunkIndex, std::forward<Func>(func));
+                    archetype->ForEachChunkStamped<Required...>(chunkIndex, std::forward<Func>(func));
                 }
                 else
                 {
@@ -720,7 +770,7 @@ namespace Astra
                 const auto& chunks = archetype->GetChunks();
                 if (chunkIndex >= chunks.size()) ASTRA_UNLIKELY
                     return;
-                VisitChunkFiltered(archetype, chunks[chunkIndex].get(), func,
+                VisitChunkFiltered(archetype, chunks[chunkIndex].get(), func, m_archetypeManager->CurrentTick(),
                                    std::make_index_sequence<sizeof...(Required)>{},
                                    std::make_index_sequence<sizeof...(Optional)>{});
             }
@@ -738,12 +788,15 @@ namespace Astra
             const auto& chunks = archetype->GetChunks();
             if (chunkIndex >= chunks.size()) ASTRA_UNLIKELY
                 return;
-                
+
             auto& chunk = chunks[chunkIndex];
             size_t count = chunk->GetCount();
             if (count == 0) ASTRA_UNLIKELY
                 return;
-                
+
+            StampChunkForYields(chunk.get(), archetype->GetColumnMeta(), hasOptional, m_archetypeManager->CurrentTick(),
+                                std::index_sequence<RequiredTs...>{}, std::index_sequence<OptionalTs...>{});
+
             std::tuple<std::tuple_element_t<RequiredTs, RequiredTypes>*...> requiredPtrs =
             {
                 chunk->GetComponentArray<std::tuple_element_t<RequiredTs, RequiredTypes>>()...
@@ -859,9 +912,10 @@ namespace Astra
         }
 
         // Three-tier enabled-only filter for one chunk (shared by the serial and
-        // parallel paths). count==0 chunks are no-ops.
+        // parallel paths). count==0 chunks are no-ops. `now` is the caller's
+        // hoisted CurrentTick() for the coarse change-detection stamp.
         template<typename Func, size_t... ReqIs, size_t... OptIs>
-        ASTRA_FORCEINLINE void VisitChunkFiltered(Archetype* archetype, ArchetypeChunk* chunk, Func&& func,
+        ASTRA_FORCEINLINE void VisitChunkFiltered(Archetype* archetype, ArchetypeChunk* chunk, Func&& func, Tick now,
                                                   std::index_sequence<ReqIs...> reqSeq, std::index_sequence<OptIs...> optSeq)
         {
             const size_t count = chunk->GetCount();
@@ -890,6 +944,11 @@ namespace Astra
             const bool anyReqFull = ResolveRequiredFilter(chunk, cm, count, reqWords, allZero, std::make_index_sequence<NReq>{});
             if (anyReqFull) ASTRA_UNLIKELY
                 return;   // Tier 2: a required column is fully disabled -> skip whole chunk
+
+            // Coarse change-detection stamp, deliberately AFTER the whole-chunk
+            // reject above: a chunk this view skips wholesale is not "visited" and
+            // must not be stamped (it would manufacture downstream false positives).
+            StampChunkForYields(chunk, cm, hasOptional, now, reqSeq, optSeq);
 
             if constexpr (HasOptionalFilter)
             {

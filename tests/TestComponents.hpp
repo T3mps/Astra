@@ -20,6 +20,8 @@ namespace Astra::Test
         
         Position() = default;
         Position(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+
+        bool operator==(const Position&) const = default;   // Registry::SetIfNeq requires equality_comparable; mints no TypeID
     };
     
     // 2. Velocity component (trivially copyable)
@@ -46,6 +48,8 @@ namespace Astra::Test
         
         bool IsDead() const { return current <= 0; }
         float GetHealthPercent() const { return max > 0 ? float(current) / float(max) : 0.0f; }
+
+        bool operator==(const Health&) const = default;   // Registry::SetIfNeq requires equality_comparable; mints no TypeID
     };
     
     // 4. Transform with matrix (larger trivially copyable)

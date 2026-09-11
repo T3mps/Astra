@@ -573,6 +573,38 @@ namespace Astra
             }
         }
 
+        // Non-const component access IS a write for change detection (spec §3.3):
+        // stamp T's column in the entity's chunk. Task 7 adds the per-entity mark
+        // for change-tracked T. Same validation and result as GetComponent<T>.
+        template<Component T>
+        ASTRA_NODISCARD T* GetComponentMut(Entity entity)
+        {
+            T* ptr = GetComponent<T>(entity);
+            if constexpr (!std::is_empty_v<T>)
+            {
+                if (ptr) ASTRA_LIKELY
+                {
+                    const EntityRecord* rec = m_records->GetRecord(entity.GetID());   // validated by GetComponent above
+                    rec->chunk->StampColumn(rec->archetype->GetColumnMeta().idToColumn[TypeID<T>::Value()], m_tick);
+                }
+            }
+            return ptr;
+        }
+
+        // Explicit "I wrote T on this entity" for raw-pointer code (Registry::Modified).
+        // Returns false for a stale handle, an absent component, or a tag (no column).
+        bool MarkWritten(Entity entity, ComponentID id)
+        {
+            const EntityRecord* rec = GetEntityRecord(entity);
+            if (!rec || !rec->chunk || id >= MAX_COMPONENTS) ASTRA_UNLIKELY
+                return false;
+            const int col = rec->archetype->GetColumnMeta().idToColumn[id];
+            if (col < 0) ASTRA_UNLIKELY
+                return false;
+            rec->chunk->StampColumn(col, m_tick);
+            return true;
+        }
+
         template<Component T>
         ASTRA_NODISCARD bool HasComponent(Entity entity) const
         {

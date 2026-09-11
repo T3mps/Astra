@@ -5,7 +5,9 @@
 #include <type_traits>
 
 #include "../Archetype/Archetype.hpp"
+#include "../Component/Component.hpp"
 #include "../Core/Base.hpp"
+#include "../Core/Tick.hpp"
 #include "../Entity/Entity.hpp"
 
 namespace Astra
@@ -37,9 +39,13 @@ namespace Astra
 
             Iterator() noexcept = default;
 
-            Iterator(Archetype* const* archetypes, size_t archetypeCount) noexcept
+            // `now` is the registry's current tick, applied as the coarse
+            // change-detection stamp to every non-const component column of every
+            // chunk this iterator enters (View::begin() supplies it).
+            Iterator(Archetype* const* archetypes, size_t archetypeCount, Tick now = 1) noexcept
                 : m_archetypes(archetypes)
                 , m_archetypeCount(archetypeCount)
+                , m_now(now)
             {
                 if (m_archetypeCount > 0)
                 {
@@ -149,6 +155,17 @@ namespace Astra
                 const auto& chunks = archetype->GetChunks();
                 auto* chunk = chunks[chunkIndex].get();
 
+                // Coarse change-detection stamp (spec §3.3 row 1): range-for yields
+                // references like ForEach, so every non-const component column is
+                // stamped on chunk entry. All-const iteration compiles to nothing.
+                if constexpr ((Detail::IsMutableYield<Components> || ...))
+                {
+                    const ArchetypeColumnMeta& cm = archetype->GetColumnMeta();
+                    ((Detail::IsMutableYield<Components>
+                        ? chunk->StampColumn(cm.idToColumn[TypeID<std::remove_const_t<Components>>::Value()], m_now)
+                        : void()), ...);
+                }
+
                 m_chunkEntityCount = chunk->GetCount();
                 m_entityIndex = 0;
                 m_entities = chunk->GetEntities().data();
@@ -188,6 +205,7 @@ namespace Astra
             // View-level state
             Archetype* const* m_archetypes = nullptr;
             size_t m_archetypeCount = 0;
+            Tick m_now = 1;   // change-detection tick stamped on chunk entry
 
             // Navigation state
             size_t m_archetypeIndex = 0;

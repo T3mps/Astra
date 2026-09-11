@@ -781,55 +781,20 @@ namespace Astra
         ASTRA_NODISCARD bool HasComponent(ComponentID id) const { return m_mask.Test(id); }
 
         template<Component... Components, std::invocable<Entity, Components&...> Func>
-        ASTRA_FORCEINLINE void ForEach(Func&& func)
-        {
-            if (m_entityCount == 0 || m_chunks.empty()) ASTRA_UNLIKELY
-                return;
-            
-            const size_t numChunks = m_chunks.size();
-            
-            for (size_t i = 0; i < numChunks; ++i)
-            {
-                auto& chunk = m_chunks[i];
-                const size_t count = chunk->GetCount();
-                if (count == 0) ASTRA_UNLIKELY
-                {
-                    continue;
-                }
-                
-                // Prefetch next chunk's data while processing current chunk
-                if (i + 1 < numChunks) ASTRA_LIKELY
-                {
-                    auto& nextChunk = m_chunks[i + 1];
-                    if (nextChunk->GetCount() > 0)
-                    {
-                        // Prefetch the entity array and first component array of next chunk
-                        Simd::Ops::PrefetchT0(&nextChunk->GetEntities()[0]);
-                        if constexpr (sizeof...(Components) > 0)
-                        {
-                            using FirstComponent = std::tuple_element_t<0, std::tuple<Components...>>;
-                            Simd::Ops::PrefetchT0(nextChunk->GetComponentArray<FirstComponent>());
-                        }
-                    }
-                }
-                
-                ForEachImpl<Components...>(chunk.get(), count, std::forward<Func>(func), std::index_sequence_for<Components...>{});
-            }
-        }
-        
-        template<Component... Components, std::invocable<Entity, Components&...> Func>
-        ASTRA_FORCEINLINE void ForEachChunk(size_t chunkIndex, Func&& func)
-        {
-            if (chunkIndex >= m_chunks.size()) ASTRA_UNLIKELY
-                return;
-                
-            auto& chunk = m_chunks[chunkIndex];
-            const size_t count = chunk->GetCount();
-            if (count == 0) ASTRA_UNLIKELY
-                return;
+        ASTRA_FORCEINLINE void ForEach(Func&& func) { ForEachBody<false, Components...>(std::forward<Func>(func)); }
 
-            ForEachImpl<Components...>(chunk.get(), count, std::forward<Func>(func), std::index_sequence_for<Components...>{});
-        }
+        // Same loop as ForEach, plus the coarse change-detection stamp: every
+        // mutable-yield column (non-const, has storage) of every visited chunk is
+        // stamped with Now() BEFORE the chunk is iterated (spec §3.3 row 1). A view
+        // whose yields are all const instantiates the plain loop (empty column list).
+        template<Component... Components, std::invocable<Entity, Components&...> Func>
+        ASTRA_FORCEINLINE void ForEachStamped(Func&& func) { ForEachBody<true, Components...>(std::forward<Func>(func)); }
+
+        template<Component... Components, std::invocable<Entity, Components&...> Func>
+        ASTRA_FORCEINLINE void ForEachChunk(size_t chunkIndex, Func&& func) { ForEachChunkBody<false, Components...>(chunkIndex, std::forward<Func>(func)); }
+
+        template<Component... Components, std::invocable<Entity, Components&...> Func>
+        ASTRA_FORCEINLINE void ForEachChunkStamped(size_t chunkIndex, Func&& func) { ForEachChunkBody<true, Components...>(chunkIndex, std::forward<Func>(func)); }
 
         void EnsureCapacity(size_t additionalCount)
         {
@@ -1909,7 +1874,100 @@ namespace Astra
                 func(entities[i], GetComponentValue<Components>(std::get<Is>(arrays), i)...);
             }
         }
-        
+
+        // ---- Coarse change-detection stamp for the iteration entry points ----
+        // Column ordinals of the mutable-yield components, resolved once per call.
+        // -1 for a const or tag component (skipped by StampMutableColumns).
+        template<typename... Components>
+        ASTRA_FORCEINLINE void ResolveMutableColumns(int* cols) const noexcept
+        {
+            size_t i = 0;
+            ((cols[i++] = Detail::IsMutableYield<Components>
+                ? m_columnMeta.idToColumn[TypeID<std::remove_const_t<Components>>::Value()]
+                : -1), ...);
+        }
+
+        template<size_t N>
+        ASTRA_FORCEINLINE static void StampMutableColumns(ArchetypeChunk* chunk, const int (&cols)[N], Tick now) noexcept
+        {
+            for (size_t i = 0; i < N; ++i)
+                if (cols[i] >= 0) chunk->StampColumn(cols[i], now);
+        }
+
+        // The one chunk loop behind ForEach (Stamp=false) and ForEachStamped
+        // (Stamp=true), so the stamped and unstamped iteration cannot drift. With
+        // Stamp=false, or when every yield is const/tag, the stamp block is not
+        // instantiated and this is the pre-existing loop byte for byte.
+        template<bool Stamp, Component... Components, typename Func>
+        ASTRA_FORCEINLINE void ForEachBody(Func&& func)
+        {
+            if (m_entityCount == 0 || m_chunks.empty()) ASTRA_UNLIKELY
+                return;
+
+            constexpr bool AnyMutable = (Detail::IsMutableYield<Components> || ...);
+            [[maybe_unused]] int cols[sizeof...(Components) == 0 ? 1 : sizeof...(Components)];
+            [[maybe_unused]] Tick now = 0;
+            if constexpr (Stamp && AnyMutable)
+            {
+                ResolveMutableColumns<Components...>(cols);
+                now = Now();
+            }
+
+            const size_t numChunks = m_chunks.size();
+
+            for (size_t i = 0; i < numChunks; ++i)
+            {
+                auto& chunk = m_chunks[i];
+                const size_t count = chunk->GetCount();
+                if (count == 0) ASTRA_UNLIKELY
+                {
+                    continue;
+                }
+
+                // Prefetch next chunk's data while processing current chunk
+                if (i + 1 < numChunks) ASTRA_LIKELY
+                {
+                    auto& nextChunk = m_chunks[i + 1];
+                    if (nextChunk->GetCount() > 0)
+                    {
+                        // Prefetch the entity array and first component array of next chunk
+                        Simd::Ops::PrefetchT0(&nextChunk->GetEntities()[0]);
+                        if constexpr (sizeof...(Components) > 0)
+                        {
+                            using FirstComponent = std::tuple_element_t<0, std::tuple<Components...>>;
+                            Simd::Ops::PrefetchT0(nextChunk->GetComponentArray<FirstComponent>());
+                        }
+                    }
+                }
+
+                if constexpr (Stamp && AnyMutable)
+                    StampMutableColumns(chunk.get(), cols, now);
+
+                ForEachImpl<Components...>(chunk.get(), count, std::forward<Func>(func), std::index_sequence_for<Components...>{});
+            }
+        }
+
+        template<bool Stamp, Component... Components, typename Func>
+        ASTRA_FORCEINLINE void ForEachChunkBody(size_t chunkIndex, Func&& func)
+        {
+            if (chunkIndex >= m_chunks.size()) ASTRA_UNLIKELY
+                return;
+
+            auto& chunk = m_chunks[chunkIndex];
+            const size_t count = chunk->GetCount();
+            if (count == 0) ASTRA_UNLIKELY
+                return;
+
+            constexpr bool AnyMutable = (Detail::IsMutableYield<Components> || ...);
+            if constexpr (Stamp && AnyMutable)
+            {
+                int cols[sizeof...(Components)];
+                ResolveMutableColumns<Components...>(cols);
+                StampMutableColumns(chunk.get(), cols, Now());
+            }
+            ForEachImpl<Components...>(chunk.get(), count, std::forward<Func>(func), std::index_sequence_for<Components...>{});
+        }
+
         std::pair<size_t, bool> GetOrCreateChunk()
         {
             if (!m_initialized) ASTRA_UNLIKELY
