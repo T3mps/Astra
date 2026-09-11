@@ -427,7 +427,15 @@ namespace Astra
      * Any mutable access marks the entity's `changed` tick with the current run's tick
      * (one store); Read() never marks. The implicit `T&` conversion keeps existing
      * `[](T& t)` lambdas compiling unchanged -- at the cost of marking even when the
-     * body only reads (accepted false positive; use Read() when it matters).
+     * body only reads (accepted false positive; use Read() when it matters). A generic
+     * `[](auto& t)` parameter receives the Mut<T> itself: use `t->`, `t.Write()` or
+     * `t.Read()` there.
+     *
+     * The tick is captured BY VALUE when the handle is created (the view walk's or
+     * Get()'s tick). A Mut retained across Registry::AdvanceTick() therefore marks
+     * with the tick current when it was handed out, which equals the chunk's stamp
+     * from that pass -- a reader whose lastRun is that tick misses the write. Do not
+     * retain a Mut across frames; mark later writes with Registry::Modified<T>.
      */
     template<typename T>
     class Mut

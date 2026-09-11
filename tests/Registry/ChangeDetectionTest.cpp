@@ -1075,3 +1075,159 @@ TEST(ChangeDetectionStamp, RelationTraversalStampsNonConstYieldsOnly)
     EXPECT_EQ(CountSince(v, 8), 1u);   // grand, via the link walk at 9
     EXPECT_EQ(CountSince(v, 4), 5u);   // the four kids + grand, via the descendant walk at 5
 }
+
+// ---- Final review wave: runtime parallel paths, Ruling B, Added<untracked> ----
+
+#include "../Support/TestWorkerPool.hpp"
+
+TEST(ChangeDetectionMut, ParallelForEachOnRealSchedulerMarksTrackedEntities)
+{
+    // Every other ParallelForEach in this file runs on a Registry with no work
+    // scheduler (serial fallback). This one injects a real worker pool and proves
+    // the dispatch happened (calls > 0), so the worker-side stamp + Mut<T> mark
+    // paths (ParallelForEachChunkWithOptional, VisitChunkFiltered on a worker)
+    // are exercised at runtime, not only by inspection.
+    struct CountingScheduler final : Astra::IWorkScheduler
+    {
+        std::shared_ptr<Astra::Testing::TestWorkerPool> inner = std::make_shared<Astra::Testing::TestWorkerPool>();
+        std::atomic<int> calls{0};
+        void ParallelFor(size_t count, size_t minBatch, Mosaic::FunctionRef<void(size_t, size_t, uint32_t)> fn) override
+        {
+            calls.fetch_add(1);
+            inner->ParallelFor(count, minBatch, fn);
+        }
+        uint32_t WorkerCount() const noexcept override { return inner->WorkerCount(); }
+    };
+    auto sched = std::make_shared<CountingScheduler>();
+    Astra::Registry::Config config;
+    config.workScheduler = sched;
+    Astra::Registry reg(config);
+    AdvanceTo(reg, 2);
+
+    // Enough entities AND chunks to clear View's parallel thresholds
+    // (MIN_ENTITIES_FOR_PARALLEL = 1024, MIN_CHUNKS_FOR_PARALLEL = 8).
+    constexpr size_t N = 20000;
+    std::vector<Astra::Entity> ents(N);
+    ASSERT_EQ((reg.CreateEntities<TrackedPos, Position>(N, std::span{ents})), N);
+    auto* arch = reg.GetArchetypeManager()->GetEntityRecord(ents[0])->archetype;
+    ASSERT_GE(arch->GetChunks().size(), 8u);
+    const auto& cm = arch->GetColumnMeta();
+    const int trackedCol = cm.idToColumn[Astra::TypeID<TrackedPos>::Value()];
+    const int posCol     = cm.idToColumn[Astra::TypeID<Position>::Value()];
+
+    AdvanceTo(reg, 7);
+    const int callsBefore = sched->calls.load();
+    reg.CreateView<TrackedPos, const Position>().ParallelForEach([](TrackedPos& p, const Position&) { p.x = 1.0f; });
+    EXPECT_GT(sched->calls.load(), callsBefore);   // really fanned out to the pool
+    for (auto& chunk : arch->GetChunks())
+    {
+        EXPECT_EQ(chunk->GetColumnVersion(trackedCol), 7u);   // coarse stamp from the worker
+        EXPECT_EQ(chunk->GetColumnVersion(posCol), 2u);       // const yield: untouched
+    }
+    size_t marked = 0;
+    for (auto e : ents) if (TicksOf<TrackedPos>(reg, e).changed == 7u) ++marked;
+    EXPECT_EQ(marked, N);                                     // every entity marked exactly at the pass's tick
+    auto reader = reg.CreateView<const TrackedPos, Astra::Changed<TrackedPos>>();
+    EXPECT_EQ(CountSince(reader, 6), N);
+    EXPECT_EQ(CountSince(reader, 7), 0u);
+
+    // Enableable + tracked on the enabled-filtered worker path (VisitChunkFiltered
+    // <true> on a worker): evens disabled -> a parallel non-const pass marks ONLY the
+    // enabled (odd) entities; disabled ones keep their creation tick. Sized above the
+    // parallel thresholds so the pass does not silently take the serial fallback.
+    constexpr size_t M = 3000;
+    std::vector<Astra::Entity> vel(M);
+    ASSERT_EQ((reg.CreateEntities<TrackedVel, Position>(M, std::span{vel})), M);   // created at tick 7
+    auto* velArch = reg.GetArchetypeManager()->GetEntityRecord(vel[0])->archetype;
+    ASSERT_GE(velArch->GetChunks().size(), 8u);
+    for (size_t i = 0; i < M; i += 2) ASSERT_TRUE(reg.SetEnabled<TrackedVel>(vel[i], false));
+
+    AdvanceTo(reg, 8);
+    const int callsBefore2 = sched->calls.load();
+    reg.CreateView<TrackedVel, const Position>().ParallelForEach([](TrackedVel& v, const Position&) { v.dx = 1.0f; });
+    EXPECT_GT(sched->calls.load(), callsBefore2);
+    size_t oddMarked = 0, evenUntouched = 0;
+    for (size_t i = 0; i < M; ++i)
+    {
+        const Tick changed = TicksOf<TrackedVel>(reg, vel[i]).changed;
+        if (i % 2 == 0) { if (changed == 7u) ++evenUntouched; }
+        else            { if (changed == 8u) ++oddMarked; }
+    }
+    EXPECT_EQ(oddMarked, M / 2);
+    EXPECT_EQ(evenUntouched, M / 2);
+    const int velCol = velArch->GetColumnMeta().idToColumn[Astra::TypeID<TrackedVel>::Value()];
+    for (auto& chunk : velArch->GetChunks())
+        EXPECT_EQ(chunk->GetColumnVersion(velCol), 8u);       // every visited chunk stamped (Ruling F)
+}
+
+TEST(ChangeDetectionFilter, ChangeRejectedChunkIsNotStampedByANonConstYield)
+{
+    // Ruling B's load-bearing half: a chunk the change filter REJECTS is not
+    // "visited" and must not be stamped by the view's non-const yield -- otherwise
+    // the read-modify-write shape `CreateView<T, Changed<T>>` would stamp the whole
+    // world every frame and see it all again next frame, forever.
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(2000);
+    ASSERT_EQ((reg.CreateEntities<Position, Velocity>(2000, std::span{ents})), 2000u);
+    auto* arch = reg.GetArchetypeManager()->GetEntityRecord(ents[0])->archetype;
+    const auto& chunks = arch->GetChunks();
+    ASSERT_GT(chunks.size(), 1u);
+    const int posCol = arch->GetColumnMeta().idToColumn[Astra::TypeID<Position>::Value()];
+
+    AdvanceTo(reg, 3);
+    ASSERT_EQ(reg.GetArchetypeManager()->GetEntityRecord(ents[0])->location.GetChunkIndex(), 0u);
+    ASSERT_TRUE(reg.Modified<Position>(ents[0]));            // chunk 0 -> version 3
+    const size_t chunk0Count = chunks[0]->GetCount();
+
+    AdvanceTo(reg, 4);
+    size_t visited = 0;
+    reg.CreateView<Position, Astra::Changed<Position>>().Since(2).ForEach([&](Position&) { ++visited; });
+    EXPECT_EQ(visited, chunk0Count);                          // only chunk 0 passed the filter
+    EXPECT_EQ(chunks[0]->GetColumnVersion(posCol), 4u);       // visited + non-const yield => stamped
+    for (size_t c = 1; c < chunks.size(); ++c)
+        EXPECT_EQ(chunks[c]->GetColumnVersion(posCol), 2u);   // rejected => NOT stamped
+
+    // A downstream reader agrees: only chunk 0 is "changed since 3".
+    auto reader = reg.CreateView<const Position, Astra::Changed<Position>>();
+    EXPECT_EQ(CountSince(reader, 3), chunk0Count);
+    EXPECT_EQ(CountSince(reader, 2), chunk0Count);
+    // ...and the RMW view itself settles: since its own tick, nothing is newer.
+    AdvanceTo(reg, 5);
+    visited = 0;
+    reg.CreateView<Position, Astra::Changed<Position>>().Since(4).ForEach([&](Position&) { ++visited; });
+    EXPECT_EQ(visited, 0u);
+    for (size_t c = 1; c < chunks.size(); ++c)
+        EXPECT_EQ(chunks[c]->GetColumnVersion(posCol), 2u);   // still untouched
+}
+
+TEST(ChangeDetectionFilter, AddedOnUntrackedTypeIsChunkGranularAndFollowsAnyStamp)
+{
+    // For an UNTRACKED T there is only the per-column chunk version, which every
+    // write path stamps -- so Added<T> passes on ANY stamp of T's column, not only
+    // on an add: Added<untracked T> == Changed<untracked T>, chunk-granular.
+    // Exact add detection needs AstraChangeTracked (per-entity `added` tick,
+    // pinned by ChangeDetectionTrackedFilter.AddedIsPerEntityAndIgnoresLaterChanges).
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(2000);
+    ASSERT_EQ((reg.CreateEntities<Position, Velocity>(2000, std::span{ents})), 2000u);
+    auto* arch = reg.GetArchetypeManager()->GetEntityRecord(ents[0])->archetype;
+    ASSERT_GT(arch->GetChunks().size(), 1u);
+
+    auto added   = reg.CreateView<const Velocity, Astra::Added<Velocity>>();
+    auto changed = reg.CreateView<const Velocity, Astra::Changed<Velocity>>();
+    EXPECT_EQ(CountSince(added, 2), 0u);
+
+    AdvanceTo(reg, 3);
+    ASSERT_TRUE(reg.Modified<Velocity>(ents[0]));            // a WRITE, not an add
+    const size_t chunk0Count = arch->GetChunks()[0]->GetCount();
+    EXPECT_EQ(CountSince(added, 2), chunk0Count);             // fires: the whole chunk, on a plain write
+    EXPECT_EQ(CountSince(changed, 2), chunk0Count);           // identical to Changed<Velocity>
+    EXPECT_EQ(CountSince(added, 3), 0u);
+
+    AdvanceTo(reg, 4);
+    reg.CreateView<Velocity>().ForEach([](Velocity&) {});     // a non-const view walk stamps every chunk...
+    EXPECT_EQ(CountSince(added, 3), 2000u);                   // ...and Added<Velocity> reports everything
+    EXPECT_EQ(CountSince(changed, 3), 2000u);
+}

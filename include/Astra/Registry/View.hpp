@@ -611,6 +611,14 @@ namespace Astra
          * and are invalidated by any structural change (create/destroy/add/remove/
          * defragment) — do not retain them across one. In-place value edits through
          * the pointers are fine.
+         *
+         * Change detection: a NON-CONST requested component stamps the entity's chunk
+         * (that column's coarse version) on the way out, even on a `const View` -- and
+         * a change-tracked one is handed out as Mut<T>, which marks the entity on use.
+         * The Mut<T> carries the tick current when Get() ran: a handle retained across
+         * AdvanceTick() marks with that older tick, so do not keep one across frames
+         * (mark later writes with Registry::Modified<T>). All-const requests stamp
+         * nothing.
          */
         ASTRA_NODISCARD Result<AccessTuple, QueryError> Get(Entity e) const
         {
@@ -634,8 +642,11 @@ namespace Astra
          * otherwise Ok(Get(the one match)). Non-const because it reuses the
          * ForEach walk (which calls EnsureArchetypes()).
          *
-         * Change detection (spec §3.3 row 2, Ruling E): only the RETURNED entity's
-         * chunk is stamped, by Get(); the count/locate walk below runs UNSTAMPED
+         * Change detection (spec §3.3 row 2, Ruling E): a non-const requested
+         * component stamps the returned entity's chunk (and a change-tracked one
+         * comes back as Mut<T>, marking on use) -- exactly Get()'s behaviour, because
+         * the one match is materialised through Get(). Only the RETURNED entity's
+         * chunk is stamped; the count/locate walk below runs UNSTAMPED
          * (ForEachBody<false>) because counting is not a write -- so nothing is
          * marked on the Empty / MultipleMatched paths, and no chunk other than
          * the returned entity's is marked on success.

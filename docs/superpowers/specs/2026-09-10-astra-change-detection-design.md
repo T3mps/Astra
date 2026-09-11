@@ -256,8 +256,8 @@ the shadow arrays, const the render view) is a separate movement afterwards.
 The plan's Global Constraints flagged five deviations from this spec's literal text ahead of
 implementation; all five shipped exactly as flagged, and are recorded here against the sections
 they touch. Five further controller rulings were made during implementation to resolve cases this
-spec under-specified; they are additive clarifications, not deviations from any explicit rule
-above.
+spec under-specified, and two more (M, O) in the post-review fix wave; they are additive
+clarifications, not deviations from any explicit rule above.
 
 **Deviation 1 (§3.1/§3.5 — Task 5).** Tick advance is once per parallel execution-plan GROUP, not
 once per individual system run. Systems within one group have no read/write conflict by
@@ -326,6 +326,10 @@ registry-switch check alone cannot catch: a `Registry` destroyed and a new one c
 same memory address (or simply restarted at tick 1, the common case for two freshly-constructed
 registries) would otherwise leave every cached `lastRun` looking newer than or equal to the new
 registry's ticks, silently hiding the new registry's first frame of changes from every system.
+Known residual (final review): a registry re-created at the same address that has ALREADY been
+ticked past every cached `lastRun` by another driver before this scheduler runs again evades both
+the pointer-identity check and this monotonicity check; closing it needs a registry generation id
+(follow-up), not a tick comparison.
 
 **Ruling I (§3.6, iteration).** Range-for over a view that yields a change-tracked component
 non-const is a compile-time error, not a silent under-report. The range-for iterator hands back a
@@ -333,3 +337,33 @@ plain `T&` (unlike `ForEach`, which hands out `Mut<T>`) and has no hook on which
 so — rather than let a tracked type go through range-for and quietly never mark — it is refused at
 compile time, naming `ForEach` (yields `Mut<T>`) or a `const T` request as the fix. A range-for
 over `const T` (tracked or not) is unaffected and marks nothing, by design.
+
+**Ruling M (§1/§3.3, Relations traversals — final review Important #1, fix wave).** The write-path
+inventory in §3.3 missed one path that hands out live memory: `Registry::GetRelations<C...>(e)`'s
+`ForEachChild`/`ForEachDescendant`/`ForEachAncestor`/`ForEachLink` and `ParallelForEachDescendant`
+yield every required `C` as `C&`. They now yield through the same rule as views: a non-const,
+non-tag `C` is fetched via `ArchetypeManager::GetComponentMut<C>` (stamps `C`'s column version in
+the entity's chunk; marks the entity's `changed` tick when `C` is change-tracked), a `const C`
+or a tag through the plain non-stamping read. Cost: one extra record lookup per non-const yield
+on a cold path; the parallel variant issues the same stores from workers (same-value column
+stamps, one owner per entity's ticks — the pattern `View::ParallelForEach` already relies on).
+The table in §3.3 should be read with the row "Relations traversal yields `C&`: stamps (and marks
+a tracked `C`); `const C&`: never". A raw pointer or reference kept past the traversal still
+needs `Registry::Modified<T>` for a later write, as with views.
+
+**Ruling O (§2.7 zero-cost, `EntityLocation` — perf triage, fix wave).** The
+`add_component`/`remove_component` regression the bench gate recorded (+8 ns / +2.7 ns per op
+against the branch base) was not the stamp stores: the stamp + per-entity tick init pushed
+`Archetype::AllocateEntitySlot` past MSVC's inline budget at both hot callers, and once out of
+line the `EntityLocation` it returns — a struct with user-provided constructors — came back
+through memory as two 4-byte stores that the caller's 8-byte reload could not store-forward.
+Mitigation: `EntityLocation` is now an aggregate (default member initialisers supply the
+sentinel; `Create` brace-initialises; layout, accessors, comparisons unchanged; `static_assert`s
+pin aggregate/trivially-copyable/8 bytes), so it is returned in a register with one store.
+Measured on the reduced harness: add 48.7 → 43.9 ns, remove 29.8 → 28.9 ns. Residual ≈ +2.7 ns
+(+7 %) on add and ≈ +2.4 ns on remove vs the branch base is the out-of-line call plus the stamp
+instructions themselves — the structural cost of "stamp every column of the destination chunk on
+every structural move" — and stays. Not done, by ruling: no `ASTRA_FORCEINLINE` on
+`AllocateEntitySlot` (it only relocates the out-of-line boundary and cascades), no hoisting of the
+stamp loop's locals (MSVC turns the loop into a `rep stosd` fill, +12–15 ns), no per-chunk
+stamp memo (buys 0–2 ns and adds a tick-wrap corner case).
