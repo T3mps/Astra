@@ -1186,6 +1186,14 @@ namespace Astra
             archetype->m_totalCapacity = 0;
             archetype->m_entityCount = 0;
 
+            // Untrusted-load (2026-09-11 grading finding S1): m_entityCount is
+            // derived from what the chunks actually hold, never taken from the
+            // header. The header's entityCount is a cross-check only -- a
+            // disagreement means a crafted or corrupted archive, and it is
+            // refused here rather than caught by the trailing checksum, because
+            // Defragment/CompactChunks size their work from this field.
+            uint64_t chunkEntitySum = 0;
+
             // Read each chunk's data
             for (uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex)
             {
@@ -1293,9 +1301,14 @@ namespace Astra
                 }
 
                 // AppendChunk already installed the chunk in archetype->m_chunks.
+                chunkEntitySum += chunkEntityCount;
             }
 
-            archetype->m_entityCount = static_cast<size_t>(entityCount);
+            if (chunkEntitySum != entityCount) ASTRA_UNLIKELY
+            {
+                return ResultType::Err(SerializationError::CorruptedData);
+            }
+            archetype->m_entityCount = static_cast<size_t>(chunkEntitySum);
 
             return ResultType::Ok(std::move(archetype));
         }

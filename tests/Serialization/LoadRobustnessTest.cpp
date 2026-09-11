@@ -1061,3 +1061,114 @@ TEST(LoadRobustness, EntityManagerRecycledIdSegmentIndexExplosionIsRejected)
     auto result = Astra::EntityManager::Deserialize(reader);
     EXPECT_TRUE(result.IsErr());   // must fail cleanly -- no id re-enters circulation to explode later
 }
+
+// 2026-09-11 grading finding S1: Archetype::Deserialize rebuilt every chunk from
+// its own validated chunkEntityCount but then assigned m_entityCount from the
+// HEADER's wire value, and ArchetypeManager::Deserialize read the trailing
+// per-archetype count "for validation" and discarded it. A crafted archive could
+// therefore leave m_entityCount disagreeing with what the chunks hold, and
+// Registry::Defragment trusts that field (it frees an archetype whose count reads
+// 0 and sizes compaction from it). Both counts must agree with the chunk sum or
+// the load is refused.
+//
+// Layout: same empty-registry buffer as RootArchetypeEntitiesPerChunkUnboundedIsRejected.
+// The root archetype record is: index(u32), mask, m_entityCount(u64)  <-- header count,
+// maxChunkEntityCount(u64), chunkCount(u32)=1, descriptorCount(u32)=0,
+// chunk[0].entityCount(u32)=0, then the manager's trailing entityCount(u64).
+namespace
+{
+    struct EmptyRootArchetypeOffsets
+    {
+        size_t headerCount;     // Archetype::Serialize's m_entityCount
+        size_t trailingCount;   // ArchetypeManager::Serialize's "for validation" count
+    };
+
+    EmptyRootArchetypeOffsets LocateEmptyRootArchetypeCounts(const std::vector<std::byte>& full)
+    {
+        using IDType = Astra::EntityManager::IDType;
+        constexpr size_t kHeaderSize = 32;
+        constexpr size_t kEntityManagerBlockSize =
+            3 * sizeof(IDType) + sizeof(float) + sizeof(bool) + sizeof(uint64_t) +
+            sizeof(IDType) + sizeof(uint32_t) + sizeof(uint32_t);
+        constexpr size_t kArchetypeManagerHeaderSize = sizeof(uint32_t) + sizeof(uint32_t);
+        constexpr size_t kArchetypeIndexSize = sizeof(uint32_t);
+        constexpr size_t kMaskSize = Astra::ComponentMask::WORD_COUNT * sizeof(uint64_t);
+        const size_t headerCount = kHeaderSize + kEntityManagerBlockSize + kArchetypeManagerHeaderSize +
+                                   kArchetypeIndexSize + kMaskSize;
+        const size_t maxChunk    = headerCount + sizeof(uint64_t);
+        const size_t chunkCount  = maxChunk + sizeof(uint64_t);
+        const size_t descCount   = chunkCount + sizeof(uint32_t);
+        const size_t chunk0Count = descCount + sizeof(uint32_t);
+        const size_t trailing    = chunk0Count + sizeof(uint32_t);
+        EXPECT_GE(full.size(), trailing + sizeof(uint64_t));
+
+        // Sanity-check every field on the path so a wire-format shift fails loudly
+        // instead of corrupting the wrong bytes.
+        uint64_t v64 = 0; uint32_t v32 = 0;
+        std::memcpy(&v64, full.data() + headerCount, sizeof(v64)); EXPECT_EQ(v64, 0u);   // empty root: 0 entities
+        std::memcpy(&v64, full.data() + maxChunk,    sizeof(v64)); EXPECT_EQ(v64, 1u);   // floored max chunk count
+        std::memcpy(&v32, full.data() + chunkCount,  sizeof(v32)); EXPECT_EQ(v32, 1u);   // one (empty) chunk
+        std::memcpy(&v32, full.data() + descCount,   sizeof(v32)); EXPECT_EQ(v32, 0u);   // no descriptors
+        std::memcpy(&v32, full.data() + chunk0Count, sizeof(v32)); EXPECT_EQ(v32, 0u);   // chunk holds 0
+        std::memcpy(&v64, full.data() + trailing,    sizeof(v64)); EXPECT_EQ(v64, 0u);   // trailing count 0
+        return {headerCount, trailing};
+    }
+}
+
+TEST(LoadRobustness, ArchetypeHeaderEntityCountDisagreeingWithChunksIsRejected)
+{
+    Astra::Registry reg;
+    auto saved = reg.Save();
+    ASSERT_TRUE(saved.IsOk());
+    const std::vector<std::byte> full = std::move(*saved.GetValue());
+    const auto off = LocateEmptyRootArchetypeCounts(full);
+    if (::testing::Test::HasFailure()) return;
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+    {
+        auto clean = Astra::Registry::Load(full, cr);
+        ASSERT_TRUE(clean.IsOk()) << "precondition: the uncorrupted buffer must load (error "
+                                  << static_cast<int>(*clean.GetError()) << ")";
+    }
+
+    // The chunks hold 0 entities; the header claims 7.
+    const uint64_t corrupted = 7;
+    std::vector<std::byte> c = full;
+    std::memcpy(c.data() + off.headerCount, &corrupted, sizeof(corrupted));
+
+    // The archive checksum is verified only at the END of Registry::Load, after
+    // every archetype has already been rebuilt -- so "Load fails" alone proves
+    // nothing (it failed on the checksum even before the fix, with m_entityCount
+    // already poisoned). The count check must refuse FIRST, with CorruptedData.
+    auto r = Astra::Registry::Load(c, cr);
+    ASSERT_TRUE(r.IsErr());
+    EXPECT_EQ(*r.GetError(), Astra::SerializationError::CorruptedData)
+        << "must be refused by the archetype count check, not caught later by the checksum";
+}
+
+TEST(LoadRobustness, ArchetypeTrailingEntityCountDisagreeingWithChunksIsRejected)
+{
+    Astra::Registry reg;
+    auto saved = reg.Save();
+    ASSERT_TRUE(saved.IsOk());
+    const std::vector<std::byte> full = std::move(*saved.GetValue());
+    const auto off = LocateEmptyRootArchetypeCounts(full);
+    if (::testing::Test::HasFailure()) return;
+
+    auto cr = std::make_shared<Astra::ComponentRegistry>();
+    {
+        auto clean = Astra::Registry::Load(full, cr);
+        ASSERT_TRUE(clean.IsOk()) << "precondition: the uncorrupted buffer must load (error "
+                                  << static_cast<int>(*clean.GetError()) << ")";
+    }
+
+    // Header and chunks agree (0); the manager's trailing count claims 7.
+    const uint64_t corrupted = 7;
+    std::vector<std::byte> c = full;
+    std::memcpy(c.data() + off.trailingCount, &corrupted, sizeof(corrupted));
+
+    auto r = Astra::Registry::Load(c, cr);
+    ASSERT_TRUE(r.IsErr());
+    EXPECT_EQ(*r.GetError(), Astra::SerializationError::CorruptedData)
+        << "must be refused by the manager's trailing-count check, not caught later by the checksum";
+}

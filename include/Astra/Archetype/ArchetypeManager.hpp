@@ -1034,6 +1034,13 @@ namespace Astra
                 // Read entity count for validation
                 uint64_t entityCount;
                 reader(entityCount);
+                // S1 (2026-09-11): this count was read and discarded. It must agree
+                // with the archetype just rebuilt (whose own count is now the chunk
+                // sum, verified in Archetype::Deserialize); refuse the load otherwise.
+                if (reader.HasError() || entityCount != archetype->GetEntityCount()) ASTRA_UNLIKELY
+                {
+                    return false;
+                }
 
                 if (i == 0)
                 {
