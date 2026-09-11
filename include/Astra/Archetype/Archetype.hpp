@@ -149,6 +149,8 @@ namespace Astra
                 offset = (offset + CACHE_LINE_SIZE - 1) & ~(CACHE_LINE_SIZE - 1);
                 offset += static_cast<size_t>(m_columnMeta.columns[c].stride) * cap;
             }
+            offset = (offset + 7) & ~size_t(7);                                  // version region
+            offset += static_cast<size_t>(m_columnMeta.columnCount) * sizeof(Tick);
             const size_t words = (cap + 63) / 64;
             for (uint16_t e = 0; e < m_columnMeta.enableableColumnCount; ++e)
             {
@@ -278,6 +280,11 @@ namespace Astra
                 ? (nonEmptyComponents - 1) * CACHE_LINE_SIZE
                 : 0;
 
+            // Change-detection version region (ArchetypeChunk::InitializeColumns):
+            // 8-byte align slack + one Tick per storage column. Folded into the
+            // overhead so ComputeCapacityForBytes' estimate stays a guaranteed fit.
+            alignmentOverhead += 8 + nonEmptyComponents * sizeof(Tick);
+
             m_perEntitySize = perEntitySize;
             m_alignmentOverhead = alignmentOverhead;
 
@@ -322,7 +329,7 @@ namespace Astra
         {
             return AddEntityInternal(entity, [&](auto& chunk, Entity e)
             {
-                return chunk->AddEntity(e);
+                return chunk->AddEntity(e, Now());
             });
         }
         
@@ -331,7 +338,7 @@ namespace Astra
         {
             return AddEntityInternal(entity, [&](auto& chunk, Entity e)
             {
-                return chunk->AddEntityWithComponents(e, std::forward<Components>(components)...);
+                return chunk->AddEntityWithComponents(e, Now(), std::forward<Components>(components)...);
             });
         }
         
@@ -384,7 +391,7 @@ namespace Astra
                     size_t toAdd = std::min(available, count - entityIndex);
                     size_t startIndex = chunk->GetCount();
 
-                    chunk->BatchAddEntities(entities.subspan(entityIndex, toAdd));
+                    chunk->BatchAddEntities(entities.subspan(entityIndex, toAdd), Now());
 
                     for (size_t i = 0; i < toAdd; ++i)
                     {
@@ -490,6 +497,7 @@ namespace Astra
                                  entities.begin() + produced,
                                  entities.begin() + produced + runLen);
                 chunk->SetCount(startSlot + runLen);
+                chunk->StampAllColumns(Now());
 
                 // Hoist the run's typed column bases ONCE. Empty (tag) components yield
                 // a null base -- never dereferenced; their placement-new is elided below.
@@ -965,7 +973,7 @@ namespace Astra
             }
         }
         
-        static Result<std::unique_ptr<Archetype>, SerializationError> Deserialize(BinaryReader& reader, const std::vector<ComponentDescriptor>& registryDescriptors, ArchetypeChunkPool* componentPool = nullptr)
+        static Result<std::unique_ptr<Archetype>, SerializationError> Deserialize(BinaryReader& reader, const std::vector<ComponentDescriptor>& registryDescriptors, ArchetypeChunkPool* componentPool = nullptr, const Tick* tickSource = nullptr)
         {
             using ResultType = Result<std::unique_ptr<Archetype>, SerializationError>;
 
@@ -1144,6 +1152,7 @@ namespace Astra
             // the untrusted raw disk mask.
             auto archetype = std::make_unique<Archetype>(localMask);
             archetype->m_chunkPool = componentPool;
+            archetype->SetTickSource(tickSource);
             archetype->Initialize(descriptors);
 
             if (!archetype->IsInitialized())
@@ -1211,7 +1220,7 @@ namespace Astra
                 {
                     Entity entity;
                     reader(entity);
-                    chunk->AddEntity(entity);
+                    chunk->AddEntity(entity, archetype->Now());
                 }
 
                 if (reader.HasError())
@@ -1385,6 +1394,12 @@ namespace Astra
                         }
                     }
 
+                    // Change-detection carry (plan deviation 4): the fresh dst chunk is at
+                    // version 0; fold in the source chunk's version per column so a recent
+                    // write is not lost by repacking. Ordinals match (same archetype).
+                    for (uint16_t c = 0; c < m_columnMeta.columnCount; ++c)
+                        dst->FoldColumnVersion(c, src->GetColumnVersion(c));
+
                     dst->SetCount(dst->GetCount() + run);
                     srcIndex += run;
                     dstIndex += run;
@@ -1429,6 +1444,9 @@ namespace Astra
         ASTRA_NODISCARD const ArchetypeColumnMeta& GetColumnMeta() const noexcept { return m_columnMeta; }
 
         void SetComponentPool(ArchetypeChunkPool* pool) { m_chunkPool = pool; }
+
+        void SetTickSource(const Tick* source) noexcept { m_tickSource = source; }
+        ASTRA_NODISCARD Tick Now() const noexcept { return m_tickSource ? *m_tickSource : Tick{1}; }
 
         ASTRA_NODISCARD Archetype* GetAddEdge(ComponentID id) const noexcept
         {
@@ -1760,6 +1778,7 @@ namespace Astra
                         dstLocations.push_back(EntityLocation::Create(chunkIndex, startIndex + i));
                     }
                     chunk->SetCount(chunk->GetCount() + toAdd);
+                    chunk->StampAllColumns(Now());
 
                     entityIndex += toAdd;
 
@@ -1943,6 +1962,7 @@ namespace Astra
             size_t entityIndex = chunk->GetCount();
             chunk->GetEntities().push_back(entity);   // capacity pre-reserved at chunk creation: never reallocates
             chunk->SetCount(entityIndex + 1);
+            chunk->StampAllColumns(Now());   // the destination of every single-entity move (MoveEntityFrom/MoveAndAdd/MoveAndAddByID) is stamped here
 
             ++m_entityCount;
             
@@ -2009,6 +2029,8 @@ namespace Astra
                         destChunk->SetDisabled(c, destEntityIndex, srcChunk->IsDisabled(c, srcEntityIndex));
                         srcChunk->SetDisabled(c, srcEntityIndex, false);
                     }
+
+                    destChunk->FoldColumnVersion(c, srcChunk->GetColumnVersion(c));
                 }
 
                 // Remove entity from source chunk's entity vector
@@ -2041,6 +2063,11 @@ namespace Astra
         size_t m_firstNonFullChunkIndex = 0;  // Track first chunk with available space for O(1) lookup
         bool m_initialized;
         ArchetypeChunkPool* m_chunkPool = nullptr;
+
+        // Change-detection time source: points at the owning ArchetypeManager's
+        // counter (stable: the manager is non-movable). Null for a hand-built
+        // archetype (tests), which then stamps with 1 -- "stamped at least once".
+        const Tick* m_tickSource = nullptr;
 
         // Add/remove transition edges, indexed by ComponentID (< MAX_COMPONENTS).
         // Lazily allocated on first edge; nullptr slot = no cached edge; freed with the archetype.

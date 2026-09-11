@@ -18,6 +18,11 @@ namespace
             // Required: DefaultConstruct() memsets when this is true, instead of
             // calling the (null, in this hand-built descriptor) defaultConstruct fn.
             d.is_trivially_default_constructible = true;
+            // Same rationale for teardown: ~ArchetypeChunk destructs every live
+            // element, and Destruct() only skips the (null here) destruct fn ptr
+            // when the trait says the type is trivially destructible. Needed as
+            // soon as a test leaves an entity live in a hand-built chunk.
+            d.is_trivially_destructible = true;
             return d;
         }();
         Astra::ArchetypeColumnMeta meta;
@@ -160,4 +165,25 @@ TEST(ChunkPoolTest, IsNonCopyableAndNonMovable)
                   "ArchetypeChunkPool must not be move-assignable "
                   "(would dangle outstanding ChunkDeleter back-pointers)");
     SUCCEED();
+}
+
+TEST(ChunkPoolTest, FreshChunkColumnsStartAtNeverAndAddEntityStamps)
+{
+    Astra::ArchetypeChunkPool pool;
+    auto meta = MakeSingleColumnMeta();
+    auto c = pool.CreateChunk(64, pool.GetChunkSize(), &meta);
+    ASSERT_NE(c, nullptr);
+    EXPECT_EQ(c->GetColumnVersion(0), 0u);            // zero-init == never stamped
+    c->AddEntity(Astra::Entity{}, Astra::Tick{7});
+    EXPECT_EQ(c->GetColumnVersion(0), 7u);
+    c->StampColumn(0, 9);
+    EXPECT_EQ(c->GetColumnVersion(0), 9u);
+    c->FoldColumnVersion(0, 4);                        // older: ignored
+    EXPECT_EQ(c->GetColumnVersion(0), 9u);
+    c->FoldColumnVersion(0, 12);                       // newer: taken
+    EXPECT_EQ(c->GetColumnVersion(0), 12u);
+    // The version region sits after the column data, 8-byte aligned, inside the arena.
+    EXPECT_EQ(c->GetColumnVersionOffset() % 8, 0u);
+    EXPECT_GE(c->GetColumnVersionOffset(), c->GetColumnOffset(0) + 16u * 64u);
+    EXPECT_LT(c->GetColumnVersionOffset(), c->GetChunkBytes());
 }

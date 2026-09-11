@@ -17,6 +17,7 @@
 #include "../Container/SmallVector.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/Memory.hpp"
+#include "../Core/Tick.hpp"
 #include "../Core/Tlsf.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Entity/Entity.hpp"
@@ -65,6 +66,7 @@ namespace Astra
             m_count(other.m_count),
             m_entities(std::move(other.m_entities)),
             m_meta(other.m_meta),
+            m_columnVersion(other.m_columnVersion),
             m_chunkSize(other.m_chunkSize)
         {
             // Column is trivially copyable; a memberwise byte copy of the packed
@@ -97,7 +99,7 @@ namespace Astra
             }
         }
 
-        size_t AddEntity(Entity entity)
+        size_t AddEntity(Entity entity, Tick tick = 1)
         {
             ASTRA_ASSERT(m_count < m_capacity, "Chunk is full, cannot add more entities");
             size_t index = m_count++;
@@ -109,6 +111,8 @@ namespace Astra
                 void* ptr = static_cast<std::byte*>(m_columns[c].base) + index * m_columns[c].stride;
                 m_meta->columns[c].descriptor->DefaultConstruct(ptr);
             }
+
+            StampAllColumns(tick);
 
             return index;
         }
@@ -150,7 +154,7 @@ namespace Astra
         
         // Add entity with components constructed directly with values
         template<typename... Components>
-        size_t AddEntityWithComponents(Entity entity, Components&&... components)
+        size_t AddEntityWithComponents(Entity entity, Tick tick, Components&&... components)
         {
             ASTRA_ASSERT(m_count < m_capacity, "Chunk is full, cannot add more entities");
             size_t index = m_count++;
@@ -175,11 +179,13 @@ namespace Astra
             
             // Now construct the provided components with their values
             ((ConstructComponentAt(index, std::forward<Components>(components))), ...);
-            
+
+            StampAllColumns(tick);
+
             return index;
         }
         
-        void BatchAddEntities(std::span<const Entity> entities)
+        void BatchAddEntities(std::span<const Entity> entities, Tick tick = 1)
         {
             size_t count = entities.size();
             ASTRA_ASSERT(m_count + count <= m_capacity, "Batch add would exceed chunk capacity");
@@ -193,6 +199,8 @@ namespace Astra
             }
 
             m_count += count;
+
+            StampAllColumns(tick);
         }
         
         void BatchMoveComponentsFrom(std::span<const size_t> dstIndices, const ArchetypeChunk& srcChunk, std::span<const size_t> srcIndices, const ComponentMask& componentsToMove)
@@ -522,6 +530,50 @@ namespace Astra
             return true;
         }
 
+        // ===================== Change detection: chunk column versions =====================
+        // One Tick per storage column (spec 2026-09-10 §3.2, coarse tier -- every
+        // component pays 4 bytes per chunk per column). `column` is a storage-column
+        // ORDINAL (m_meta->columns index), never a ComponentID. The region is carved
+        // in the chunk arena right after the column data (see InitializeColumns) and
+        // is zero-initialised: version 0 == "never stamped". Stamps are plain stores.
+
+        ASTRA_NODISCARD ASTRA_FORCEINLINE Tick GetColumnVersion(int column) const noexcept
+        {
+            ASTRA_ASSERT(column >= 0 && column < m_meta->columnCount, "column ordinal out of range");
+            return m_columnVersion[column];
+        }
+
+        ASTRA_FORCEINLINE void StampColumn(int column, Tick tick) noexcept
+        {
+            ASTRA_ASSERT(column >= 0 && column < m_meta->columnCount, "column ordinal out of range");
+            m_columnVersion[column] = tick;
+        }
+
+        // Every storage column at once: the structural-write stamp (a slot in this
+        // chunk just received an entity -- create, move, deserialize).
+        ASTRA_FORCEINLINE void StampAllColumns(Tick tick) noexcept
+        {
+            for (uint16_t c = 0; c < m_meta->columnCount; ++c)
+                m_columnVersion[c] = tick;
+        }
+
+        // Same-archetype relocation carry (CompactChunks / MoveEntitiesBetweenChunks):
+        // keep whichever of the two versions is newer so a recently-written entity
+        // that gets repacked into a fresh chunk is never read as unchanged.
+        ASTRA_FORCEINLINE void FoldColumnVersion(int column, Tick other) noexcept
+        {
+            ASTRA_ASSERT(column >= 0 && column < m_meta->columnCount, "column ordinal out of range");
+            if (IsNewer(other, m_columnVersion[column]))
+                m_columnVersion[column] = other;
+        }
+
+        // Inspector accessor: byte offset of the version region within the arena.
+        ASTRA_NODISCARD size_t GetColumnVersionOffset() const
+        {
+            return static_cast<size_t>(reinterpret_cast<const std::byte*>(m_columnVersion) -
+                                       static_cast<const std::byte*>(m_memory));
+        }
+
         ASTRA_NODISCARD bool IsFull() const noexcept { return m_count >= m_capacity; }
         // Byte size of this chunk's arena. Chunks of one archetype no longer
         // share a single size (Phase 2), so memory accounting must sum this
@@ -609,8 +661,18 @@ namespace Astra
                 offset += static_cast<size_t>(m_meta->columns[c].stride) * m_capacity;
             }
 
-            // Second loop: carve one disabled-bit-word region per ENABLEABLE column,
+            // Change-detection (spec 2026-09-10 §3.2): one Tick per storage column,
             // 8-byte aligned, immediately after the column data. Chunk memory was just
+            // zeroed, so every column is born at version 0 == "never stamped" for free.
+            // Archetype::ComputeLayoutBytesForCapacity mirrors this carve byte-for-byte,
+            // and Archetype::Initialize folds its upper bound into m_alignmentOverhead so
+            // the conservative capacity estimate stays a guaranteed fit.
+            offset = (offset + 7) & ~size_t(7);
+            m_columnVersion = reinterpret_cast<Tick*>(static_cast<std::byte*>(m_memory) + offset);
+            offset += static_cast<size_t>(m_meta->columnCount) * sizeof(Tick);
+
+            // Third loop: carve one disabled-bit-word region per ENABLEABLE column,
+            // 8-byte aligned, immediately after the version region. Chunk memory was just
             // zeroed (ctor memset), so every entity is born ENABLED with ZERO writes --
             // the create/batch-create paths gain nothing (invariant 1). Non-enableable
             // columns keep disabledWords == nullptr. The archetype's capacity math has
@@ -667,6 +729,7 @@ namespace Astra
         std::vector<Entity> m_entities;
         const ArchetypeColumnMeta* m_meta{nullptr};  // shared per-archetype metadata (not owned)
         Column m_columns[MAX_COMPONENTS]{};          // [0, m_meta->columnCount) live
+        Tick* m_columnVersion{nullptr};              // arena-carved, [0, columnCount) live; 0 == never
         size_t m_chunkSize;
 
         friend class ArchetypeChunkPool;

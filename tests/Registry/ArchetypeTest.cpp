@@ -1293,10 +1293,17 @@ TEST_F(ArchetypeTest, ChunkCapacityIsExactNotPow2)
     const size_t chunkBytes = chunks[0]->GetChunkBytes();
     const size_t cap = chunks[0]->GetCapacity();
 
-    // A single non-empty column means alignmentOverhead == 0, so the exact fit
-    // is a plain division. Deliberately size-agnostic: this still holds after
+    // A single non-empty column means the cache-line padding estimate is 0, but
+    // change detection folds its version region (8-byte align slack + one Tick
+    // per storage column -- Archetype::Initialize, mirroring
+    // ArchetypeChunk::InitializeColumns) into m_alignmentOverhead, so the exact
+    // fit is the division AFTER subtracting it. Re-derived, not weakened: at a
+    // 4KB chunk the old 341 entities would carve 341*12 -> align8 -> 4096, + 4
+    // version bytes = 4100 > 4096, so 340 (4080 -> align8 -> 4080, + 4 = 4084)
+    // is the true exact fit. Deliberately size-agnostic: this still holds after
     // Task 5 starts the first chunk at 4KB.
-    EXPECT_EQ(cap, chunkBytes / sizeof(Position));
+    const size_t versionRegionBytes = 8 + 1 * sizeof(Astra::Tick);   // one storage column
+    EXPECT_EQ(cap, (chunkBytes - versionRegionBytes) / sizeof(Position));
 
     // Corroboration that the bit_floor rounding really is gone: for ANY
     // power-of-two chunk byte size >= 4096, floor(chunkBytes / 12) is never

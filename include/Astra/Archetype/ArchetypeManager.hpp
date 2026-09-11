@@ -50,6 +50,7 @@ namespace Astra
             auto rootArchetype = std::make_unique<Archetype>(ComponentMask{});
             m_rootArchetype = rootArchetype.get();
             m_rootArchetype->m_chunkPool = &m_chunkPool;
+            m_rootArchetype->SetTickSource(&m_tick);
             m_rootArchetype->Initialize({});
 
             ArchetypeEntry entry;
@@ -685,6 +686,7 @@ namespace Astra
             auto rootArchetype = std::make_unique<Archetype>(ComponentMask{});
             m_rootArchetype = rootArchetype.get();
             m_rootArchetype->m_chunkPool = &m_chunkPool;
+            m_rootArchetype->SetTickSource(&m_tick);
             m_rootArchetype->Initialize({});
 
             ArchetypeEntry entry;
@@ -983,7 +985,7 @@ namespace Astra
                 reader(index);
 
                 // Deserialize the archetype
-                auto archetypeResult = Archetype::Deserialize(reader, registryDescriptors, &m_chunkPool);
+                auto archetypeResult = Archetype::Deserialize(reader, registryDescriptors, &m_chunkPool, &m_tick);
                 if (archetypeResult.IsErr() || reader.HasError())
                 {
                     return false;
@@ -1084,6 +1086,7 @@ namespace Astra
             auto archetype = std::make_unique<Archetype>(mask);
             Archetype* ptr = archetype.get();
             ptr->m_chunkPool = &m_chunkPool;
+            ptr->SetTickSource(&m_tick);
 
             std::vector<ComponentDescriptor> componentDescriptors;
 
@@ -1139,6 +1142,7 @@ namespace Astra
             auto archetype = std::make_unique<Archetype>(newMask);
             Archetype* ptr = archetype.get();
             ptr->m_chunkPool = &m_chunkPool;
+            ptr->SetTickSource(&m_tick);
 
             std::vector<ComponentDescriptor> componentDescriptors;
 
