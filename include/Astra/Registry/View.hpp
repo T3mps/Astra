@@ -460,6 +460,14 @@ namespace Astra
         ASTRA_FORCEINLINE Iterator begin()
         {
             static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
+            // Ruling I: ViewIterator yields plain T&, which cannot mark a change-
+            // tracked entity's `changed` tick -- every write through range-for would
+            // be an exact-tier false negative. Refuse at compile time (same precedent
+            // as the enableable filter below); teaching the iterator to yield Mut<T>
+            // is a recorded follow-up.
+            static_assert(!HasTrackedYield,
+                "range-for over a change-tracked component requested non-const is not supported: the iterator yields T& "
+                "and cannot mark the entity's changed tick. Use ForEach(fn) (yields Mut<T>), or request `const T` for a read-only walk.");
             // Range-based for cannot honor the enableable disabled-bit filter:
             // ViewIterator has no access to the per-chunk disabled words, so
             // `for (auto x : view)` would visit disabled entities that
@@ -491,6 +499,10 @@ namespace Astra
         ASTRA_FORCEINLINE ViewSentinel end() const noexcept
         {
             static_assert(!HasChangeFilter, "Changed<T>/Added<T> views are iteration-only this stage: Size/Empty/Contains/Get/Single/range-for need a tick; use ForEach(ctx, fn) or Since(tick).ForEach(fn)");
+            // See begin() (Ruling I): the iterator cannot mark a tracked entity.
+            static_assert(!HasTrackedYield,
+                "range-for over a change-tracked component requested non-const is not supported: the iterator yields T& "
+                "and cannot mark the entity's changed tick. Use ForEach(fn) (yields Mut<T>), or request `const T` for a read-only walk.");
             // See begin(): range-for is compile-time refused on required
             // enableable-filtered views so it cannot silently diverge from
             // ForEach()/Size() (IM-7).

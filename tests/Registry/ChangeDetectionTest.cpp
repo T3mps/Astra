@@ -792,3 +792,25 @@ TEST(ChangeDetectionMut, RegistryAccessorsMarkTrackedEntities)
     EXPECT_TRUE(reg.SetIfNeq<TrackedPos>(e, TrackedPos{2, 1, 1}));
     EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 5u);
 }
+
+// Ruling I: range-for over a NON-const tracked yield is compile-time refused (the
+// iterator yields T& and cannot mark); the const walk still iterates and touches
+// neither the entity ticks nor the chunk version.
+TEST(ChangeDetectionMut, ConstRangeForOverTrackedTypeStillIteratesAndMarksNothing)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(5);
+    ASSERT_EQ((reg.CreateEntities<TrackedPos>(5, std::span{ents})), 5u);
+    for (auto e : ents) EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 2u);
+
+    AdvanceTo(reg, 3);
+    size_t n = 0;
+    for (auto [e, p] : reg.CreateView<const TrackedPos>()) { (void)e; (void)p; ++n; }
+    EXPECT_EQ(n, 5u);
+    for (auto e : ents)
+    {
+        EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 2u);   // const: no mark
+        EXPECT_EQ(VersionOf<TrackedPos>(reg, e), 2u);         // const: no stamp
+    }
+}
