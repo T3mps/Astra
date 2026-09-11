@@ -4,26 +4,45 @@
 #include <vector>
 
 #include "../Commands/CommandBuffer.hpp"  // ParallelCommandBuffer::GetThreadBuffer()
+#include "../Core/Tick.hpp"
 #include "../Core/WorkScheduler.hpp"
+#include "../Registry/Registry.hpp"        // AdvanceTick()/CurrentTick() (BeginSystemGroup/DispatchSystem)
 #include "SystemContext.hpp"
 #include "SystemMetadata.hpp"
 
-#ifdef ASTRA_BUILD_DEBUG
-    #include "../Registry/Registry.hpp"          // GetArchetypeManager() (Debug tripwire only)
-#endif
-
 namespace Astra
 {
+    /**
+     * Change-detection time (spec §3.5, plan deviation 1): advance the registry's
+     * tick ONCE per parallel group, before any member is dispatched. Members of one
+     * group have no read/write conflict, so they share the group's tick; a system's
+     * stamps therefore always carry its own ThisRun() even while siblings run
+     * concurrently. Called by SequentialExecutor/ParallelExecutor; a custom
+     * ISystemExecutor MUST call it before dispatching each group.
+     *
+     * The scheduler additionally advances once per segment after its groups ran
+     * and before the deferred flush, so flushed commands and any write made after
+     * Execute() returns are newer than every system's lastRun.
+     */
+    inline void BeginSystemGroup(const SystemExecutionContext& context)
+    {
+        context.registry->AdvanceTick();
+    }
+
     /**
      * Dispatches system `systemIdx` from `context`: for a void(SystemContext&)
      * system (Task 2 -- contextSystems[systemIdx] is non-empty), builds a
      * SystemContext wrapping *context.registry, THIS call's per-worker
      * CommandBuffer, the system's scheduleOrder (its topological execution
      * rank; equals insertionOrder when no Before/After edges exist),
-     * iterationIndex 0, and the owning ParallelCommandBuffer* (Phase B,
-     * Task 2 -- read only by ParallelForEach, Task 3; unused here), then
-     * invokes it; otherwise invokes the ordinary void(Registry&) delegate
-     * as before.
+     * iterationIndex 0, the owning ParallelCommandBuffer* (Phase B,
+     * Task 2 -- read only by ParallelForEach, Task 3; unused here), and the
+     * change-detection ticks (spec §3.5: lastRun = this system's previous
+     * run, thisRun = the registry's CurrentTick(), i.e. the group's tick set
+     * by BeginSystemGroup), then invokes it; otherwise invokes the ordinary
+     * void(Registry&) delegate as before. Either way the system's
+     * metadata.lastRun is then set to thisRun (mutable; this system's own
+     * element only, so a parallel group never races on it).
      *
      * Shared by Sequential/ParallelExecutor so both dispatch identically.
      *
@@ -32,10 +51,14 @@ namespace Astra
      * INSIDE this function, so calling it from a worker thread (e.g. from
      * inside an IWorkScheduler::ParallelFor job lambda) makes that worker
      * record into its own buffer; calling it from the submitting thread
-     * makes the submitting thread own the recording.
+     * makes the submitting thread own the recording. BeginSystemGroup(context)
+     * must have been called for the group this system belongs to.
      */
     inline void DispatchSystem(const SystemExecutionContext& context, size_t systemIdx)
     {
+        const SystemMetadata& md = context.metadata[systemIdx];
+        const Tick thisRun = context.registry->CurrentTick();   // the group's tick (BeginSystemGroup)
+        const Tick lastRun = md.lastRun;
         if (context.contextSystems[systemIdx])
         {
             SystemContext sysCtx(*context.registry,
@@ -43,14 +66,16 @@ namespace Astra
                 // Sort-key primary = this system's SCHEDULE order (topological
                 // position), so deferred commands apply in execution order.
                 // Equals insertionOrder when no Before/After edges exist.
-                static_cast<uint32_t>(context.metadata[systemIdx].scheduleOrder),
-                0u, context.commandBuffer);
+                static_cast<uint32_t>(md.scheduleOrder),
+                0u, context.commandBuffer,
+                lastRun, thisRun);
             context.contextSystems[systemIdx](sysCtx);
         }
         else
         {
             context.systems[systemIdx](*context.registry);
         }
+        md.lastRun = thisRun;   // mutable; this system's own element only
     }
 
     class ISystemExecutor
@@ -66,6 +91,7 @@ namespace Astra
         {
             for (const auto& group : context.parallelGroups)
             {
+                BeginSystemGroup(context);   // one tick per group (change detection)
                 for (size_t systemIdx : group)
                 {
                     DispatchSystem(context, systemIdx);
@@ -85,6 +111,9 @@ namespace Astra
         {
             for (const auto& group : context.parallelGroups)
             {
+                // One tick per group (change detection), shared by both arms
+                // below: every member of this group runs with the same ThisRun().
+                BeginSystemGroup(context);
                 if (group.size() == 1 || !m_scheduler)
                 {
                     // Single system or no scheduler: run sequentially to avoid overhead

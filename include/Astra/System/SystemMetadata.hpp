@@ -7,6 +7,7 @@
 #include "../Container/Bitmap.hpp"
 #include "../Core/Base.hpp"
 #include "../Core/Delegate.hpp"
+#include "../Core/Tick.hpp"
 #include "../Core/TypeID.hpp"
 
 namespace Astra
@@ -58,6 +59,16 @@ namespace Astra
         // group across a segment boundary; deferred commands flush at each fence.
         // 0 for every system when no SyncPoint is used (byte-identical to Phase D).
         size_t segmentIndex = 0;
+
+        // Change-detection (spec 2026-09-10 §3.5): the tick of this system's previous
+        // run; 0 == never ran. `mutable` because SystemExecutor::DispatchSystem writes
+        // it through the const SystemExecutionContext& every ISystemExecutor receives;
+        // distinct systems own distinct elements, so a parallel group never races on
+        // it. Lives in the scheduler's cached context copy (SystemExecutionContext::
+        // metadata) and therefore RESETS TO 0 whenever the plan is rebuilt (Add/
+        // RemoveSystem): every system then sees everything once on its next run --
+        // a documented false positive, never a false negative.
+        mutable Tick lastRun = 0;
     };
     
     /**

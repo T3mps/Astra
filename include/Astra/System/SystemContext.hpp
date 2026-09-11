@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <utility>
 
+#include "../Core/Tick.hpp"
 #include "../Registry/Registry.hpp"
 #include "../Commands/CommandBuffer.hpp"
 
@@ -28,7 +29,9 @@ namespace Astra
      * Task 3's ExecuteSorted() flush is wired in. iterationIndex is 0 for an
      * ordinary system context (the 3-arg ctor below); a chunk sub-context
      * built by ParallelForEach (Theme B2 Phase B, Task 3) stamps its own
-     * chunk index instead, via the full 5-arg ctor.
+     * chunk index instead, via the 5-arg ctor (or the full 7-arg ctor, which
+     * additionally carries the change-detection ticks -- see LastRun()/
+     * ThisRun()).
      */
     class SystemContext
     {
@@ -39,23 +42,39 @@ namespace Astra
          * Commands() below); renaming the parameter is a tracked follow-up.
          */
         SystemContext(Registry& reg, CommandBuffer& cmds, uint32_t insertionOrder) noexcept
-            : SystemContext(reg, cmds, insertionOrder, 0u, nullptr) {}
+            : SystemContext(reg, cmds, insertionOrder, 0u, nullptr, Tick{0}, reg.CurrentTick()) {}
 
         /**
-         * Full ctor (Theme B2 Phase B, Task 2): builds a sub-context for one
-         * chunk of a ParallelForEach dispatch (Task 3), stamping every
+         * Chunk sub-context ctor (Theme B2 Phase B, Task 2): builds a sub-context
+         * for one chunk of a ParallelForEach dispatch (Task 3), stamping every
          * command it records with the given iterationIndex (the chunk index)
          * instead of the Phase A default of 0. `parallelBuffer` is a nullable,
          * additive handle to the owning ParallelCommandBuffer -- unused by
          * Commands()/ReportError() here, read only by ParallelForEach (Task 3)
-         * via GetParallelBuffer().
+         * via GetParallelBuffer(). Standalone (unscheduled) use: LastRun() is 0
+         * and ThisRun() is the registry's current tick.
          */
         SystemContext(Registry& reg, CommandBuffer& cmds, uint32_t insertionOrder,
                       uint32_t iterationIndex, ParallelCommandBuffer* parallelBuffer) noexcept
+            : SystemContext(reg, cmds, insertionOrder, iterationIndex, parallelBuffer, Tick{0}, reg.CurrentTick()) {}
+
+        // Full ctor (change detection, spec §3.5): the scheduler passes this system's
+        // previous-run tick and the tick assigned to this run (== the registry's
+        // CurrentTick for the group being dispatched).
+        SystemContext(Registry& reg, CommandBuffer& cmds, uint32_t insertionOrder,
+                      uint32_t iterationIndex, ParallelCommandBuffer* parallelBuffer,
+                      Tick lastRun, Tick thisRun) noexcept
             : m_registry(reg), m_commands(cmds), m_insertionOrder(insertionOrder),
-              m_iterationIndex(iterationIndex), m_parallelBuffer(parallelBuffer) {}
+              m_iterationIndex(iterationIndex), m_parallelBuffer(parallelBuffer),
+              m_lastRun(lastRun), m_thisRun(thisRun) {}
 
         [[nodiscard]] Registry& GetRegistry() const noexcept { return m_registry; }
+
+        // Change-detection time for this run: filters compare against LastRun()
+        // (0 on a system's first run => everything reads as changed); ThisRun() is
+        // what this run's writes are stamped with.
+        [[nodiscard]] Tick LastRun() const noexcept { return m_lastRun; }
+        [[nodiscard]] Tick ThisRun() const noexcept { return m_thisRun; }
 
         /**
          * The per-worker deferred-command recorder for this system. Every
@@ -149,6 +168,11 @@ namespace Astra
          *
          * See View::ParallelForEachWithContext for the chunk-split mechanics and
          * the flat-index determinism argument in full.
+         *
+         * Change detection (spec §3.5): the view's Changed<T>/Added<T> terms (if
+         * any) are evaluated against THIS system's LastRun() -- the tick-taking
+         * View::ParallelForEachWithContext overload is called with it -- and every
+         * chunk sub-context inherits this context's LastRun()/ThisRun().
          */
         template<typename ViewT, typename Func>
         void ParallelForEach(ViewT& view, Func&& func)
@@ -157,18 +181,20 @@ namespace Astra
             const uint32_t insertionOrder = m_insertionOrder;
             ParallelCommandBuffer* pcb = m_parallelBuffer;
             CommandBuffer& immediate = m_commands;  // fallback when pcb == nullptr
+            const Tick lastRun = m_lastRun, thisRun = m_thisRun;
             // Capture this call's band base BEFORE dispatch; the factory stamps
             // base + w so this call's chunk keys can't collide with the outer
             // context's Commands() (band 0) or with an earlier ParallelForEach's
             // band. See the ITERATIONINDEX BANDING note above.
             const uint32_t base = m_nextIterationBase;
             const size_t chunkCount = view.ParallelForEachWithContext(
-                [&reg, insertionOrder, pcb, &immediate, base](uint32_t w)
+                lastRun,   // the view's "since" tick for its Changed/Added terms
+                [&reg, insertionOrder, pcb, &immediate, base, lastRun, thisRun](uint32_t w)
                 {
                     // Called ON the chunk-worker thread: GetThreadBuffer() picks
                     // that worker's own per-thread buffer.
                     CommandBuffer& buf = pcb ? pcb->GetThreadBuffer() : immediate;
-                    return SystemContext(reg, buf, insertionOrder, base + w, pcb);
+                    return SystemContext(reg, buf, insertionOrder, base + w, pcb, lastRun, thisRun);
                 },
                 std::forward<Func>(func));
             // Reserve [base, base + chunkCount) for THIS call; the next
@@ -182,6 +208,9 @@ namespace Astra
         uint32_t m_insertionOrder;
         uint32_t m_iterationIndex = 0;
         ParallelCommandBuffer* m_parallelBuffer = nullptr;
+        // Change-detection ticks (spec §3.5): see LastRun()/ThisRun().
+        Tick m_lastRun = 0;
+        Tick m_thisRun = 0;
         uint32_t m_recordSequence = 0;
         // iterationIndex 0 is reserved for THIS context's own Commands(); each
         // ParallelForEach call reserves the next disjoint band [base, base +
