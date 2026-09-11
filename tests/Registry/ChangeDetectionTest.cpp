@@ -333,3 +333,70 @@ TEST(ChangeDetectionStamp, ModifiedStampsAndSetIfNeqStampsOnlyOnInequality)
     EXPECT_EQ(VersionOf<Position>(reg, e), 4u);
     EXPECT_FLOAT_EQ(std::as_const(reg).GetComponent<Position>(e)->x, 9.0f);
 }
+
+// Ruling E (fix round 1): Single() stamps ONLY the returned entity's chunk and
+// NOTHING on the Empty / MultipleMatched paths -- its counting pass is not a write.
+TEST(ChangeDetectionStamp, SingleStampsOnlyTheReturnedChunkAndNothingOnFailurePaths)
+{
+    using EnA = Astra::Test::Timer;       // enableable
+    using EnB = Astra::Test::Hierarchy;   // enableable
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+
+    // (1) MultipleMatched across >= 2 chunks: every chunk's Position version stays put.
+    std::vector<Astra::Entity> ents(2000);
+    ASSERT_EQ((reg.CreateEntities<Position, Velocity>(2000, std::span{ents})), 2000u);
+    auto* pv = reg.GetArchetypeManager()->GetEntityRecord(ents[0])->archetype;
+    ASSERT_GT(pv->GetChunks().size(), 1u);
+    const int pvPosCol = pv->GetColumnMeta().idToColumn[Astra::TypeID<Position>::Value()];
+
+    AdvanceTo(reg, 3);
+    auto multi = reg.CreateView<Position, const Velocity>().Single();
+    ASSERT_TRUE(multi.IsErr());
+    EXPECT_EQ(*multi.GetError(), Astra::QueryError::MultipleMatched);
+    for (auto& chunk : pv->GetChunks())
+        EXPECT_EQ(chunk->GetColumnVersion(pvPosCol), 2u);   // no chunk marked by the counting pass
+
+    // (2) Empty through a VISITED chunk: two required enableable columns disabled in
+    // complementary patterns -> the chunk passes the whole-chunk reject (no column is
+    // fully disabled) but yields nobody. Single() must still stamp nothing.
+    auto c1 = reg.CreateEntity<Position, Velocity, EnA, EnB>();
+    auto c2 = reg.CreateEntity<Position, Velocity, EnA, EnB>();
+    ASSERT_TRUE(reg.SetEnabled<EnA>(c1, false));
+    ASSERT_TRUE(reg.SetEnabled<EnB>(c2, false));
+    ASSERT_EQ(VersionOf<Position>(reg, c1), 3u);   // created at tick 3
+
+    AdvanceTo(reg, 4);
+    auto empty = reg.CreateView<Position, EnA, EnB>().Single();
+    ASSERT_TRUE(empty.IsErr());
+    EXPECT_EQ(*empty.GetError(), Astra::QueryError::Empty);
+    EXPECT_EQ(VersionOf<Position>(reg, c1), 3u);
+    EXPECT_EQ(VersionOf<EnA>(reg, c1), 3u);
+    EXPECT_EQ(VersionOf<EnB>(reg, c1), 3u);
+
+    // (3) Exactly one match (archetype <Position, EnA, EnB>) while the view also
+    // visits the non-yielding <Position, Velocity, EnA, EnB> chunk above and the
+    // <Position, Velocity> archetype holds other non-empty chunks: only the returned
+    // entity's chunk is stamped.
+    auto one = reg.CreateEntity<Position, EnA, EnB>();
+    ASSERT_EQ(VersionOf<Position>(reg, one), 4u);
+
+    AdvanceTo(reg, 5);
+    auto single = reg.CreateView<Position, EnA, EnB>().Single();
+    ASSERT_TRUE(single.IsOk());
+    EXPECT_EQ(VersionOf<Position>(reg, one), 5u);   // the returned entity's chunk: stamped by Get
+    EXPECT_EQ(VersionOf<EnA>(reg, one), 5u);
+    EXPECT_EQ(VersionOf<Position>(reg, c1), 3u);    // visited-but-empty chunk: untouched
+    EXPECT_EQ(VersionOf<EnA>(reg, c1), 3u);
+    for (auto& chunk : pv->GetChunks())
+        EXPECT_EQ(chunk->GetColumnVersion(pvPosCol), 2u);   // unrelated archetype: untouched
+
+    // Same with the unfiltered shape the ruling names: one <Position, Health> entity
+    // next to the 2000 <Position, Velocity> ones.
+    auto ph = reg.CreateEntity<Position, Health>();
+    AdvanceTo(reg, 6);
+    ASSERT_TRUE((reg.CreateView<Position, const Health>().Single().IsOk()));
+    EXPECT_EQ(VersionOf<Position>(reg, ph), 6u);
+    for (auto& chunk : pv->GetChunks())
+        EXPECT_EQ(chunk->GetColumnVersion(pvPosCol), 2u);
+}

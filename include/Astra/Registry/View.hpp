@@ -110,35 +110,7 @@ namespace Astra
          * cost.
          */
         template<typename Func>
-        ASTRA_FORCEINLINE void ForEach(Func&& func)
-        {
-            if (!m_archetypeManager) ASTRA_UNLIKELY
-                return;  // Registry destroyed
-
-            EnsureArchetypes();
-
-#ifdef ASTRA_BUILD_DEBUG
-            // Captured AFTER EnsureArchetypes() so its own (legitimate) refresh
-            // of the counter is never mistaken for an in-loop structural change.
-            const uint32_t debugStartStructuralChangeCounter =
-                m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
-#endif
-
-            if (m_archetypes.empty()) ASTRA_UNLIKELY
-                return;
-
-            auto adapted = MakeEntityOptionalAdapter(func);
-            for (Archetype* archetype : m_archetypes)
-            {
-                ForEachImpl(archetype, adapted, RequiredTypes{}, OptionalTypes{});
-            }
-
-#ifdef ASTRA_BUILD_DEBUG
-            ASTRA_ASSERT(m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire) == debugStartStructuralChangeCounter,
-                "Structural mutation (create/destroy entity, add/remove component) detected during View::ForEach. "
-                "Defer structural changes into a CommandBuffer and call Execute() after the loop.");
-#endif
-        }
+        ASTRA_FORCEINLINE void ForEach(Func&& func) { ForEachBody<true>(std::forward<Func>(func)); }
         
         template<typename Func>
         ASTRA_FORCEINLINE void ParallelForEach(Func&& func)
@@ -509,19 +481,25 @@ namespace Astra
         /**
          * Filter-aware exactly-one-match accessor: Err(Empty) if no entity
          * matches this view, Err(MultipleMatched) if more than one does,
-         * otherwise Ok(Get(the one match)). Non-const because it reuses
-         * ForEach (which calls EnsureArchetypes()).
+         * otherwise Ok(Get(the one match)). Non-const because it reuses the
+         * ForEach walk (which calls EnsureArchetypes()).
+         *
+         * Change detection (spec §3.3 row 2, Ruling E): only the RETURNED entity's
+         * chunk is stamped, by Get(); the count/locate walk below runs UNSTAMPED
+         * (ForEachBody<false>) because counting is not a write -- so nothing is
+         * marked on the Empty / MultipleMatched paths, and no chunk other than
+         * the returned entity's is marked on success.
          */
         ASTRA_NODISCARD Result<AccessTuple, QueryError> Single()
         {
             Entity found{};
             size_t count = 0;
-            ForEach([&](Entity e, auto&&...) { if (count == 0) found = e; ++count; });
+            ForEachBody<false>([&](Entity e, auto&&...) { if (count == 0) found = e; ++count; });
             if (count == 0) ASTRA_UNLIKELY
                 return Result<AccessTuple, QueryError>::Err(QueryError::Empty);
             if (count > 1) ASTRA_UNLIKELY
                 return Result<AccessTuple, QueryError>::Err(QueryError::MultipleMatched);
-            return Get(found);   // exactly one visible match; Get re-validates and materializes
+            return Get(found);   // exactly one visible match; Get re-validates, materializes AND stamps its chunk
         }
 
     private:
@@ -677,22 +655,62 @@ namespace Astra
             }
         }
 
-        template<typename Func, typename... Required, typename... Optional>
+        // The one archetype walk behind ForEach (Stamp=true) and the internal
+        // unstamped pass (Stamp=false: Single()'s count/locate, which is not a
+        // write -- Ruling E / spec §3.3 row 2). Mirrors Archetype::ForEachBody so the
+        // stamped and unstamped walks cannot drift; with Stamp=false no stamp code
+        // is instantiated anywhere below.
+        template<bool Stamp, typename Func>
+        ASTRA_FORCEINLINE void ForEachBody(Func&& func)
+        {
+            if (!m_archetypeManager) ASTRA_UNLIKELY
+                return;  // Registry destroyed
+
+            EnsureArchetypes();
+
+#ifdef ASTRA_BUILD_DEBUG
+            // Captured AFTER EnsureArchetypes() so its own (legitimate) refresh
+            // of the counter is never mistaken for an in-loop structural change.
+            const uint32_t debugStartStructuralChangeCounter =
+                m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire);
+#endif
+
+            if (m_archetypes.empty()) ASTRA_UNLIKELY
+                return;
+
+            auto adapted = MakeEntityOptionalAdapter(func);
+            for (Archetype* archetype : m_archetypes)
+            {
+                ForEachImpl<Stamp>(archetype, adapted, RequiredTypes{}, OptionalTypes{});
+            }
+
+#ifdef ASTRA_BUILD_DEBUG
+            ASTRA_ASSERT(m_archetypeManager->m_structuralChangeCounter.load(std::memory_order_acquire) == debugStartStructuralChangeCounter,
+                "Structural mutation (create/destroy entity, add/remove component) detected during View::ForEach. "
+                "Defer structural changes into a CommandBuffer and call Execute() after the loop.");
+#endif
+        }
+
+        template<bool Stamp, typename Func, typename... Required, typename... Optional>
         ASTRA_FORCEINLINE void ForEachImpl(Archetype* archetype, Func&& func, std::tuple<Required...>, std::tuple<Optional...>)
         {
             if constexpr (!HasEnabledFilter)
             {
                 // No enableable (non-IncludeDisabled) type in the query: the filtered
                 // path below is not instantiated at all, so this is the pre-existing
-                // loop (invariant 1) plus the coarse change-detection stamp of every
-                // non-const yielded column per visited chunk (all-const: no stamp code).
+                // loop (invariant 1) plus, when Stamp, the coarse change-detection
+                // stamp of every non-const yielded column per visited chunk
+                // (all-const: no stamp code).
                 if constexpr (sizeof...(Optional) == 0)
                 {
-                    archetype->ForEachStamped<Required...>(std::forward<Func>(func));
+                    if constexpr (Stamp)
+                        archetype->ForEachStamped<Required...>(std::forward<Func>(func));
+                    else
+                        archetype->ForEach<Required...>(std::forward<Func>(func));
                 }
                 else
                 {
-                    ForEachWithOptional<Required..., Optional...>(archetype, std::forward<Func>(func), std::make_index_sequence<sizeof...(Required)>{}, std::make_index_sequence<sizeof...(Optional)>{});
+                    ForEachWithOptional<Stamp, Required..., Optional...>(archetype, std::forward<Func>(func), std::make_index_sequence<sizeof...(Required)>{}, std::make_index_sequence<sizeof...(Optional)>{});
                 }
             }
             else
@@ -701,14 +719,14 @@ namespace Astra
                 const auto& chunks = archetype->GetChunks();
                 for (auto& chunk : chunks)
                 {
-                    VisitChunkFiltered(archetype, chunk.get(), func, now,
-                                       std::make_index_sequence<sizeof...(Required)>{},
-                                       std::make_index_sequence<sizeof...(Optional)>{});
+                    VisitChunkFiltered<Stamp>(archetype, chunk.get(), func, now,
+                                              std::make_index_sequence<sizeof...(Required)>{},
+                                              std::make_index_sequence<sizeof...(Optional)>{});
                 }
             }
         }
         
-        template<typename... Components, typename Func, size_t... RequiredTs, size_t... OptionalTs>
+        template<bool Stamp, typename... Components, typename Func, size_t... RequiredTs, size_t... OptionalTs>
         ASTRA_FORCEINLINE void ForEachWithOptional(Archetype* archetype, Func&& func, std::index_sequence<RequiredTs...>, std::index_sequence<OptionalTs...>)
         {
             constexpr size_t OptionalCount = sizeof...(OptionalTs);
@@ -717,8 +735,8 @@ namespace Astra
                 archetype->HasComponent<std::tuple_element_t<OptionalTs, OptionalTypes>>()...
             };
 
-            const Tick now = m_archetypeManager->CurrentTick();
-            const auto& cm = archetype->GetColumnMeta();
+            [[maybe_unused]] const Tick now = m_archetypeManager->CurrentTick();
+            [[maybe_unused]] const auto& cm = archetype->GetColumnMeta();
             const auto& chunks = archetype->GetChunks();
 
             for (auto& chunk : chunks)
@@ -729,8 +747,9 @@ namespace Astra
                     continue;
                 }
 
-                StampChunkForYields(chunk.get(), cm, hasOptional, now,
-                                    std::index_sequence<RequiredTs...>{}, std::index_sequence<OptionalTs...>{});
+                if constexpr (Stamp)
+                    StampChunkForYields(chunk.get(), cm, hasOptional, now,
+                                        std::index_sequence<RequiredTs...>{}, std::index_sequence<OptionalTs...>{});
 
                 std::tuple<std::tuple_element_t<RequiredTs, RequiredTypes>*...> requiredPtrs =
                 {
@@ -770,9 +789,9 @@ namespace Astra
                 const auto& chunks = archetype->GetChunks();
                 if (chunkIndex >= chunks.size()) ASTRA_UNLIKELY
                     return;
-                VisitChunkFiltered(archetype, chunks[chunkIndex].get(), func, m_archetypeManager->CurrentTick(),
-                                   std::make_index_sequence<sizeof...(Required)>{},
-                                   std::make_index_sequence<sizeof...(Optional)>{});
+                VisitChunkFiltered<true>(archetype, chunks[chunkIndex].get(), func, m_archetypeManager->CurrentTick(),
+                                         std::make_index_sequence<sizeof...(Required)>{},
+                                         std::make_index_sequence<sizeof...(Optional)>{});
             }
         }
         
@@ -913,8 +932,9 @@ namespace Astra
 
         // Three-tier enabled-only filter for one chunk (shared by the serial and
         // parallel paths). count==0 chunks are no-ops. `now` is the caller's
-        // hoisted CurrentTick() for the coarse change-detection stamp.
-        template<typename Func, size_t... ReqIs, size_t... OptIs>
+        // hoisted CurrentTick() for the coarse change-detection stamp; Stamp=false
+        // (the internal count/locate pass) instantiates no stamp at all.
+        template<bool Stamp, typename Func, size_t... ReqIs, size_t... OptIs>
         ASTRA_FORCEINLINE void VisitChunkFiltered(Archetype* archetype, ArchetypeChunk* chunk, Func&& func, Tick now,
                                                   std::index_sequence<ReqIs...> reqSeq, std::index_sequence<OptIs...> optSeq)
         {
@@ -948,7 +968,10 @@ namespace Astra
             // Coarse change-detection stamp, deliberately AFTER the whole-chunk
             // reject above: a chunk this view skips wholesale is not "visited" and
             // must not be stamped (it would manufacture downstream false positives).
-            StampChunkForYields(chunk, cm, hasOptional, now, reqSeq, optSeq);
+            if constexpr (Stamp)
+                StampChunkForYields(chunk, cm, hasOptional, now, reqSeq, optSeq);
+            else
+                (void)now;
 
             if constexpr (HasOptionalFilter)
             {
