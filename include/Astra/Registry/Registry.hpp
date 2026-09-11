@@ -562,6 +562,58 @@ namespace Astra
             return m_archetypeManager->MarkWritten(entity, TypeID<T>::Value());
         }
 
+        // Type-erased twin of Modified<T>: for hash/descriptor-driven writers (an
+        // editor Inspector fanning out over a ComponentDescriptor, an undo Restore
+        // through descriptor->deserialize) that hold a ComponentID but no T. Same
+        // table as MarkWritten: false for an invalid handle, an absent component,
+        // or a tag (no column); true after stamping the column and, for a tracked
+        // column, marking the entity.
+        bool Modified(Entity entity, ComponentID id)
+        {
+            AssertContextAffinity();
+            if (!m_entityManager.IsValid(entity)) return false;
+            return m_archetypeManager->MarkWritten(entity, id);
+        }
+
+        // Per-entity change query OUTSIDE a view (spec 2026-09-11 Arcane adoption
+        // s4). Tracked T: exact -- IsNewer(ticks[row].changed, since). Untracked
+        // T: chunk-coarse -- IsNewer(column version, since), so every entity of a
+        // stamped chunk answers true (documented, the same trade Changed<T> makes).
+        // NEVER stamps: a read that must not count as a write. False for an
+        // invalid handle, an absent component, or a tag.
+        template<Component T>
+        ASTRA_NODISCARD bool IsChanged(Entity entity, Tick since) const
+        {
+            AssertContextAffinity();
+            const EntityRecord* rec = m_archetypeManager->GetEntityRecord(entity);
+            if (!rec || !rec->chunk) return false;
+            const ComponentID id = TypeID<T>::Value();
+            if (id >= MAX_COMPONENTS) return false;
+            const int col = rec->archetype->GetColumnMeta().idToColumn[id];
+            if (col < 0) return false;
+            if (const EntityTicks* t = rec->chunk->GetTicks(col))
+                return IsNewer(t[rec->location.GetEntityIndex()].changed, since);
+            return IsNewer(rec->chunk->GetColumnVersion(col), since);
+        }
+
+        // IsChanged's twin over the `added` tick. For an untracked T this is
+        // IsChanged in effect (only the column version exists) -- the README's
+        // Added<T>-on-untracked caveat, restated for the entity form.
+        template<Component T>
+        ASTRA_NODISCARD bool IsAdded(Entity entity, Tick since) const
+        {
+            AssertContextAffinity();
+            const EntityRecord* rec = m_archetypeManager->GetEntityRecord(entity);
+            if (!rec || !rec->chunk) return false;
+            const ComponentID id = TypeID<T>::Value();
+            if (id >= MAX_COMPONENTS) return false;
+            const int col = rec->archetype->GetColumnMeta().idToColumn[id];
+            if (col < 0) return false;
+            if (const EntityTicks* t = rec->chunk->GetTicks(col))
+                return IsNewer(t[rec->location.GetEntityIndex()].added, since);
+            return IsNewer(rec->chunk->GetColumnVersion(col), since);
+        }
+
         // Compare-then-store opt-in: assigns and stamps ONLY when `value != current`.
         // Returns true iff a store happened. Deliberately not the default mark path
         // (the compare costs more than the store it skips -- spec §2.4).

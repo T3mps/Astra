@@ -334,6 +334,74 @@ TEST(ChangeDetectionStamp, ModifiedStampsAndSetIfNeqStampsOnlyOnInequality)
     EXPECT_FLOAT_EQ(std::as_const(reg).GetComponent<Position>(e)->x, 9.0f);
 }
 
+// Arcane adoption (2026-09-11): the type-erased Modified for descriptor-driven
+// writers. Mirrors the <T> case above, including its three false paths.
+TEST(ChangeDetectionStamp, ModifiedByIdStampsAndRefusesTheSameThreeWays)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    // Player is an EMPTY TAG (TestComponents.hpp:150; the RegistrySerializationTest
+    // :487 pattern): PRESENT on e but with no storage column, so Modified by its
+    // id must refuse -- the third false path, distinct from "absent".
+    auto e = reg.CreateEntityWith(Position{1, 2, 3}, Astra::Test::TrackedPos{4, 5, 6}, Astra::Test::Player{});
+
+    AdvanceTo(reg, 3);
+    EXPECT_TRUE(reg.Modified(e, Astra::TypeID<Position>::Value()));
+    EXPECT_EQ(VersionOf<Position>(reg, e), 3u);
+    EXPECT_TRUE(reg.Modified(e, Astra::TypeID<Astra::Test::TrackedPos>::Value()));
+    EXPECT_EQ(VersionOf<Astra::Test::TrackedPos>(reg, e), 3u);
+    EXPECT_TRUE(reg.IsChanged<Astra::Test::TrackedPos>(e, 2));   // the tracked mark landed too
+
+    EXPECT_FALSE(reg.Modified(e, Astra::TypeID<Velocity>::Value()));                 // absent component
+    EXPECT_FALSE(reg.Modified(Astra::Entity{}, Astra::TypeID<Position>::Value()));   // invalid handle
+    EXPECT_FALSE(reg.Modified(e, Astra::TypeID<Astra::Test::Player>::Value()));      // present tag: no column
+}
+
+TEST(ChangeDetectionStamp, IsChangedIsExactForTrackedAndChunkCoarseForUntracked)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    std::vector<Astra::Entity> ents(64);
+    ASSERT_EQ((reg.CreateEntities<Position, Astra::Test::TrackedPos>(64, std::span{ents})), 64u);
+
+    AdvanceTo(reg, 3);
+    reg.GetComponent<Astra::Test::TrackedPos>(ents[7])->x = 1.0f;   // stamps the chunk, marks ents[7]
+
+    // Tracked: exactly the one entity.
+    EXPECT_TRUE(reg.IsChanged<Astra::Test::TrackedPos>(ents[7], 2));
+    EXPECT_FALSE(reg.IsChanged<Astra::Test::TrackedPos>(ents[8], 2));
+    EXPECT_FALSE(reg.IsChanged<Astra::Test::TrackedPos>(ents[7], 3));   // not newer than its own tick
+    // Untracked: the chunk was NOT stamped for Position by a TrackedPos write...
+    EXPECT_FALSE(reg.IsChanged<Position>(ents[7], 2));
+    // ...but a Position write stamps the whole chunk, so every neighbour answers true.
+    reg.GetComponent<Position>(ents[7])->x = 1.0f;
+    EXPECT_TRUE(reg.IsChanged<Position>(ents[7], 2));
+    EXPECT_TRUE(reg.IsChanged<Position>(ents[8], 2));   // chunk-coarse, documented
+    // Absent / invalid / tag: false.
+    EXPECT_FALSE(reg.IsChanged<Velocity>(ents[7], 0));
+    EXPECT_FALSE(reg.IsChanged<Position>(Astra::Entity{}, 0));
+    // Since 0 == "never": anything stamped answers true.
+    EXPECT_TRUE(reg.IsChanged<Astra::Test::TrackedPos>(ents[8], 0));
+    // IsAdded reads the added tick: created at 2, so newer than 1, not newer than 2.
+    EXPECT_TRUE(reg.IsAdded<Astra::Test::TrackedPos>(ents[8], 1));
+    EXPECT_FALSE(reg.IsAdded<Astra::Test::TrackedPos>(ents[8], 2));
+    EXPECT_FALSE(reg.IsAdded<Astra::Test::TrackedPos>(ents[7], 2));   // the later write did not re-add it
+}
+
+TEST(ChangeDetectionStamp, IsChangedDoesNotStamp)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto e = reg.CreateEntityWith(Position{1, 2, 3}, Astra::Test::TrackedPos{});
+    AdvanceTo(reg, 5);
+    (void)reg.IsChanged<Position>(e, 0);
+    (void)reg.IsChanged<Astra::Test::TrackedPos>(e, 0);
+    (void)reg.IsAdded<Astra::Test::TrackedPos>(e, 0);
+    EXPECT_EQ(VersionOf<Position>(reg, e), 2u);                       // column version unchanged
+    EXPECT_EQ(VersionOf<Astra::Test::TrackedPos>(reg, e), 2u);
+    EXPECT_FALSE(reg.IsChanged<Astra::Test::TrackedPos>(e, 2));       // and the entity tick unchanged
+}
+
 // Ruling E (fix round 1): Single() stamps ONLY the returned entity's chunk and
 // NOTHING on the Empty / MultipleMatched paths -- its counting pass is not a write.
 TEST(ChangeDetectionStamp, SingleStampsOnlyTheReturnedChunkAndNothingOnFailurePaths)

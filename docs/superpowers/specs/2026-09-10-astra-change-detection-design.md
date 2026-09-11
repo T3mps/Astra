@@ -193,7 +193,7 @@ already exists.
 
 ### 3.7 API changes
 
-- `+ Registry::CurrentTick/AdvanceTick/Modified<T>/SetIfNeq<T>`; `+ Tick`.
+- `+ Registry::CurrentTick/AdvanceTick/Modified<T>/Modified(Entity, ComponentID)/SetIfNeq<T>/IsChanged<T>(Entity, Tick)/IsAdded<T>(Entity, Tick)`; `+ Tick`.
 - `+ SystemContext::LastRun/ThisRun`; `SystemMetadata::lastRun`; executor preference
   for `SystemContext&`; `System` concept widened (additive).
 - `+ Changed<T>`, `Added<T>`, `Mut<T>`, `View::Since(Tick)`, `View::ForEach(ctx, fn)`.

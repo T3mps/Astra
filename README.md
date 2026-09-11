@@ -422,6 +422,11 @@ frame boundary -- call it after mutating through the pointer. The same rule appl
 obtained from `Get()`/`Single()` and kept past `AdvanceTick()`: it carries the tick current when
 it was handed out and marks with *that* tick, so a write made through it in a later frame reads as
 old -- do not retain a `Mut` across frames; use `Modified<T>` for late writes.
+`Registry::Modified(e, ComponentID)` is the type-erased twin for descriptor-driven writers (an
+editor Inspector, an undo Restore) that hold an id but no `T`; same stamp, same mark, same three
+`false` paths. `Registry::IsChanged<T>(e, since)` / `IsAdded<T>(e, since)` answer the per-entity
+question OUTSIDE a view and never stamp: exact for a tracked `T`, chunk-coarse for an untracked
+one.
 `Registry::SetIfNeq<T>(e, value)` (and `Mut<T>::SetIfNeq`) compares first and only stores + marks
 on inequality (`T` must be `equality_comparable`); it is an explicit opt-in, never automatic (the
 default mark path does not compare-then-store, by design).
