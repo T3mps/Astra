@@ -106,7 +106,12 @@ namespace Astra
             }
         }
 
-        size_t AddEntity(Entity entity, Tick tick = 1)
+        // `tick` is the registry's current tick (Archetype::Now()), applied as the
+        // coarse stamp to EVERY column of this chunk and as the per-entity ticks of
+        // the new slot. Deliberately NO default: StampAllColumns is an unconditional
+        // store, so a defaulted `1` would REWIND a column that was already stamped at
+        // a later tick -- a silent change-detection false negative (final review).
+        size_t AddEntity(Entity entity, Tick tick)
         {
             ASTRA_ASSERT(m_count < m_capacity, "Chunk is full, cannot add more entities");
             size_t index = m_count++;
@@ -194,7 +199,8 @@ namespace Astra
             return index;
         }
         
-        void BatchAddEntities(std::span<const Entity> entities, Tick tick = 1)
+        // `tick`: see AddEntity -- no default, for the same version-rewind reason.
+        void BatchAddEntities(std::span<const Entity> entities, Tick tick)
         {
             size_t count = entities.size();
             ASTRA_ASSERT(m_count + count <= m_capacity, "Batch add would exceed chunk capacity");

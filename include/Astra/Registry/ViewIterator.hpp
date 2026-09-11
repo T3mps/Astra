@@ -41,8 +41,12 @@ namespace Astra
 
             // `now` is the registry's current tick, applied as the coarse
             // change-detection stamp to every non-const component column of every
-            // chunk this iterator enters (View::begin() supplies it).
-            Iterator(Archetype* const* archetypes, size_t archetypeCount, Tick now = 1) noexcept
+            // chunk this iterator enters (View::begin() supplies it). Deliberately
+            // NO default: the stamp is an unconditional store, so a defaulted `1`
+            // would REWIND a column already stamped at a later tick -- a silent
+            // change-detection false negative (final review). The empty iterator
+            // (no archetypes, enters no chunk) is the default constructor.
+            Iterator(Archetype* const* archetypes, size_t archetypeCount, Tick now) noexcept
                 : m_archetypes(archetypes)
                 , m_archetypeCount(archetypeCount)
                 , m_now(now)
@@ -205,7 +209,7 @@ namespace Astra
             // View-level state
             Archetype* const* m_archetypes = nullptr;
             size_t m_archetypeCount = 0;
-            Tick m_now = 1;   // change-detection tick stamped on chunk entry
+            Tick m_now = 0;   // change-detection tick stamped on chunk entry; 0 ("never") only in the empty iterator, which enters no chunk
 
             // Navigation state
             size_t m_archetypeIndex = 0;
@@ -218,15 +222,18 @@ namespace Astra
             std::tuple<std::remove_const_t<Components>*...> m_componentArrays{};
         };
 
-        ViewIterable(Archetype* const* archetypes, size_t count) noexcept
+        // `now`: the registry's current tick for the iterator's chunk-entry stamp
+        // (see Iterator's constructor); no default, for the same reason.
+        ViewIterable(Archetype* const* archetypes, size_t count, Tick now) noexcept
             : m_archetypes(archetypes)
             , m_archetypeCount(count)
+            , m_now(now)
         {
         }
 
         ASTRA_FORCEINLINE Iterator begin() const noexcept
         {
-            return Iterator(m_archetypes, m_archetypeCount);
+            return Iterator(m_archetypes, m_archetypeCount, m_now);
         }
 
         ASTRA_FORCEINLINE ViewSentinel end() const noexcept
@@ -237,6 +244,7 @@ namespace Astra
     private:
         Archetype* const* m_archetypes;
         size_t m_archetypeCount;
+        Tick m_now;
     };
 
     template<typename Tuple>

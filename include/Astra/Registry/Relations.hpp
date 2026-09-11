@@ -322,7 +322,7 @@ namespace Astra
                     else
                     {
                         // Expand components using index_sequence
-                        func(entity, *m_archetypeManager->GetComponent<std::tuple_element_t<Is, RequiredTuple>>(entity)...);
+                        func(entity, *FetchYield<std::tuple_element_t<Is, RequiredTuple>>(entity)...);
                     }
                 }
             }
@@ -353,7 +353,7 @@ namespace Astra
                     else
                     {
                         // Expand components using index_sequence
-                        func(entity, depth, *m_archetypeManager->GetComponent<std::tuple_element_t<Is, RequiredTuple>>(entity)...);
+                        func(entity, depth, *FetchYield<std::tuple_element_t<Is, RequiredTuple>>(entity)...);
                     }
                 }
             }
@@ -371,10 +371,32 @@ namespace Astra
             }
             else
             {
-                func(entity, depth, *m_archetypeManager->GetComponent<Components>(entity)...);
+                func(entity, depth, *FetchYield<Components>(entity)...);
             }
         }
         
+        // The one fetch every traversal yield goes through (spec 2026-09-10 §3.3,
+        // final-review Ruling M). A required component requested non-const is handed
+        // out as a WRITE, exactly like a view's non-const yield: it is fetched through
+        // ArchetypeManager::GetComponentMut, which stamps C's column version in the
+        // entity's chunk and, for a change-tracked C, marks the entity's `changed`
+        // tick -- so a write made inside ForEachChild/Descendant/Ancestor/Link (the
+        // transform-propagation shape) is visible to Changed<C> at both tiers. A
+        // `const C` request, or a tag (no column), is a plain read through the
+        // non-stamping GetComponent and touches nothing. The return type is the same
+        // C* the site received before (GetComponentMut<C> == GetComponent<C> plus the
+        // stamp), so callbacks are unaffected; the parallel variant issues the same
+        // stores from workers -- same-value column stamps and one owner per entity's
+        // tick, the same benign pattern as View::ParallelForEach.
+        template<typename C>
+        ASTRA_FORCEINLINE C* FetchYield(Entity entity) const
+        {
+            if constexpr (Detail::IsMutableYield<C>)
+                return m_archetypeManager->template GetComponentMut<C>(entity);
+            else
+                return m_archetypeManager->template GetComponent<C>(entity);
+        }
+
         ASTRA_FORCEINLINE bool PassesFilter(Entity entity) const
         {
             if constexpr (!HAS_FILTERING)

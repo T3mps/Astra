@@ -134,9 +134,21 @@ namespace Astra
                 size_t layout = ComputeLayoutBytesForCapacity(cap);
                 while (cap > 0 && layout > chunkBytes)
                 {
-                    // Each unit of cap contributes >= m_perEntitySize column bytes, so
-                    // this step can never under-shrink into a non-terminating loop.
-                    size_t dec = (layout - chunkBytes) / m_perEntitySize;
+                    // Each unit of cap contributes >= m_perEntitySize column bytes PLUS
+                    // sizeof(EntityTicks) (8) bytes per change-tracked column (the
+                    // per-entity tick columns, see ComputeLayoutBytesForCapacity), so
+                    // dividing the overshoot by that per-unit cost is still a safe
+                    // UNDER-estimate of the units to drop (the disabled-word regions
+                    // add more per unit, never less): the step can never over-shrink,
+                    // and `dec >= 1` keeps the termination argument unchanged. Dividing
+                    // by m_perEntitySize alone made the first step over-shrink a tracked
+                    // archetype and left the grow-back loop below to climb the
+                    // difference one capacity unit at a time (~thousands of layout
+                    // calls per new chunk at the 512 KB ceiling for a small tracked
+                    // component); with the tick bytes in the divisor it converges in
+                    // <= 2 iterations (final review Important #6b).
+                    size_t dec = (layout - chunkBytes) /
+                                 (m_perEntitySize + sizeof(EntityTicks) * static_cast<size_t>(m_columnMeta.trackedColumnCount));
                     if (dec == 0) dec = 1;
                     cap -= std::min(cap, dec);
                     layout = ComputeLayoutBytesForCapacity(cap);
@@ -232,7 +244,15 @@ namespace Astra
                 return m_chunkPool->GetChunkSize();
             const size_t dataBytes = m_totalCapacity * m_perEntitySize;
             const size_t raw = dataBytes / m_chunkPool->GetGrowDivisor();
-            const size_t oneEntityBytes = m_perEntitySize + m_alignmentOverhead;
+            // One entity's footprint INCLUDING the per-column carves (enableable
+            // disabled words, change-tracked per-entity tick columns): the same
+            // conservative bound Deserialize sizes restored chunks with. With no
+            // enableable and no tracked column this is exactly the legacy
+            // `m_perEntitySize + m_alignmentOverhead`; with them, the legacy value
+            // under-counted the carve, so a single large tracked component could
+            // make ComputeCapacityForBytes(target) == 0 and Initialize refuse
+            // (final review Important #6a).
+            const size_t oneEntityBytes = ChunkBytesToHold(1);
             const size_t target = std::max(raw, oneEntityBytes);
             return std::clamp(target, m_chunkPool->GetMinChunkBytes(), m_chunkPool->GetMaxChunkBytes());
         }
@@ -1317,7 +1337,9 @@ namespace Astra
                     return m_chunkPool ? m_chunkPool->GetChunkSize() : ArchetypeChunkPool::DEFAULT_CHUNK_SIZE;
                 const size_t liveBytes = m_entityCount * m_perEntitySize;
                 const size_t raw = liveBytes / m_chunkPool->GetGrowDivisor();
-                const size_t oneEntityBytes = m_perEntitySize + m_alignmentOverhead;
+                // Carve-inclusive one-entity floor, same as NextChunkBytes (reduces
+                // to the legacy value when no column is enableable or tracked).
+                const size_t oneEntityBytes = ChunkBytesToHold(1);
                 const size_t target = std::max(raw, oneEntityBytes);
                 return std::clamp(target, m_chunkPool->GetMinChunkBytes(), m_chunkPool->GetMaxChunkBytes());
             }();

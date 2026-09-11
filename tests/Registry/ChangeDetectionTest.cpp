@@ -993,3 +993,85 @@ TEST(ChangeDetectionZeroCost, UntrackedArchetypeCarvesNoTickColumnsAndVersionReg
     EXPECT_EQ(rec->chunk->GetColumnVersionOffset() % 8, 0u);
     EXPECT_LE(rec->chunk->GetColumnVersionOffset() + cm.columnCount * sizeof(Tick), rec->chunk->GetChunkBytes());
 }
+
+// ---- Final review wave: Ruling M (Relations traversals are write paths) ---
+
+TEST(ChangeDetectionStamp, RelationTraversalStampsNonConstYieldsOnly)
+{
+    // Root lives in a DIFFERENT archetype from its descendants so its chunk's
+    // versions can be told apart from theirs (VersionOf is per chunk).
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto root = reg.CreateEntity<Position, Velocity>();
+    std::vector<Astra::Entity> kids(4);
+    ASSERT_EQ((reg.CreateEntities<Position, TrackedPos>(4, std::span{kids})), 4u);
+    for (auto k : kids) reg.SetParent(k, root);
+    auto grand = reg.CreateEntity<Position, TrackedPos>();
+    reg.SetParent(grand, kids[0]);
+    for (auto e : kids) ASSERT_EQ(VersionOf<Position>(reg, e), 2u);
+
+    // const yield: a read -- nothing stamped, nothing marked.
+    AdvanceTo(reg, 3);
+    size_t seen = 0;
+    reg.GetRelations<const Position>(root).ForEachDescendant([&](Astra::Entity, size_t, const Position&) { ++seen; });
+    EXPECT_EQ(seen, 5u);
+    for (auto e : kids) EXPECT_EQ(VersionOf<Position>(reg, e), 2u);
+    EXPECT_EQ(VersionOf<Position>(reg, grand), 2u);
+    EXPECT_EQ(VersionOf<Position>(reg, root), 2u);
+
+    // non-const UNTRACKED yield: every visited descendant's Position column is
+    // stamped (coarse tier); the root is not a descendant and its chunk is untouched;
+    // the un-yielded TrackedPos column is untouched.
+    AdvanceTo(reg, 4);
+    reg.GetRelations<Position>(root).ForEachDescendant([](Astra::Entity, size_t, Position& p) { p.x = 1.0f; });
+    for (auto e : kids) EXPECT_EQ(VersionOf<Position>(reg, e), 4u);
+    EXPECT_EQ(VersionOf<Position>(reg, grand), 4u);
+    EXPECT_EQ(VersionOf<Position>(reg, root), 2u);
+    EXPECT_EQ(VersionOf<TrackedPos>(reg, kids[0]), 2u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, kids[0]).changed, 2u);
+
+    // non-const TRACKED yield: stamps the column AND marks each visited entity (exact tier).
+    AdvanceTo(reg, 5);
+    reg.GetRelations<TrackedPos>(root).ForEachDescendant([](Astra::Entity, size_t, TrackedPos& p) { p.x = 1.0f; });
+    for (auto e : kids)
+    {
+        EXPECT_EQ(VersionOf<TrackedPos>(reg, e), 5u);
+        EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 5u);
+        EXPECT_EQ(TicksOf<TrackedPos>(reg, e).added, 2u);   // a mark is not an add
+    }
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, grand).changed, 5u);
+
+    // const TRACKED yield: nothing moves.
+    AdvanceTo(reg, 6);
+    reg.GetRelations<const TrackedPos>(root).ForEachDescendant([](Astra::Entity, size_t, const TrackedPos&) {});
+    for (auto e : kids)
+    {
+        EXPECT_EQ(VersionOf<TrackedPos>(reg, e), 5u);
+        EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 5u);
+    }
+
+    // The other traversal shapes go through the same yield: ForEachChild (no depth),
+    // ForEachAncestor (walks up into the root's own chunk), ForEachLink.
+    AdvanceTo(reg, 7);
+    reg.GetRelations<Position>(root).ForEachChild([](Astra::Entity, Position& p) { p.y = 1.0f; });
+    for (auto e : kids) EXPECT_EQ(VersionOf<Position>(reg, e), 7u);
+    EXPECT_EQ(VersionOf<Position>(reg, root), 2u);
+
+    AdvanceTo(reg, 8);
+    reg.GetRelations<Position>(grand).ForEachAncestor([](Astra::Entity, size_t, Position& p) { p.z = 1.0f; });
+    EXPECT_EQ(VersionOf<Position>(reg, root), 8u);      // root IS an ancestor: its chunk is stamped now
+    EXPECT_EQ(VersionOf<Position>(reg, kids[0]), 8u);
+
+    AdvanceTo(reg, 9);
+    reg.AddLink(root, grand);
+    reg.GetRelations<const Position>(root).ForEachLink([](Astra::Entity, const Position&) {});
+    EXPECT_EQ(VersionOf<Position>(reg, grand), 8u);     // const link yield: untouched
+    reg.GetRelations<TrackedPos>(root).ForEachLink([](Astra::Entity, TrackedPos& p) { p.y = 2.0f; });
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, grand).changed, 9u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, kids[1]).changed, 5u);   // not linked: not visited, not marked
+
+    // End to end: a Changed<TrackedPos> reader sees exactly what the traversals marked.
+    auto v = reg.CreateView<const TrackedPos, Astra::Changed<TrackedPos>>();
+    EXPECT_EQ(CountSince(v, 8), 1u);   // grand, via the link walk at 9
+    EXPECT_EQ(CountSince(v, 4), 5u);   // the four kids + grand, via the descendant walk at 5
+}

@@ -494,7 +494,7 @@ namespace Astra
                 "Use ForEach() or ParallelForEach() instead.");
 
             if (!m_archetypeManager) ASTRA_UNLIKELY
-                return Iterator(nullptr, 0);
+                return Iterator{};   // empty iterator: no archetypes, enters (and stamps) no chunk
 
             EnsureArchetypes();
             // The iterator carries the current tick so it can apply the coarse
