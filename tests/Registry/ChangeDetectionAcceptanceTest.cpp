@@ -3,6 +3,7 @@
 // chunks that hold changed entities and produce exactly the brute-force result.
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
+#include <algorithm>
 #include <random>
 #include <unordered_set>
 #include "../TestComponents.hpp"
@@ -29,6 +30,18 @@ TEST(ChangeDetectionAcceptance, FivePercentPerFrameVisitsOnlyChangedChunksAndMat
     auto* arch = reg.GetArchetypeManager()->GetEntityRecord(ents[0])->archetype;
     const size_t chunkCount = arch->GetChunks().size();
     ASSERT_GT(chunkCount, 20u);
+
+    // Fix round 1 (Controller Ruling L): computed ONCE, before the frame loop, over ALL of
+    // arch->GetChunks() -- independent of whatever set of chunks a given frame's ForEach
+    // actually visits. Chunks grow geometrically as the archetype populates (grow-as-populate
+    // dynamic chunk sizing), so chunk[0] (allocated before the archetype ramped up) is the
+    // SMALLEST chunk, not a representative one -- later chunks are ~100x bigger, capped at
+    // 512KB. Using the archetype-wide maximum keeps the bound a real upper limit on what ANY
+    // touched-chunk set could hold, so a filter that wrongly visited every chunk would still
+    // be caught (unlike a bound built from the touched set itself, which is true by
+    // construction and cannot discriminate a bug).
+    size_t maxCapacity = 0;
+    for (auto& chunk : arch->GetChunks()) maxCapacity = std::max(maxCapacity, chunk->GetCapacity());
 
     std::mt19937 rng(0xC0FFEE);
     auto propagate = reg.CreateView<const Position, TrackedPos, Astra::Changed<Position>>();
@@ -62,22 +75,14 @@ TEST(ChangeDetectionAcceptance, FivePercentPerFrameVisitsOnlyChangedChunksAndMat
 
         // Chunk granularity: every changed entity is visited, plus at most the rest of
         // the chunks it touched (~5% of chunks + 1 boundary chunk).
-        // NOTE (Task 9 fix): chunks grow geometrically as the archetype populates
-        // (grow-as-populate dynamic chunk sizing), so chunk[0]'s capacity (the
-        // smallest, from before the archetype ramped up) is not representative of
-        // "the" chunk capacity -- later chunks are ~100x bigger, capped at 512KB.
-        // Bound visited by the actual capacities of the chunks that were touched.
         size_t touchedChunks = 0;
-        size_t touchedCapacity = 0;
-        for (size_t c = 0; c < chunkCount; ++c)
-        {
-            if (!visitedChunks[c]) continue;
-            ++touchedChunks;
-            touchedCapacity += arch->GetChunks()[c]->GetCapacity();
-        }
+        for (size_t v : visitedChunks) touchedChunks += v;
         EXPECT_LE(touchedChunks, chunkCount / 20 + 2);
         EXPECT_GE(visited, changed.size());
-        EXPECT_LE(visited, touchedCapacity);
+        // Independent of the touched set (see maxCapacity comment above): a filter bug that
+        // visited every chunk would still exceed this bound, since maxCapacity is a per-chunk
+        // ceiling, not a sum over whatever happened to be touched.
+        EXPECT_LE(visited, (chunkCount / 20 + 2) * maxCapacity);
 
         // Result parity with brute force: every changed entity's WorldTransform equals its LocalTransform.
         for (size_t i = start; i < start + kN / 20; ++i)
