@@ -8,6 +8,7 @@
 #include "../Component/ComponentRegistry.hpp"
 #include "../Container/Bitmap.hpp"
 #include "../Core/Base.hpp"
+#include "../Core/Tick.hpp"
 #include "../Core/TypeID.hpp"
 #include "../Archetype/Archetype.hpp"
 
@@ -419,7 +420,49 @@ namespace Astra
         static_assert((Component<Ts> && ...), "OneOf can only be used with valid components");
         static_assert(sizeof...(Ts) > 1, "OneOf must have at least two components");
     };
-    
+
+    /**
+     * Mutable handle to a change-TRACKED component (spec 2026-09-10 §3.3). Handed out
+     * by views in place of `T&` when T is requested non-const and IsChangeTrackedV<T>.
+     * Any mutable access marks the entity's `changed` tick with the current run's tick
+     * (one store); Read() never marks. The implicit `T&` conversion keeps existing
+     * `[](T& t)` lambdas compiling unchanged -- at the cost of marking even when the
+     * body only reads (accepted false positive; use Read() when it matters).
+     */
+    template<typename T>
+    class Mut
+    {
+        static_assert(IsChangeTrackedV<T>,
+            "Mut<T> is only handed out for change-tracked components (static constexpr bool AstraChangeTracked = true); "
+            "an untracked component is yielded as plain T&");
+        static_assert(!std::is_const_v<T>, "Mut<const T> is meaningless: request `const T` and receive `const T&`");
+
+    public:
+        Mut(T* value, EntityTicks* ticks, Tick now) noexcept : m_value(value), m_ticks(ticks), m_now(now) {}
+
+        ASTRA_FORCEINLINE operator T&() noexcept              { m_ticks->changed = m_now; return *m_value; }
+        ASTRA_FORCEINLINE T& Write() noexcept                 { m_ticks->changed = m_now; return *m_value; }
+        ASTRA_FORCEINLINE T* operator->() noexcept            { m_ticks->changed = m_now; return m_value; }
+        ASTRA_NODISCARD ASTRA_FORCEINLINE const T& Read() const noexcept { return *m_value; }
+
+        // Compare-then-store opt-in (spec §2.4): stores + marks ONLY when v != current.
+        bool SetIfNeq(const T& v) requires std::equality_comparable<T>
+        {
+            if (*m_value == v) return false;
+            *m_value = v;
+            m_ticks->changed = m_now;
+            return true;
+        }
+
+        ASTRA_NODISCARD bool IsAdded(Tick since) const noexcept   { return IsNewer(m_ticks->added, since); }
+        ASTRA_NODISCARD bool IsChanged(Tick since) const noexcept { return IsNewer(m_ticks->changed, since); }
+
+    private:
+        T*           m_value;
+        EntityTicks* m_ticks;
+        Tick         m_now;
+    };
+
     // Query builder that processes modifiers and creates masks
     template<typename... QueryArgs>
     class QueryBuilder

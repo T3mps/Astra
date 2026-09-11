@@ -574,8 +574,8 @@ namespace Astra
         }
 
         // Non-const component access IS a write for change detection (spec §3.3):
-        // stamp T's column in the entity's chunk. Task 7 adds the per-entity mark
-        // for change-tracked T. Same validation and result as GetComponent<T>.
+        // stamp T's column in the entity's chunk and, for a change-tracked T, mark
+        // the entity's `changed` tick. Same validation and result as GetComponent<T>.
         template<Component T>
         ASTRA_NODISCARD T* GetComponentMut(Entity entity)
         {
@@ -585,7 +585,10 @@ namespace Astra
                 if (ptr) ASTRA_LIKELY
                 {
                     const EntityRecord* rec = m_records->GetRecord(entity.GetID());   // validated by GetComponent above
-                    rec->chunk->StampColumn(rec->archetype->GetColumnMeta().idToColumn[TypeID<T>::Value()], m_tick);
+                    const int col = rec->archetype->GetColumnMeta().idToColumn[TypeID<T>::Value()];
+                    rec->chunk->StampColumn(col, m_tick);
+                    if constexpr (IsChangeTrackedV<T>)
+                        rec->chunk->GetTicks(col)[rec->location.GetEntityIndex()].changed = m_tick;
                 }
             }
             return ptr;
@@ -593,6 +596,7 @@ namespace Astra
 
         // Explicit "I wrote T on this entity" for raw-pointer code (Registry::Modified).
         // Returns false for a stale handle, an absent component, or a tag (no column).
+        // Type-erased, so the per-entity mark is a runtime null test on the tick column.
         bool MarkWritten(Entity entity, ComponentID id)
         {
             const EntityRecord* rec = GetEntityRecord(entity);
@@ -602,6 +606,8 @@ namespace Astra
             if (col < 0) ASTRA_UNLIKELY
                 return false;
             rec->chunk->StampColumn(col, m_tick);
+            if (EntityTicks* t = rec->chunk->GetTicks(col))
+                t[rec->location.GetEntityIndex()].changed = m_tick;
             return true;
         }
 

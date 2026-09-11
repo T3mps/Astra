@@ -68,6 +68,14 @@ namespace Astra
         // Any per-chunk filter at all: routes iteration through VisitChunkFiltered.
         static constexpr bool HasChunkFilter = HasEnabledFilter || HasChangeFilter;
 
+        // Any yielded, non-const, change-tracked component: routes iteration through
+        // the view-owned chunk loops (Archetype::ForEachStamped cannot yield Mut) and
+        // switches the required yield to Mut<T>. False for every pre-existing view.
+        template<typename Tuple> struct AnyTrackedYield;
+        template<typename... Ts> struct AnyTrackedYield<std::tuple<Ts...>>
+            : std::bool_constant<((Detail::IsMutableYield<Ts> && IsChangeTrackedV<Ts>) || ...)> {};
+        static constexpr bool HasTrackedYield = AnyTrackedYield<RequiredTypes>::value || AnyTrackedYield<OptionalTypes>::value;
+
         // Parallel execution thresholds - based on empirical testing
         static constexpr size_t AVG_ENTITIES_PER_CHUNK = 256;                           // Typical for 16KB chunks with ~50 byte entities
         static constexpr size_t MIN_CHUNKS_PER_THREAD = 4;                              // Each thread should process at least 4 chunks (64KB)
@@ -495,19 +503,35 @@ namespace Astra
 
     private:
         // Random-access yield shape: each required -> a pointer (const preserved),
-        // each optional -> a pointer. Mirrors ForEach's yielded arguments.
+        // or a by-value Mut<R> for a non-const change-tracked R; each optional -> a
+        // pointer. Mirrors ForEach's yielded arguments.
+        template<typename R>
+        using AccessElement = std::conditional_t<Detail::IsMutableYield<R> && IsChangeTrackedV<R>, Mut<R>, R*>;
+
         template<typename ReqTuple, typename OptTuple> struct AccessTupleImpl;
         template<typename... R, typename... O>
         struct AccessTupleImpl<std::tuple<R...>, std::tuple<O...>>
         {
-            using type = std::tuple<R*..., O*...>;
+            using type = std::tuple<AccessElement<R>..., O*...>;
         };
 
         template<typename R>
-        ASTRA_FORCEINLINE R* BindRequired(const EntityRecord* rec) const
+        ASTRA_FORCEINLINE AccessElement<R> BindRequired(const EntityRecord* rec) const
         {
             using Bare = std::remove_const_t<R>;
-            return rec->archetype->template GetComponent<Bare>(rec->location);   // Bare* -> R* (adds const if any)
+            if constexpr (Detail::IsMutableYield<R> && IsChangeTrackedV<R>)
+            {
+                // Handing out the Mut does not mark; its first mutable use does, with
+                // the tick current at this call.
+                const int col = rec->archetype->GetColumnMeta().idToColumn[TypeID<Bare>::Value()];
+                return Mut<R>(rec->archetype->template GetComponent<Bare>(rec->location),
+                              rec->chunk->GetTicks(col) + rec->location.GetEntityIndex(),
+                              m_archetypeManager->CurrentTick());
+            }
+            else
+            {
+                return rec->archetype->template GetComponent<Bare>(rec->location);   // Bare* -> R* (adds const if any)
+            }
         }
         template<typename O>
         ASTRA_FORCEINLINE O* BindOptional(const EntityRecord* rec) const
@@ -520,6 +544,13 @@ namespace Astra
                 const ArchetypeColumnMeta& cm = rec->archetype->GetColumnMeta();
                 if (rec->chunk->IsDisabled(cm.idToColumn[TypeID<Bare>::Value()], rec->location.GetEntityIndex()))
                     return nullptr;
+            }
+            if constexpr (Detail::IsMutableYield<O> && IsChangeTrackedV<O>)
+            {
+                // Plan deviation 5: a present non-const tracked optional is a raw O*,
+                // so it marks the entity unconditionally (see MarkTrackedOptional).
+                const int col = rec->archetype->GetColumnMeta().idToColumn[TypeID<Bare>::Value()];
+                rec->chunk->GetTicks(col)[rec->location.GetEntityIndex()].changed = m_archetypeManager->CurrentTick();
             }
             return rec->archetype->template GetComponent<Bare>(rec->location);
         }
@@ -553,11 +584,12 @@ namespace Astra
 
         /**
          * Filter-aware random access: returns pointers to the yielded components for
-         * `e` (required -> T*, Optional -> T*), or Err(NotMatched) if `e` is absent,
-         * dead, filtered out, or disabled under this view's enabled filter. The
-         * pointers point INTO live chunk storage and are invalidated by any structural
-         * change (create/destroy/add/remove/defragment) — do not retain them across
-         * one. In-place value edits through the pointers are fine.
+         * `e` (required -> T*, or Mut<T> for a non-const change-tracked T; Optional ->
+         * T*), or Err(NotMatched) if `e` is absent, dead, filtered out, or disabled
+         * under this view's enabled filter. The pointers point INTO live chunk storage
+         * and are invalidated by any structural change (create/destroy/add/remove/
+         * defragment) — do not retain them across one. In-place value edits through
+         * the pointers are fine.
          */
         ASTRA_NODISCARD Result<AccessTuple, QueryError> Get(Entity e) const
         {
@@ -727,7 +759,8 @@ namespace Astra
                     static_assert(sizeof(Func) == 0,
                         "View callback must be invocable as (Entity, Comps&...) or (Comps&...). "
                         "Component params must be 'T&' (write) or 'const T&' (read); "
-                        "Optional<T> supplies a 'T*' argument.");
+                        "Optional<T> supplies a 'T*' argument. "
+                        "A change-tracked non-const component is yielded as Mut<T> (converts to T&; use .Read()/.Write()/.SetIfNeq()).");
             };
         }
 
@@ -800,9 +833,11 @@ namespace Astra
                 // in the query: the filtered path below is not instantiated at all,
                 // so this is the pre-existing loop (invariant 1) plus, when Stamp,
                 // the coarse change-detection stamp of every non-const yielded
-                // column per visited chunk (all-const: no stamp code).
+                // column per visited chunk (all-const: no stamp code). A tracked
+                // non-const yield (Mut<T>) needs the view-owned loop below, which
+                // already handles zero optionals.
                 (void)since;
-                if constexpr (sizeof...(Optional) == 0)
+                if constexpr (sizeof...(Optional) == 0 && !HasTrackedYield)
                 {
                     if constexpr (Stamp)
                         archetype->ForEachStamped<Required...>(std::forward<Func>(func));
@@ -861,9 +896,17 @@ namespace Astra
                     (hasOptional[OptionalTs] ? chunk->GetComponentArray<std::tuple_element_t<OptionalTs, OptionalTypes>>() : nullptr)...
                 };
 
+                // Tick columns for Mut<T> / optional marks (tracked yields only).
+                [[maybe_unused]] EntityTicks* reqTicks[sizeof...(RequiredTs) == 0 ? 1 : sizeof...(RequiredTs)] = {};
+                [[maybe_unused]] EntityTicks* optTicks[sizeof...(OptionalTs) == 0 ? 1 : sizeof...(OptionalTs)] = {};
+                if constexpr (HasTrackedYield)
+                    ResolveTrackedTicks(chunk.get(), cm, hasOptional, reqTicks, optTicks,
+                                        std::index_sequence<RequiredTs...>{}, std::index_sequence<OptionalTs...>{});
+
                 const auto& entities = chunk->GetEntities();
 
-                InvokeEntityCallback(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{});
+                InvokeEntityCallback(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{},
+                                     reqTicks, optTicks, now);
             }
         }
 
@@ -874,8 +917,9 @@ namespace Astra
             {
                 // Pre-existing chunk walk (invariant 1) plus the coarse change-
                 // detection stamp of every non-const yielded column for this chunk.
+                // A tracked non-const yield (Mut<T>) takes the view-owned loop.
                 (void)since;
-                if constexpr (sizeof...(Optional) == 0)
+                if constexpr (sizeof...(Optional) == 0 && !HasTrackedYield)
                 {
                     archetype->ForEachChunkStamped<Required...>(chunkIndex, std::forward<Func>(func));
                 }
@@ -915,7 +959,11 @@ namespace Astra
             if (count == 0) ASTRA_UNLIKELY
                 return;
 
-            StampChunkForYields(chunk.get(), archetype->GetColumnMeta(), hasOptional, m_archetypeManager->CurrentTick(),
+            // One tick read per chunk: the coarse stamp and the Mut<T> marks agree.
+            [[maybe_unused]] const Tick now = m_archetypeManager->CurrentTick();
+            [[maybe_unused]] const auto& cm = archetype->GetColumnMeta();
+
+            StampChunkForYields(chunk.get(), cm, hasOptional, now,
                                 std::index_sequence<RequiredTs...>{}, std::index_sequence<OptionalTs...>{});
 
             std::tuple<std::tuple_element_t<RequiredTs, RequiredTypes>*...> requiredPtrs =
@@ -926,10 +974,18 @@ namespace Astra
             {
                 (hasOptional[OptionalTs] ? chunk->GetComponentArray<std::tuple_element_t<OptionalTs, OptionalTypes>>() : nullptr)...
             };
-            
+
+            // Tick columns for Mut<T> / optional marks (tracked yields only).
+            [[maybe_unused]] EntityTicks* reqTicks[sizeof...(RequiredTs) == 0 ? 1 : sizeof...(RequiredTs)] = {};
+            [[maybe_unused]] EntityTicks* optTicks[sizeof...(OptionalTs) == 0 ? 1 : sizeof...(OptionalTs)] = {};
+            if constexpr (HasTrackedYield)
+                ResolveTrackedTicks(chunk.get(), cm, hasOptional, reqTicks, optTicks,
+                                    std::index_sequence<RequiredTs...>{}, std::index_sequence<OptionalTs...>{});
+
             const auto& entities = chunk->GetEntities();
-            
-            InvokeEntityCallback(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{});
+
+            InvokeEntityCallback(entities, requiredPtrs, optionalPtrs, count, std::forward<Func>(func), std::make_index_sequence<sizeof...(RequiredTs)>{}, std::make_index_sequence<sizeof...(OptionalTs)>{},
+                                 reqTicks, optTicks, now);
         }
 
         // Empty (tag) required components have no storage, so
@@ -953,12 +1009,94 @@ namespace Astra
             }
         }
 
-        template<typename EntitiesVec, typename ReqTuple, typename OptTuple, typename Func, size_t... ReqIs, size_t... OptIs>
-        ASTRA_FORCEINLINE void InvokeEntityCallback(const EntitiesVec& entities, const ReqTuple& reqPtrs, const OptTuple& optPtrs, size_t count, Func&& func, std::index_sequence<ReqIs...>, std::index_sequence<OptIs...>)
+        // ============ Change-tracked yield (spec §3.3, instantiated only when HasTrackedYield) ============
+        // Everything below the untracked branch of the two invoke helpers exists ONLY
+        // for a view that yields a non-const change-tracked component; every other
+        // view instantiates the pre-existing loop body byte for byte.
+
+        // Yield shape of one required component: Mut<R> for a non-const change-
+        // tracked R, otherwise the plain reference the pre-existing loops hand out.
+        template<typename R> struct YieldType { using type = R&; };
+        template<typename R> requires (Detail::IsMutableYield<R> && IsChangeTrackedV<R>)
+        struct YieldType<R> { using type = Mut<R>; };
+
+        // reqTicks[k] is the tick column for required k (nullptr unless tracked).
+        template<size_t K, typename ReqTuple>
+        ASTRA_FORCEINLINE typename YieldType<std::tuple_element_t<K, RequiredTypes>>::type
+        YieldRequired(const ReqTuple& reqPtrs, [[maybe_unused]] EntityTicks* const* reqTicks, size_t i, [[maybe_unused]] Tick now) const noexcept
         {
-            for (size_t i = 0; i < count; ++i)
+            using R = std::tuple_element_t<K, RequiredTypes>;
+            if constexpr (Detail::IsMutableYield<R> && IsChangeTrackedV<R>)
+                return Mut<R>(&std::get<K>(reqPtrs)[i], reqTicks[K] + i, now);
+            else
+                return RequiredElement(std::get<K>(reqPtrs), i);
+        }
+
+        // Plan deviation 5: a PRESENT non-const change-tracked optional is yielded as
+        // a raw O* (no conversion hook to mark through), so it marks the entity
+        // unconditionally. `opt` holds the pointers about to be handed out for entity
+        // i -- the chunk base pointers on the unfiltered path, the per-entity pointers
+        // on the enabled-filtered path (a disabled entity's pointer is nulled there
+        // and is not "present", so it must not mark).
+        template<size_t K, typename OptTuple>
+        ASTRA_FORCEINLINE static void MarkTrackedOptional([[maybe_unused]] const OptTuple& opt, [[maybe_unused]] EntityTicks* const* optTicks,
+                                                          [[maybe_unused]] size_t i, [[maybe_unused]] Tick now) noexcept
+        {
+            using O = std::tuple_element_t<K, OptionalTypes>;
+            if constexpr (Detail::IsMutableYield<O> && IsChangeTrackedV<O>)
             {
-                func(entities[i], RequiredElement(std::get<ReqIs>(reqPtrs), i)..., (std::get<OptIs>(optPtrs) ? &std::get<OptIs>(optPtrs)[i] : nullptr)...);
+                if (std::get<K>(opt)) optTicks[K][i].changed = now;
+            }
+        }
+        template<typename OptTuple, size_t... OptIs>
+        ASTRA_FORCEINLINE static void MarkTrackedOptionals([[maybe_unused]] const OptTuple& opt, [[maybe_unused]] EntityTicks* const* optTicks,
+                                                           [[maybe_unused]] size_t i, [[maybe_unused]] Tick now, std::index_sequence<OptIs...>) noexcept
+        {
+            (MarkTrackedOptional<OptIs>(opt, optTicks, i, now), ...);
+        }
+
+        // Tick columns for the tracked yields of one chunk: reqTicks[k] / optTicks[k]
+        // is the EntityTicks column for required / optional k, nullptr unless that
+        // yield is non-const AND change-tracked (AND, for an optional, present on this
+        // archetype). Same fold shape as StampChunkForYields; called only under
+        // `if constexpr (HasTrackedYield)`.
+        template<size_t... ReqIs, size_t... OptIs>
+        ASTRA_FORCEINLINE static void ResolveTrackedTicks([[maybe_unused]] ArchetypeChunk* chunk, [[maybe_unused]] const ArchetypeColumnMeta& cm,
+                                                          [[maybe_unused]] const std::array<bool, sizeof...(OptIs)>& hasOptional,
+                                                          [[maybe_unused]] EntityTicks** reqTicks, [[maybe_unused]] EntityTicks** optTicks,
+                                                          std::index_sequence<ReqIs...>, std::index_sequence<OptIs...>) noexcept
+        {
+            ((reqTicks[ReqIs] = (Detail::IsMutableYield<std::tuple_element_t<ReqIs, RequiredTypes>> && IsChangeTrackedV<std::tuple_element_t<ReqIs, RequiredTypes>>)
+                ? chunk->GetTicks(cm.idToColumn[TypeID<std::remove_const_t<std::tuple_element_t<ReqIs, RequiredTypes>>>::Value()]) : nullptr), ...);
+            ((optTicks[OptIs] = (hasOptional[OptIs] && Detail::IsMutableYield<std::tuple_element_t<OptIs, OptionalTypes>> && IsChangeTrackedV<std::tuple_element_t<OptIs, OptionalTypes>>)
+                ? chunk->GetTicks(cm.idToColumn[TypeID<std::remove_const_t<std::tuple_element_t<OptIs, OptionalTypes>>>::Value()]) : nullptr), ...);
+        }
+
+        template<typename EntitiesVec, typename ReqTuple, typename OptTuple, typename Func, size_t... ReqIs, size_t... OptIs>
+        ASTRA_FORCEINLINE void InvokeEntityCallback(const EntitiesVec& entities, const ReqTuple& reqPtrs, const OptTuple& optPtrs,
+                                                    size_t count, Func&& func, std::index_sequence<ReqIs...>, [[maybe_unused]] std::index_sequence<OptIs...> os,
+                                                    [[maybe_unused]] EntityTicks* const* reqTicks = nullptr, [[maybe_unused]] EntityTicks* const* optTicks = nullptr,
+                                                    [[maybe_unused]] Tick now = 0)
+        {
+            if constexpr (!HasTrackedYield)
+            {
+                // Pre-existing body, byte-identical: every untracked view lands here.
+                for (size_t i = 0; i < count; ++i)
+                {
+                    func(entities[i], RequiredElement(std::get<ReqIs>(reqPtrs), i)..., (std::get<OptIs>(optPtrs) ? &std::get<OptIs>(optPtrs)[i] : nullptr)...);
+                }
+            }
+            else
+            {
+                for (size_t i = 0; i < count; ++i)
+                {
+                    MarkTrackedOptionals(optPtrs, optTicks, i, now, os);
+                    // Materialise the yields as lvalues (a tuple of T&... / Mut<T>...) so
+                    // `auto&`, `T&` (Mut's implicit conversion) and by-value `Mut<T>`
+                    // parameters all bind; std::apply hands them over as T& / Mut<T>&.
+                    std::tuple<typename YieldType<std::tuple_element_t<ReqIs, RequiredTypes>>::type...> req{ YieldRequired<ReqIs>(reqPtrs, reqTicks, i, now)... };
+                    std::apply([&](auto&... r) { func(entities[i], r..., (std::get<OptIs>(optPtrs) ? &std::get<OptIs>(optPtrs)[i] : nullptr)...); }, req);
+                }
             }
         }
 
@@ -1024,11 +1162,29 @@ namespace Astra
         template<typename EntitiesVec, typename ReqTuple, typename OptTuple, typename Func, size_t... ReqIs, size_t... OptIs>
         ASTRA_FORCEINLINE void InvokeEntityCallbackFiltered(const EntitiesVec& entities, const ReqTuple& reqPtrs, const OptTuple& optPtrs,
                                                             size_t begin, size_t end, ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm,
-                                                            Func&& func, std::index_sequence<ReqIs...>, std::index_sequence<OptIs...>)
+                                                            Func&& func, std::index_sequence<ReqIs...>, [[maybe_unused]] std::index_sequence<OptIs...> os,
+                                                            [[maybe_unused]] EntityTicks* const* reqTicks = nullptr, [[maybe_unused]] EntityTicks* const* optTicks = nullptr,
+                                                            [[maybe_unused]] Tick now = 0)
         {
-            for (size_t i = begin; i < end; ++i)
+            if constexpr (!HasTrackedYield)
             {
-                func(entities[i], RequiredElement(std::get<ReqIs>(reqPtrs), i)..., FilteredOptionalArg<OptIs>(optPtrs, i, chunk, cm)...);
+                // Pre-existing body, byte-identical: every untracked view lands here.
+                for (size_t i = begin; i < end; ++i)
+                {
+                    func(entities[i], RequiredElement(std::get<ReqIs>(reqPtrs), i)..., FilteredOptionalArg<OptIs>(optPtrs, i, chunk, cm)...);
+                }
+            }
+            else
+            {
+                for (size_t i = begin; i < end; ++i)
+                {
+                    // Per-entity optional pointers first: an enableable tracked optional
+                    // that is disabled for this entity is nulled here and must not mark.
+                    std::tuple<std::tuple_element_t<OptIs, OptionalTypes>*...> opt{ FilteredOptionalArg<OptIs>(optPtrs, i, chunk, cm)... };
+                    MarkTrackedOptionals(opt, optTicks, i, now, os);
+                    std::tuple<typename YieldType<std::tuple_element_t<ReqIs, RequiredTypes>>::type...> req{ YieldRequired<ReqIs>(reqPtrs, reqTicks, i, now)... };
+                    std::apply([&](auto&... r) { func(entities[i], r..., std::get<OptIs>(opt)...); }, req);
+                }
             }
         }
 
@@ -1096,14 +1252,19 @@ namespace Astra
             if (anyReqFull) ASTRA_UNLIKELY
                 return;   // Tier 2: a required column is fully disabled -> skip whole chunk
 
+            // Tick columns for Mut<T> / optional marks (tracked yields only); after
+            // both whole-chunk rejects, like the stamp below (Ruling B).
+            [[maybe_unused]] EntityTicks* reqTicks[sizeof...(ReqIs) == 0 ? 1 : sizeof...(ReqIs)] = {};
+            [[maybe_unused]] EntityTicks* optTicks[sizeof...(OptIs) == 0 ? 1 : sizeof...(OptIs)] = {};
+            if constexpr (HasTrackedYield)
+                ResolveTrackedTicks(chunk, cm, hasOptional, reqTicks, optTicks, reqSeq, optSeq);
+
             // Coarse change-detection stamp, deliberately AFTER both whole-chunk
             // rejects above (change version, enabled): a chunk this view skips
             // wholesale is not "visited" and must not be stamped (it would
             // manufacture downstream false positives).
             if constexpr (Stamp)
                 StampChunkForYields(chunk, cm, hasOptional, now, reqSeq, optSeq);
-            else
-                (void)now;
 
             if constexpr (HasOptionalFilter)
             {
@@ -1113,7 +1274,7 @@ namespace Astra
             if (allZero)
             {
                 // Tier 1: all relevant columns fully enabled -> pre-existing body, no bit tests.
-                InvokeEntityCallback(entities, reqPtrs, optPtrs, count, func, reqSeq, optSeq);
+                InvokeEntityCallback(entities, reqPtrs, optPtrs, count, func, reqSeq, optSeq, reqTicks, optTicks, now);
                 return;
             }
 
@@ -1122,7 +1283,7 @@ namespace Astra
             Detail::ForEachEnabledRun(reqWords, NReq, count,
                 [&](size_t begin, size_t end)
                 {
-                    InvokeEntityCallbackFiltered(entities, reqPtrs, optPtrs, begin, end, chunk, cm, func, reqSeq, optSeq);
+                    InvokeEntityCallbackFiltered(entities, reqPtrs, optPtrs, begin, end, chunk, cm, func, reqSeq, optSeq, reqTicks, optTicks, now);
                 });
         }
 

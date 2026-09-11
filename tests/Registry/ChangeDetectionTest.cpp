@@ -675,3 +675,120 @@ TEST(ChangeDetectionTracked, DeserializeSetsEveryTrackedEntityToTheLoadersTick)
     });
     EXPECT_EQ(n, 400u);
 }
+
+// ---- Task 7: Mut<T> + marking accessors -----------------------------------
+
+TEST(ChangeDetectionMut, ConversionAndWriteMarkReadDoesNotSetIfNeqMarksOnlyOnChange)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto e = reg.CreateEntityWith(TrackedPos{1, 2, 3});
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 2u);
+
+    AdvanceTo(reg, 3);
+    reg.CreateView<TrackedPos>().ForEach([](Astra::Mut<TrackedPos> p) { (void)p.Read(); });
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 2u);   // Read() never marks
+    EXPECT_EQ(VersionOf<TrackedPos>(reg, e), 3u);         // ...but the chunk was still stamped (coarse tier)
+
+    AdvanceTo(reg, 4);
+    reg.CreateView<TrackedPos>().ForEach([](TrackedPos& p) { p.x += 1.0f; });   // legacy lambda: implicit conversion marks
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 4u);
+
+    AdvanceTo(reg, 5);
+    reg.CreateView<TrackedPos>().ForEach([](Astra::Mut<TrackedPos> p) { p->y = 9.0f; });   // operator-> marks
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 5u);
+
+    AdvanceTo(reg, 6);
+    reg.CreateView<TrackedPos>().ForEach([](Astra::Mut<TrackedPos> p) { EXPECT_FALSE(p.SetIfNeq(TrackedPos{2, 9, 3})); });
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 5u);   // equal: no mark
+    reg.CreateView<TrackedPos>().ForEach([](Astra::Mut<TrackedPos> p) { EXPECT_TRUE(p.SetIfNeq(TrackedPos{7, 9, 3})); });
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 6u);
+
+    AdvanceTo(reg, 7);
+    reg.CreateView<TrackedPos>().ForEach([](Astra::Mut<TrackedPos> p)
+    {
+        EXPECT_TRUE(p.IsChanged(5));  EXPECT_FALSE(p.IsChanged(6));
+        EXPECT_TRUE(p.IsAdded(1));    EXPECT_FALSE(p.IsAdded(2));
+        p.Write().z = 0.0f;
+    });
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 7u);
+
+    // const yield stays a plain const T& (no Mut, no mark, no stamp).
+    AdvanceTo(reg, 8);
+    reg.CreateView<const TrackedPos>().ForEach([](const TrackedPos&) {});
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 7u);
+    EXPECT_EQ(VersionOf<TrackedPos>(reg, e), 7u);
+}
+
+TEST(ChangeDetectionMut, GenericAndEntityLeadingLambdasStillCompileAndMark)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto e = reg.CreateEntity<TrackedPos, Position>();
+    AdvanceTo(reg, 3);
+    size_t n = 0;
+    reg.CreateView<TrackedPos, const Position>().ForEach([&](Astra::Entity, auto& p, const Position&) { ++n; p.Write().x = 1.0f; });
+    EXPECT_EQ(n, 1u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 3u);
+    AdvanceTo(reg, 4);
+    reg.CreateView<TrackedPos, const Position>().ParallelForEach([](TrackedPos& p, const Position&) { p.x = 2.0f; });
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 4u);
+}
+
+TEST(ChangeDetectionMut, GetTupleYieldsMutForTrackedAndMarksOnUse)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto e = reg.CreateEntity<TrackedPos, Position>();
+    auto v = reg.CreateView<TrackedPos, const Position>();
+    static_assert(std::is_same_v<std::tuple_element_t<0, decltype(v)::AccessTuple>, Astra::Mut<TrackedPos>>);
+    static_assert(std::is_same_v<std::tuple_element_t<1, decltype(v)::AccessTuple>, const Position*>);
+
+    AdvanceTo(reg, 3);
+    auto r = v.Get(e);
+    ASSERT_TRUE(r.IsOk());
+    auto& [mp, pp] = *r.GetValue();
+    (void)pp;
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 2u);   // handing out Mut does not mark
+    mp.Write().x = 5.0f;
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 3u);
+    EXPECT_EQ(VersionOf<TrackedPos>(reg, e), 3u);         // Get stamped the chunk on the non-const request
+}
+
+TEST(ChangeDetectionMut, OptionalNonConstTrackedMarksWhenPresentConstDoesNot)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto with    = reg.CreateEntity<Position, TrackedPos>();
+    auto without = reg.CreateEntity<Position>();
+    (void)without;
+    AdvanceTo(reg, 3);
+    reg.CreateView<const Position, Astra::Optional<TrackedPos>>().ForEach([](const Position&, TrackedPos*) {});
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, with).changed, 3u);   // deviation 5: present + non-const => marked
+    AdvanceTo(reg, 4);
+    reg.CreateView<const Position, Astra::Optional<const TrackedPos>>().ForEach([](const Position&, const TrackedPos*) {});
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, with).changed, 3u);
+}
+
+TEST(ChangeDetectionMut, RegistryAccessorsMarkTrackedEntities)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 2);
+    auto e = reg.CreateEntityWith(TrackedPos{1, 1, 1});
+
+    AdvanceTo(reg, 3);
+    ASSERT_NE(std::as_const(reg).GetComponent<TrackedPos>(e), nullptr);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 2u);   // const: no mark
+    ASSERT_NE(reg.GetComponent<TrackedPos>(e), nullptr);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 3u);   // non-const: marked
+
+    AdvanceTo(reg, 4);
+    EXPECT_TRUE(reg.Modified<TrackedPos>(e));
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 4u);
+
+    AdvanceTo(reg, 5);
+    EXPECT_FALSE(reg.SetIfNeq<TrackedPos>(e, TrackedPos{1, 1, 1}));
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 4u);
+    EXPECT_TRUE(reg.SetIfNeq<TrackedPos>(e, TrackedPos{2, 1, 1}));
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 5u);
+}
