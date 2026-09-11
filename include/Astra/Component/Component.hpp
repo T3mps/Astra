@@ -67,6 +67,29 @@ namespace Astra
     template<typename T>
     inline constexpr bool IsEnableableV = EnableableTraits<std::remove_const_t<T>>::value;
 
+    /**
+     * Opt-in exact change tracking (spec 2026-09-10 §3.2). A component is
+     * change-tracked iff it declares `static constexpr bool AstraChangeTracked = true`
+     * or specializes Astra::ChangeTrackedTraits<T>. Tracked columns carry per-entity
+     * {added, changed} ticks (8 B per entity per tracked column) and are handed out as
+     * Mut<T> by non-const views; everything else pays only the free per-chunk version.
+     * Same if-constexpr-gated shape as EnableableTraits (MSVC short-circuit rationale).
+     */
+    template<typename T>
+    struct ChangeTrackedTraits
+    {
+        static constexpr bool value = []() constexpr
+        {
+            if constexpr (requires { { T::AstraChangeTracked } -> std::convertible_to<bool>; })
+                return T::AstraChangeTracked;
+            else
+                return false;
+        }();
+    };
+
+    template<typename T>
+    inline constexpr bool IsChangeTrackedV = ChangeTrackedTraits<std::remove_const_t<T>>::value;
+
     namespace Detail
     {
         // A yielded component whose access is non-const and which has storage. Only
@@ -109,6 +132,7 @@ namespace Astra
         bool is_trivially_destructible = false;   // ONLY trait bool with a default: false = always-call-fn-ptr, so a descriptor built outside the registry factory stays safe; siblings are factory-assigned only
         bool is_empty;
         bool isEnableable = false;   // defaults false (same rationale as is_trivially_destructible above): a hand-built descriptor stays safe; the registry factory assigns IsEnableableV<T>
+        bool isChangeTracked = false;   // defaults false (hand-built descriptors stay safe); the registry factory assigns IsChangeTrackedV<T>
         ConstructFn* defaultConstruct;
         DestructFn* destruct;
         CopyConstructFn* copyConstruct;

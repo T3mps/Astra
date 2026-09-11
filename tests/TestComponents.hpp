@@ -364,6 +364,28 @@ namespace Astra::Test
         }
     };
 
+    // Change-detection suite (spec 2026-09-10 §3.2): the ONLY two change-tracked
+    // types in the test binary (TypeID budget). TrackedVel is also enableable so the
+    // enabled+changed union run-scan can be tested without a third type.
+    struct TrackedPos
+    {
+        static constexpr bool AstraChangeTracked = true;
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        TrackedPos() = default;
+        TrackedPos(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+        bool operator==(const TrackedPos&) const = default;
+    };
+    struct TrackedVel
+    {
+        static constexpr bool AstraChangeTracked = true;
+        static constexpr bool AstraEnableable = true;
+        float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+        TrackedVel() = default;
+        TrackedVel(float a, float b, float c) : dx(a), dy(b), dz(c) {}
+        bool operator==(const TrackedVel&) const = default;
+    };
+    static_assert(Component<TrackedPos> && Component<TrackedVel>);
+
     // Helper type traits for testing
     template<typename T>
     struct ComponentTraits

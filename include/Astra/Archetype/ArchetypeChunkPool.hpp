@@ -51,6 +51,13 @@ namespace Astra
         uint16_t  enableableColumns[MAX_COMPONENTS]{};   // [0, enableableColumnCount) valid, ascending ordinal
         uint16_t  enableableColumnCount{0};
 
+        // Change-tracked columns (spec 2026-09-10 §3.2): ordinals whose component opted
+        // into AstraChangeTracked. Only these carve per-chunk {added, changed} tick
+        // columns and copy ticks on relocation; trackedColumnCount == 0 is the zero-cost
+        // early-out every untracked archetype takes. Built by Archetype::BuildColumnMeta.
+        uint16_t  trackedColumns[MAX_COMPONENTS]{};
+        uint16_t  trackedColumnCount{0};
+
         ArchetypeColumnMeta() { for (auto& c : idToColumn) c = -1; }
     };
 
@@ -113,6 +120,7 @@ namespace Astra
             }
 
             StampAllColumns(tick);
+            InitTicks(index, tick);
 
             return index;
         }
@@ -181,6 +189,7 @@ namespace Astra
             ((ConstructComponentAt(index, std::forward<Components>(components))), ...);
 
             StampAllColumns(tick);
+            InitTicks(index, tick);
 
             return index;
         }
@@ -198,9 +207,18 @@ namespace Astra
                 m_meta->columns[c].descriptor->BatchDefaultConstruct(startPtr, count);
             }
 
+            const size_t start = m_count;
             m_count += count;
 
             StampAllColumns(tick);
+
+            // Per-entity tick init for tracked columns only: one compare keeps the
+            // untracked create_batch hot path free of the per-slot loop.
+            if (m_meta->trackedColumnCount) ASTRA_UNLIKELY
+            {
+                for (size_t i = start; i < m_count; ++i)
+                    InitTicks(i, tick);
+            }
         }
         
         void BatchMoveComponentsFrom(std::span<const size_t> dstIndices, const ArchetypeChunk& srcChunk, std::span<const size_t> srcIndices, const ComponentMask& componentsToMove)
@@ -258,6 +276,16 @@ namespace Astra
                 {
                     for (size_t i = 0; i < count; ++i)
                         SetDisabled(c, dstIndices[i], srcChunk.IsDisabled(sc, srcIndices[i]));
+                }
+
+                // Tick carry (Task 6): a shared tracked column keeps each entity's own
+                // {added, changed} across the batch move. dst slots were InitTicks'd to
+                // Now() when claimed (BatchMoveEntitiesFrom); this overwrites the SHARED
+                // columns only -- a newly added tracked column keeps Now().
+                if (desc.isChangeTracked) ASTRA_UNLIKELY
+                {
+                    for (size_t i = 0; i < count; ++i)
+                        CopyTicks(c, dstIndices[i], srcChunk, sc, srcIndices[i]);
                 }
             }
         }
@@ -399,6 +427,15 @@ namespace Astra
                     SetDisabled(c, index, IsDisabled(c, lastIndex));
                 SetDisabled(c, lastIndex, false);
             }
+
+            // Tick carry: the moved (last) entity's ticks fill the vacated slot. No tail
+            // clear is needed (ticks are re-initialised when a slot is reused).
+            if (index != lastIndex) ASTRA_LIKELY
+                for (uint16_t t = 0; t < m_meta->trackedColumnCount; ++t)
+                {
+                    const uint16_t c = m_meta->trackedColumns[t];
+                    m_columns[c].ticks[index] = m_columns[c].ticks[lastIndex];
+                }
 
             // Remove last entity
             m_entities.pop_back();
@@ -574,6 +611,49 @@ namespace Astra
                                        static_cast<const std::byte*>(m_memory));
         }
 
+        // ===================== Change detection: per-entity ticks (tracked columns) =====================
+        ASTRA_NODISCARD ASTRA_FORCEINLINE EntityTicks* GetTicks(int column) noexcept
+        {
+            ASTRA_ASSERT(column >= 0 && column < m_meta->columnCount, "column ordinal out of range");
+            return m_columns[column].ticks;
+        }
+        ASTRA_NODISCARD ASTRA_FORCEINLINE const EntityTicks* GetTicks(int column) const noexcept
+        {
+            ASTRA_ASSERT(column >= 0 && column < m_meta->columnCount, "column ordinal out of range");
+            return m_columns[column].ticks;
+        }
+        ASTRA_NODISCARD ASTRA_FORCEINLINE bool IsTracked(int column) const noexcept
+        {
+            return m_columns[column].ticks != nullptr;
+        }
+
+        // A slot just received a NEW component set (create / batch create / added
+        // component): every tracked column reads added == changed == tick.
+        ASTRA_FORCEINLINE void InitTicks(size_t index, Tick tick) noexcept
+        {
+            for (uint16_t t = 0; t < m_meta->trackedColumnCount; ++t)
+                m_columns[m_meta->trackedColumns[t]].ticks[index] = EntityTicks{tick, tick};
+        }
+
+        // Relocation carry: copy one slot's ticks for one shared tracked column. The two
+        // columns share a ComponentID (hence tracked-ness); no-op when untracked.
+        ASTRA_FORCEINLINE void CopyTicks(int dstColumn, size_t dstIndex,
+                                         const ArchetypeChunk& src, int srcColumn, size_t srcIndex) noexcept
+        {
+            EntityTicks* d = m_columns[dstColumn].ticks;
+            const EntityTicks* s = src.m_columns[srcColumn].ticks;
+            if (d && s) ASTRA_UNLIKELY
+                d[dstIndex] = s[srcIndex];
+        }
+
+        ASTRA_NODISCARD size_t GetTicksOffset(uint16_t column) const
+        {
+            ASTRA_ASSERT(column < m_meta->columnCount, "Column ordinal out of bounds");
+            const EntityTicks* t = m_columns[column].ticks;
+            if (!t) return std::numeric_limits<size_t>::max();
+            return static_cast<size_t>(reinterpret_cast<const std::byte*>(t) - static_cast<const std::byte*>(m_memory));
+        }
+
         ASTRA_NODISCARD bool IsFull() const noexcept { return m_count >= m_capacity; }
         // Byte size of this chunk's arena. Chunks of one archetype no longer
         // share a single size (Phase 2), so memory accounting must sum this
@@ -686,6 +766,17 @@ namespace Astra
                 offset += words * 8;
             }
 
+            // Third loop: one {added, changed} tick column per CHANGE-TRACKED column,
+            // 8-byte aligned. Zero-init == tick 0 == "never"; every slot is initialised
+            // to Now() when an entity lands in it (InitTicks) or copied on a move.
+            for (uint16_t t = 0; t < m_meta->trackedColumnCount; ++t)
+            {
+                const uint16_t c = m_meta->trackedColumns[t];
+                offset = (offset + 7) & ~size_t(7);
+                m_columns[c].ticks = reinterpret_cast<EntityTicks*>(static_cast<std::byte*>(m_memory) + offset);
+                offset += m_capacity * sizeof(EntityTicks);
+            }
+
             ASTRA_ASSERT(offset <= m_chunkSize, "Component layout exceeds chunk size");
         }
 
@@ -715,12 +806,19 @@ namespace Astra
         // fixed metadata cost, always on -- the one part of this feature that isn't
         // pay-for-what-you-use. uint32_t count (not uint16) because capacity can
         // exceed 65535 at the 512KB chunk cap.
+        //
+        // Change-tracked columns (spec 2026-09-10 §3.2) likewise own a per-entity
+        // {added, changed} tick column carved INSIDE the arena; untracked columns keep
+        // ticks == nullptr. That is a further +8 bytes/slot of fixed per-chunk metadata
+        // (Column 24 -> 32 bytes), also accepted: the packed-[N] Column deferral now
+        // covers three fields (disabledCount, disabledWords, ticks).
         struct Column
         {
             void* base{nullptr};
             uint32_t stride{0};
             uint32_t disabledCount{0};        // == popcount(disabledWords[0, words)); 0 for non-enableable
             uint64_t* disabledWords{nullptr}; // enableable columns only; nullptr otherwise
+            EntityTicks* ticks{nullptr};      // change-tracked columns only; nullptr otherwise
         };
 
         void* m_memory;

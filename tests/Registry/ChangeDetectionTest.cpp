@@ -500,3 +500,178 @@ TEST(ChangeDetectionFilter, ChangedTermCountsTowardArchetypeMatchingAndAccess)
     static_assert(!Plain::HasChangeFilter);
     SUCCEED();
 }
+
+// ---- Task 6: opt-in trait + per-entity tick columns ----------------------
+
+using Astra::Test::TrackedPos;
+using Astra::Test::TrackedVel;
+
+namespace
+{
+    template<typename T>
+    Astra::EntityTicks TicksOf(Astra::Registry& reg, Astra::Entity e)
+    {
+        const auto* rec = reg.GetArchetypeManager()->GetEntityRecord(e);
+        if (!rec || !rec->chunk) { ADD_FAILURE() << "entity not located"; return {}; }
+        const int col = rec->archetype->GetColumnMeta().idToColumn[Astra::TypeID<T>::Value()];
+        auto* ticks = rec->chunk->GetTicks(col);
+        if (!ticks) { ADD_FAILURE() << "T is not tracked"; return {}; }
+        return ticks[rec->location.GetEntityIndex()];
+    }
+
+    namespace TrackedTraitDetail
+    {
+        struct Spelled { static constexpr bool AstraChangeTracked = true; int v; };
+        struct Plain   { int v; };
+        struct Spec    { int v; };
+    }
+}
+template<> struct Astra::ChangeTrackedTraits<TrackedTraitDetail::Spec> { static constexpr bool value = true; };
+
+TEST(ChangeDetectionTracked, TraitDetectsBothSpellingsAndDescriptorSnapshotsIt)
+{
+    static_assert(Astra::IsChangeTrackedV<TrackedTraitDetail::Spelled>);
+    static_assert(Astra::IsChangeTrackedV<TrackedTraitDetail::Spec>);
+    static_assert(!Astra::IsChangeTrackedV<TrackedTraitDetail::Plain>);
+    static_assert(!Astra::IsChangeTrackedV<int>);
+    static_assert(Astra::IsChangeTrackedV<const TrackedPos>);
+    static_assert(!Astra::IsChangeTrackedV<Position>);
+
+    Astra::Registry reg;
+    reg.GetComponentRegistry()->RegisterComponents<TrackedPos, Position>();
+    EXPECT_TRUE(reg.GetComponentRegistry()->GetComponentDescriptor(Astra::TypeID<TrackedPos>::Value())->isChangeTracked);
+    EXPECT_FALSE(reg.GetComponentRegistry()->GetComponentDescriptor(Astra::TypeID<Position>::Value())->isChangeTracked);
+}
+
+TEST(ChangeDetectionTracked, UntrackedColumnsCarveNoTicksTrackedOnesDo)
+{
+    Astra::Registry reg;
+    auto e = reg.CreateEntity<Position, TrackedPos>();
+    const auto* rec = reg.GetArchetypeManager()->GetEntityRecord(e);
+    const auto& cm = rec->archetype->GetColumnMeta();
+    EXPECT_EQ(cm.trackedColumnCount, 1u);
+    EXPECT_FALSE(rec->chunk->IsTracked(cm.idToColumn[Astra::TypeID<Position>::Value()]));
+    EXPECT_EQ(rec->chunk->GetTicks(cm.idToColumn[Astra::TypeID<Position>::Value()]), nullptr);
+    EXPECT_TRUE(rec->chunk->IsTracked(cm.idToColumn[Astra::TypeID<TrackedPos>::Value()]));
+    EXPECT_EQ(rec->chunk->GetTicksOffset(static_cast<uint16_t>(cm.idToColumn[Astra::TypeID<TrackedPos>::Value()])) % 8, 0u);
+
+    // A plain archetype has zero tracked columns: the zero-cost early-out.
+    auto p = reg.CreateEntity<Position, Velocity>();
+    EXPECT_EQ(reg.GetArchetypeManager()->GetEntityRecord(p)->archetype->GetColumnMeta().trackedColumnCount, 0u);
+}
+
+TEST(ChangeDetectionTracked, CreateAndAddInitialiseAddedAndChangedToNow)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 5);
+    auto a = reg.CreateEntity<TrackedPos>();
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, a).added, 5u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, a).changed, 5u);
+
+    auto b = reg.CreateEntityWith(TrackedPos{1, 2, 3});
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, b).added, 5u);
+
+    std::vector<Astra::Entity> batch(300);
+    ASSERT_EQ((reg.CreateEntitiesWith<TrackedPos, TrackedVel>(300, std::span{batch},
+        [](size_t) { return std::tuple{TrackedPos{}, TrackedVel{}}; })), 300u);
+    EXPECT_EQ(TicksOf<TrackedVel>(reg, batch.back()).added, 5u);
+
+    AdvanceTo(reg, 6);
+    auto c = reg.CreateEntity<Position>();
+    ASSERT_TRUE(reg.AddComponent<TrackedPos>(c, TrackedPos{}));
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, c).added, 6u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, c).changed, 6u);
+
+    AdvanceTo(reg, 7);
+    Astra::CommandBuffer cmd(&reg);
+    cmd.AddComponent(c, TrackedVel{});
+    cmd.Execute();
+    EXPECT_EQ(TicksOf<TrackedVel>(reg, c).added, 7u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, c).added, 6u);   // carried component keeps its ticks
+}
+
+TEST(ChangeDetectionTracked, TicksTravelAcrossArchetypeMovesSwapRemoveAndCompaction)
+{
+    Astra::Registry reg;
+    AdvanceTo(reg, 3);
+    std::vector<Astra::Entity> ents(1000);
+    ASSERT_EQ((reg.CreateEntities<TrackedPos, Position>(1000, std::span{ents})), 1000u);
+
+    // Give ents[500] distinct ticks by adding it later... instead: re-create it later.
+    AdvanceTo(reg, 4);
+    auto late = reg.CreateEntity<TrackedPos, Position>();
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, late).added, 4u);
+
+    // Cross-archetype add: ticks copied (added stays 4, not 5).
+    AdvanceTo(reg, 5);
+    ASSERT_TRUE(reg.AddComponent<Velocity>(late, Velocity{}));
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, late).added, 4u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, late).changed, 4u);
+
+    // Cross-archetype remove: same.
+    AdvanceTo(reg, 6);
+    ASSERT_TRUE(reg.RemoveComponent<Velocity>(late));
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, late).added, 4u);
+
+    // Batch add (BatchMoveComponentsFrom): ticks copied for the shared tracked column.
+    AdvanceTo(reg, 7);
+    std::vector<Astra::Entity> some(ents.begin(), ents.begin() + 100);
+    reg.AddComponents<Velocity>(std::span{some}, Velocity{});
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, some[0]).added, 3u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, some[99]).added, 3u);
+
+    // Swap-remove within a chunk: destroy the entity in front of `late` in its chunk;
+    // `late` (or whoever fills the hole) must keep its own ticks.
+    AdvanceTo(reg, 8);
+    const auto* recLate = reg.GetArchetypeManager()->GetEntityRecord(late);
+    const auto* chunk = recLate->chunk;
+    const size_t lateIdx = recLate->location.GetEntityIndex();
+    ASSERT_GT(lateIdx, 0u);
+    Astra::Entity victim = chunk->GetEntity(0);
+    ASSERT_NE(victim, late);
+    // Make `late` the tail so it is the one swapped down: destroy everything after it.
+    std::vector<Astra::Entity> tail;
+    for (size_t i = lateIdx + 1; i < chunk->GetCount(); ++i) tail.push_back(chunk->GetEntity(i));
+    reg.DestroyEntities(std::span{tail});
+    reg.DestroyEntity(victim);                          // late swaps into slot 0
+    EXPECT_EQ(reg.GetArchetypeManager()->GetEntityRecord(late)->location.GetEntityIndex(), 0u);
+    EXPECT_EQ(TicksOf<TrackedPos>(reg, late).added, 4u);
+
+    // Compaction: fragment the {TrackedPos, Position} archetype hard, defragment, ticks survive.
+    AdvanceTo(reg, 9);
+    std::vector<Astra::Entity> doomed;
+    for (size_t i = 0; i < ents.size(); ++i) if (i % 10 < 8) doomed.push_back(ents[i]);
+    reg.DestroyEntities(std::span{doomed});
+    auto res = reg.Defragment();
+    ASSERT_GT(res.entitiesMoved, 0u);
+    for (size_t i = 0; i < ents.size(); ++i)
+        if (i % 10 >= 8 && i >= 100 && reg.IsValid(ents[i]))
+            EXPECT_EQ(TicksOf<TrackedPos>(reg, ents[i]).added, 3u);
+}
+
+TEST(ChangeDetectionTracked, DeserializeSetsEveryTrackedEntityToTheLoadersTick)
+{
+    std::vector<std::byte> buffer;
+    {
+        Astra::Registry reg;
+        AdvanceTo(reg, 30);
+        std::vector<Astra::Entity> ents(400);
+        ASSERT_EQ((reg.CreateEntities<TrackedPos, Position>(400, std::span{ents})), 400u);
+        auto saved = reg.Save();
+        ASSERT_TRUE(saved.IsOk());
+        buffer = std::move(*saved.GetValue());
+    }
+    auto componentRegistry = std::make_shared<Astra::ComponentRegistry>();
+    componentRegistry->RegisterComponents<TrackedPos, Position>();
+    auto loaded = Astra::Registry::Load(buffer, componentRegistry);
+    ASSERT_TRUE(loaded.IsOk());
+    auto& reg = **loaded.GetValue();
+    size_t n = 0;
+    reg.CreateView<const TrackedPos>().ForEach([&](Astra::Entity e, const TrackedPos&)
+    {
+        ++n;
+        EXPECT_EQ(TicksOf<TrackedPos>(reg, e).added, 1u);
+        EXPECT_EQ(TicksOf<TrackedPos>(reg, e).changed, 1u);
+    });
+    EXPECT_EQ(n, 400u);
+}

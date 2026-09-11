@@ -347,6 +347,11 @@ namespace Astra
             desc.is_empty = std::is_empty_v<T>;
             desc.isEnableable = IsEnableableV<T>;
 
+            static_assert(!(IsChangeTrackedV<T> && std::is_empty_v<T>),
+                "AstraChangeTracked on a tag (empty) component is meaningless: a tag has no value to change. "
+                "Use Added<T>/Signal::ComponentAdded for presence, or give the component data.");
+            desc.isChangeTracked = IsChangeTrackedV<T>;
+
             // An enableable component must carry storage: the disabled bit lives
             // per-entity in the chunk's column data, and an empty/tag type has no
             // column (idToColumn == -1) to hang that bit off of. A runtime guard

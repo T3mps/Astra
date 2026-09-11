@@ -1335,6 +1335,11 @@ namespace Astra
                         // takes the born-enabled branch above -- no bit write.
                         if (desc.isEnableable) ASTRA_UNLIKELY
                             dstChunk->SetDisabled(c, dstEntityIdx, srcChunk->IsDisabled(sc, srcEntityIdx));
+                        // Tick carry (Task 6): a shared tracked column keeps the entity's
+                        // own {added, changed}. The newly ADDED component keeps the
+                        // InitTicks(Now()) value AllocateEntitySlot gave it.
+                        if (desc.isChangeTracked) ASTRA_UNLIKELY
+                            dstChunk->CopyTicks(c, dstEntityIdx, *srcChunk, sc, srcEntityIdx);
                     }
                 }
             }
@@ -1623,6 +1628,10 @@ namespace Astra
                         // in the id == newComponentId branch above) is born enabled.
                         if (desc.isEnableable) ASTRA_UNLIKELY
                             dstChunk->SetDisabled(c, dstEntityIdx, srcChunk->IsDisabled(sc, srcEntityIdx));
+                        // Tick carry (Task 6): mirror MoveAndAdd -- shared tracked column
+                        // keeps its ticks; the added component keeps AllocateEntitySlot's Now().
+                        if (desc.isChangeTracked) ASTRA_UNLIKELY
+                            dstChunk->CopyTicks(c, dstEntityIdx, *srcChunk, sc, srcEntityIdx);
                     }
                 }
             }
