@@ -1,4 +1,5 @@
 #include <atomic>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -218,6 +219,40 @@ TEST(ChangeDetectionScheduler, RegistrySwitchResetsLastRun)
     s.Execute(b);                                        // ticks of `a` mean nothing in `b`
     EXPECT_EQ(ReadChanged::s_ticks.back().first, 0u);    // reset: sees everything once
     EXPECT_EQ(ReadChanged::s_seen, 1u);
+}
+
+TEST(ChangeDetectionScheduler, SameAddressRegistryRecreationResetsLastRun)
+{
+    // Ruling H: a Registry destroyed and re-created at the SAME address (stack
+    // re-entry, unique_ptr reset+make_unique, the "reload level" flow) defeats the
+    // pointer-identity reset above -- the new registry's ticks restart at 1 while
+    // every cached lastRun is far ahead, so nothing would read as changed until
+    // the tick caught up (a silent false negative). The scheduler must notice
+    // that its cached lastRun is not OLDER than the registry's current tick.
+    std::optional<Astra::Registry> world;
+    world.emplace();
+    const Astra::Registry* const before = &*world;
+    (void)world->CreateEntity<Position>();
+
+    ReadChanged::s_ticks.clear();
+    Astra::SystemScheduler s;                          // persists across the re-creation
+    ASSERT_TRUE(s.AddSystem<ReadChanged>().IsOk());    // never records commands: holds no arena blocks
+    for (int frame = 0; frame < 10; ++frame)
+        s.Execute(*world);                             // lastRun climbs well above 1
+    ASSERT_NE(ReadChanged::s_ticks.back().first, 0u);
+    ASSERT_GT(ReadChanged::s_ticks.back().first, 1u);
+    EXPECT_EQ(ReadChanged::s_seen, 0u);                // steady state: nothing changed
+
+    world.reset();
+    world.emplace();                                   // same storage, same address
+    EXPECT_EQ(before, &*world);                        // proves this is the ABA path, not the pointer-identity reset
+    (void)world->CreateEntity<Position>();             // stamped at the NEW registry's tick 1
+
+    s.Execute(*world);                                 // must see everything once against the new world
+    EXPECT_EQ(ReadChanged::s_seen, 1u);
+    EXPECT_EQ(ReadChanged::s_ticks.back().first, 0u);  // lastRun was reset
+    s.Execute(*world);
+    EXPECT_EQ(ReadChanged::s_seen, 0u);                // and then nothing
 }
 
 TEST(ChangeDetectionScheduler, ContextParallelForEachPassesLastRunToChangeFilteredViews)

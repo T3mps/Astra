@@ -17,6 +17,7 @@
 #include "../Core/Delegate.hpp"
 #include "../Core/Log.hpp"
 #include "../Core/Result.hpp"
+#include "../Core/Tick.hpp"  // Tick / IsNewer (Ruling H lastRun staleness check in Execute)
 #include "../Core/TypeID.hpp"
 #include "../Registry/Registry.hpp"
 #include "System.hpp"
@@ -380,6 +381,28 @@ namespace Astra
                 // everything once against the new registry (never a false negative).
                 for (auto& md : m_context.metadata)
                     md.lastRun = 0;
+            }
+
+            // Change detection (Ruling H): the pointer-identity reset above cannot
+            // see a Registry destroyed and re-created at the SAME address (stack
+            // re-entry, unique_ptr reset+make_unique -- the "reload level" flow):
+            // the new registry's ticks restart at 1 while every cached lastRun is
+            // far ahead, so nothing would read as changed until the tick caught up.
+            // A cached lastRun that is not strictly OLDER than the registry's
+            // current tick cannot have come from this registry -- after every
+            // Execute() the post-segment advance (Ruling G) leaves CurrentTick()
+            // newer than every lastRun, and nothing rewinds a registry's tick.
+            // Seeing one means the Registry at this address was destroyed and
+            // re-created (ticks restart at 1) or replaced by a loaded one: reset
+            // every lastRun so each system sees everything once (never a false
+            // negative). O(systems) integer compares per Execute().
+            {
+                const Tick now = registry.CurrentTick();
+                bool stale = false;
+                for (const auto& md : m_context.metadata)
+                    if (md.lastRun != 0 && !IsNewer(now, md.lastRun)) { stale = true; break; }
+                if (stale) ASTRA_UNLIKELY
+                    for (auto& md : m_context.metadata) md.lastRun = 0;
             }
 
             {
