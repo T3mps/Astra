@@ -57,6 +57,24 @@ namespace Astra
         // Setter accepting AnyValue for dynamic (type-erased, RTTI-free) handling
         std::function<bool(void* instance, const AnyValue& value)> setterAny;
 
+        // ---- std::vector element access (2026-09-11) --------------------------
+        // Populated ONLY when isVector (and the element type is default-
+        // constructible and not bool -- vector<bool> has no addressable
+        // elements). Every accessor takes the CONTAINING instance, the same
+        // convention as getter/setter above, never the vector itself.
+        // elementTypeHash is TypeID<ValueType>::Hash(), so a consumer resolves
+        // the element's own TypeMeta with GetMeta() exactly as it does for a
+        // nested struct field. Growth default-constructs; vectorElement is
+        // nullptr past the end; erase past the end is a no-op; insert past the
+        // end appends. None of these throw.
+        uint64_t elementTypeHash = 0;
+        size_t   elementSize     = 0;
+        std::function<size_t(const void* instance)>    vectorSize;
+        std::function<void(void* instance, size_t n)>  vectorResize;
+        std::function<void*(void* instance, size_t i)> vectorElement;
+        std::function<void(void* instance, size_t i)>  vectorErase;
+        std::function<void(void* instance, size_t i)>  vectorInsert;
+
         // Attributes attached to this field
         std::vector<const Attribute*> attributes;
 
@@ -388,6 +406,41 @@ namespace Astra
                 && ContainerTraits<DecayedType>::HasContiguousStorage
                 && !ContainerTraits<DecayedType>::HasFixedSize
                 && !ContainerIsStringTrait<DecayedType>::value;
+
+            // Element access for std::vector fields (the same fingerprint that
+            // set isVector above), computed at compile time per field.
+            if constexpr (ContainerTraits<DecayedType>::IsSequence
+                          && ContainerTraits<DecayedType>::HasContiguousStorage
+                          && !ContainerTraits<DecayedType>::HasFixedSize
+                          && !ContainerIsStringTrait<DecayedType>::value
+                          && !std::is_const_v<FieldType>)
+            {
+                using Element = typename ContainerTraits<DecayedType>::ValueType;
+                if constexpr (std::is_default_constructible_v<Element> && !std::is_same_v<Element, bool>)
+                {
+                    info.elementTypeHash = TypeID<Element>::Hash();
+                    info.elementSize     = sizeof(Element);
+                    info.vectorSize = [](const void* instance) -> size_t {
+                        return (static_cast<const Class*>(instance)->*FieldPtr).size();
+                    };
+                    info.vectorResize = [](void* instance, size_t n) {
+                        (static_cast<Class*>(instance)->*FieldPtr).resize(n);
+                    };
+                    info.vectorElement = [](void* instance, size_t i) -> void* {
+                        auto& v = static_cast<Class*>(instance)->*FieldPtr;
+                        return i < v.size() ? static_cast<void*>(&v[i]) : nullptr;
+                    };
+                    info.vectorErase = [](void* instance, size_t i) {
+                        auto& v = static_cast<Class*>(instance)->*FieldPtr;
+                        if (i < v.size()) v.erase(v.begin() + static_cast<std::ptrdiff_t>(i));
+                    };
+                    info.vectorInsert = [](void* instance, size_t i) {
+                        auto& v = static_cast<Class*>(instance)->*FieldPtr;
+                        if (i >= v.size()) v.emplace_back();
+                        else               v.insert(v.begin() + static_cast<std::ptrdiff_t>(i), Element{});
+                    };
+                }
+            }
 
             // Type-erased getter
             info.getter = [](const void* instance, void* outValue) {
