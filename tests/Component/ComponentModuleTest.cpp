@@ -584,6 +584,31 @@ namespace
 {
     int s_engineImage = 0;   // stand-in image anchors
     int s_pluginImage = 0;
+
+    // Shuffle-safe precondition for the erase-on-last-release tests below:
+    // leave NO MetaRegistry entry for T. The binary's static drain installs a
+    // zero-ref, unpinned binder for every ASTRA_REFLECT_TYPE'd meta under the
+    // default (Transient) identity, and only a module pop under that same
+    // identity removes it (MetaErasedWhenSlotPopsToEmpty happens to do so, but
+    // under --gtest_shuffle nothing guarantees it ran first). So each test pops
+    // it for itself: acquire + release under the default identity, exactly the
+    // path that test proves. Returns whether the entry is now absent; a false
+    // means some OTHER binder still holds T -- a real leak, not an ordering
+    // accident. Call it BEFORE any ScopedModuleIdentity in the test: the binder
+    // to pop belongs to the default token.
+    template<typename T>
+    ASTRA_NODISCARD bool PopDrainedMeta()
+    {
+        auto& meta = Astra::MetaRegistry::Instance();
+        const uint64_t hash = Astra::TypeID<T>::Hash();
+        if (meta.Get(hash) != nullptr)
+        {
+            auto scratch = std::make_shared<Astra::ComponentRegistry>();
+            auto pop = Astra::ComponentModule::Open(scratch, "PopDrainedMeta");
+            pop.Register<T>();
+        }                                        // pop dies: last ref released, entry erased
+        return meta.Get(hash) == nullptr;
+    }
 }
 
 // ORDERING GUARD for every test below that uses these anchors: declare the
@@ -602,7 +627,12 @@ TEST(ComponentModule, ResidentEngineRosterSurvivesEveryRegistryTeardown)
     // teardown orders.
     using T = Astra_Test_ModMeta2::ReflectedOwned;
     InstalledContext ctx;
-    Astra::Detail::ScopedModuleIdentity engine(&s_engineImage, Astra::ModuleResidency::Resident);
+    // A token PRIVATE to this test: refs are keyed by (hash, token), and the
+    // anonymous registrations other tests make under s_engineImage are never
+    // released (RegistryDestructionReleasesNothing), so sharing that token
+    // would make the absolute ref counts below depend on run order.
+    static int s_rosterImage = 0;
+    Astra::Detail::ScopedModuleIdentity engine(&s_rosterImage, Astra::ModuleResidency::Resident);
     const uint64_t hash = Astra::TypeID<T>::Hash();
     const auto id = Astra::TypeID<T>::Value();
     auto& meta = Astra::MetaRegistry::Instance();
@@ -621,8 +651,8 @@ TEST(ComponentModule, ResidentEngineRosterSurvivesEveryRegistryTeardown)
         ASSERT_NE(address, nullptr);
         EXPECT_EQ(regA->GetComponentDescriptor(id)->meta, address);
         EXPECT_EQ(regB->GetComponentDescriptor(id)->meta, address);
-        EXPECT_EQ(meta.Refs(hash, &s_engineImage), 2u);
-        EXPECT_TRUE(meta.IsPinned(hash, &s_engineImage));
+        EXPECT_EQ(meta.Refs(hash, &s_rosterImage), 2u);
+        EXPECT_TRUE(meta.IsPinned(hash, &s_rosterImage));
 
         Astra::ComponentModule& first  = (order == 0) ? hA : hB;
         Astra::ComponentModule& second = (order == 0) ? hB : hA;
@@ -631,14 +661,14 @@ TEST(ComponentModule, ResidentEngineRosterSurvivesEveryRegistryTeardown)
         first.Reset();
         EXPECT_EQ(meta.Get(hash), address);                               // Held: still there, same address
         EXPECT_EQ(survivor->GetComponentDescriptor(id)->meta, address);   // the other registry is unharmed
-        EXPECT_EQ(meta.Refs(hash, &s_engineImage), 1u);
+        EXPECT_EQ(meta.Refs(hash, &s_rosterImage), 1u);
 
         second.Reset();
         EXPECT_EQ(meta.Get(hash), address);                               // Retained: pinned at zero refs
-        EXPECT_EQ(meta.Refs(hash, &s_engineImage), 0u);
+        EXPECT_EQ(meta.Refs(hash, &s_rosterImage), 0u);
         // Retained BECAUSE pinned -- not the look-alike §3.6 Retained, where
         // the survivors are all null-build and nothing can rebuild the content.
-        EXPECT_TRUE(meta.IsPinned(hash, &s_engineImage));
+        EXPECT_TRUE(meta.IsPinned(hash, &s_rosterImage));
         EXPECT_EQ(Astra::GetMeta(hash), address);                         // registry-less lookup works
         EXPECT_EQ(meta.GetByComponentId(id), address);                    // link rows intact
 
@@ -646,7 +676,7 @@ TEST(ComponentModule, ResidentEngineRosterSurvivesEveryRegistryTeardown)
         auto hC = Astra::ComponentModule::Open(regC, "EngineC");
         hC.Register<T>();
         EXPECT_EQ(regC->GetComponentDescriptor(id)->meta, address);       // a third registry: same address
-        EXPECT_EQ(meta.Refs(hash, &s_engineImage), 1u);
+        EXPECT_EQ(meta.Refs(hash, &s_rosterImage), 1u);
     }                                                                     // hC/regC die here: refs back to 0
 }
 
@@ -657,11 +687,12 @@ TEST(ComponentModule, TransientPluginMetaOutlivesFirstRegistryOnly)
     // teardown erases.
     using T = Astra_Test_ModMeta2::ReflectedEphemeral;
     InstalledContext ctx;
+    ASSERT_TRUE(PopDrainedMeta<T>()) << "precondition: no entry for T (another binder still holds it)";
     Astra::Detail::ScopedModuleIdentity plugin(&s_pluginImage, Astra::ModuleResidency::Transient);
     const uint64_t hash = Astra::TypeID<T>::Hash();
     const auto id = Astra::TypeID<T>::Value();
     auto& meta = Astra::MetaRegistry::Instance();
-    ASSERT_EQ(meta.Get(hash), nullptr) << "precondition: MetaErasedWhenSlotPopsToEmpty runs earlier and leaves no entry";
+    ASSERT_EQ(meta.Get(hash), nullptr);
 
     auto regA = std::make_shared<Astra::ComponentRegistry>();
     auto regB = std::make_shared<Astra::ComponentRegistry>();

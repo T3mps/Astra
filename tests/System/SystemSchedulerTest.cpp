@@ -756,7 +756,7 @@ namespace  // Phase E spawn-then-process
             }
         }
     };
-    struct CountPositions : Astra::SystemTraits<Astra::Exclusive>
+    struct CountPositionsSystem : Astra::SystemTraits<Astra::Exclusive>
     {
         void operator()(Astra::Registry& reg)
         {
@@ -775,7 +775,7 @@ TEST(SystemSchedulerSyncPoint, DeferredSpawnsVisibleAfterFenceSameFrame)
     Astra::SystemScheduler s;
     ASSERT_TRUE(s.AddSystem<SpawnThree>().IsOk());     // segment 0
     ASSERT_TRUE(s.AddSyncPoint("post-spawn").IsOk());
-    ASSERT_TRUE(s.AddSystem<CountPositions>().IsOk()); // segment 1
+    ASSERT_TRUE(s.AddSystem<CountPositionsSystem>().IsOk()); // segment 1
     g_syncSeenCount = -1;
     s.Execute(reg);
     EXPECT_EQ(g_syncSeenCount, 3);                     // counter saw the 3 spawned entities
