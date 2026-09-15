@@ -713,8 +713,9 @@ TEST(ChangeDetectionTracked, TicksTravelAcrossArchetypeMovesSwapRemoveAndCompact
     auto res = reg.Defragment();
     ASSERT_GT(res.entitiesMoved, 0u);
     for (size_t i = 0; i < ents.size(); ++i)
-        if (i % 10 >= 8 && i >= 100 && reg.IsValid(ents[i]))
-            EXPECT_EQ(TicksOf<TrackedPos>(reg, ents[i]).added, 3u);
+    {
+        if (i % 10 >= 8 && i >= 100 && reg.IsValid(ents[i])) { EXPECT_EQ(TicksOf<TrackedPos>(reg, ents[i]).added, 3u); }
+    }
 }
 
 TEST(ChangeDetectionTracked, DeserializeSetsEveryTrackedEntityToTheLoadersTick)

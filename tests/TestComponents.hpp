@@ -123,7 +123,7 @@ namespace Astra::Test
         {
             if (ar.IsLoading())
             {
-                int value;
+                int value = -1;   // initialized: the writer instantiation compiles this branch too
                 ar(value);
                 if (value >= 0)
                     data = std::make_unique<int>(value);

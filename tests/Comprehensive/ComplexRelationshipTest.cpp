@@ -456,19 +456,13 @@ TEST_F(ComplexRelationshipTest, RapidRelationshipChanges)
     {
         auto relations = registry->GetRelations(e);
 
-        // Count children
-        size_t childCount = 0;
+        // Every child and link must still be a live entity.
         for (Entity child : relations.GetChildren())
         {
-            childCount++;
             EXPECT_TRUE(registry->IsValid(child));
         }
-
-        // Count links
-        size_t linkCount = 0;
         for (Entity linked : relations.GetLinks())
         {
-            linkCount++;
             EXPECT_TRUE(registry->IsValid(linked));
         }
     }

@@ -28,7 +28,7 @@ jobs:
       - name: Build (${{ matrix.config }})
         run: msbuild Astra.sln /p:Configuration=${{ matrix.config }} /m /v:minimal
       - name: Test
-        run: .\bin\${{ matrix.config }}-windows-x86_64\AstraTest\AstraTest.exe --gtest_brief=1
+        run: .\bin\${{ matrix.config }}-windows-x86_64\AstraTest\AstraTest.exe --gtest_brief=1 --gtest_shuffle
 
   linux:
     strategy:
@@ -56,11 +56,32 @@ jobs:
       - name: Build (Release, tests)
         run: make config=release AstraTest -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.compiler }}
       - name: Test
-        run: ./bin/Release-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+        run: ./bin/Release-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle
       - name: Build (Debug, tests)
         run: make config=debug AstraTest -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.compiler }}
       - name: Test (Debug)
-        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle
+
+  # Proves every Astra header and test builds and passes with RTTI off: Astra is
+  # RTTI-free by design (TypeIdentity's type_info discriminator is guarded), and
+  # this is the only lane that exercises the RTTI-off identity path.
+  linux-no-rtti:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Download premake
+        run: |
+          curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
+      - name: Generate (RTTI off)
+        run: ./premake5 gmake2 --no-rtti
+      - name: Build (Release, AstraTest)
+        run: make config=release AstraTest -j"$(nproc)" CC=clang CXX=clang++
+      - name: Test (RTTI off)
+        run: ./bin/Release-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle
 
   sanitize-asan-ubsan:
     runs-on: ubuntu-latest
@@ -81,7 +102,7 @@ jobs:
         env:
           ASAN_OPTIONS: halt_on_error=1:detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1:abort_on_error=1
-        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle
 
   sanitize-tsan:
     runs-on: ubuntu-latest
@@ -101,4 +122,4 @@ jobs:
       - name: Test (TSan)
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1:suppressions=ci/tsan-suppressions.txt
-        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle

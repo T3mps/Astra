@@ -210,11 +210,11 @@ struct MoveOnlyComponent
     {
         if (ar.IsLoading())
         {
-            bool hasData;
+            bool hasData = false;   // initialized: the writer instantiation compiles this branch too
             ar(hasData);
             if (hasData)
             {
-                int value;
+                int value = 0;
                 ar(value);
                 data = std::make_unique<int>(value);
             }

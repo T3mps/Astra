@@ -93,7 +93,7 @@ TEST(Inspector, ChunkColumnOffsetsAlignedAscendingWithinArena)
                 const size_t off = chunk->GetColumnOffset(c);
                 EXPECT_EQ(off % Astra::CACHE_LINE_SIZE, 0u);   // cache-line aligned base
                 EXPECT_GE(off, prevEnd);                        // ascending, non-overlapping
-                if (c == 0) EXPECT_EQ(off, 0u);                 // first column at arena start
+                if (c == 0) { EXPECT_EQ(off, 0u); }             // first column at arena start
                 prevEnd = off + size_t(meta.columns[c].stride) * chunk->GetCapacity();
                 EXPECT_LE(prevEnd, chunk->GetChunkBytes());
                 // Position/Velocity are not enableable: sentinel expected.
@@ -207,8 +207,7 @@ TEST(Inspector, ChunkAccountingWithEnableableColumns)
             ++enableableCount;
             EXPECT_EQ(cl.disabledBytes, expectedDisabledBytes);
             EXPECT_GE(cl.disabledOffset, lastColumnEnd);
-            if (!first)
-                EXPECT_GT(cl.disabledOffset, prevDisabledOffset);   // strictly ascending
+            if (!first) { EXPECT_GT(cl.disabledOffset, prevDisabledOffset); }   // strictly ascending
             first = false;
             prevDisabledOffset = cl.disabledOffset;
             bitsSum += cl.disabledBytes;

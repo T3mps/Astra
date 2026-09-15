@@ -949,7 +949,7 @@ TEST_F(RegistryTest, DisabledBitSurvivesSwapRemove)
     registry->SetEnabled<EnA>(es[2], false);
     registry->DestroyEntity(es[7]);
     EXPECT_FALSE(registry->IsEnabled<EnA>(es[2]));
-    for (int i = 0; i < 7; ++i) if (i != 2) EXPECT_TRUE(registry->IsEnabled<EnA>(es[i]));
+    for (int i = 0; i < 7; ++i) { if (i != 2) { EXPECT_TRUE(registry->IsEnabled<EnA>(es[i])); } }
     // Now destroy a MIDDLE entity so the swapped-in survivor was the disabled one's neighbor:
     registry->SetEnabled<EnA>(es[6], false);
     registry->DestroyEntity(es[2]);           // slot 2 refilled by the (disabled) last entity or a survivor

@@ -8,6 +8,11 @@ newoption {
     }
 }
 
+newoption {
+    trigger = "no-rtti",
+    description = "Build AstraTest with RTTI disabled (-fno-rtti / /GR-); used by the CI RTTI-off lane"
+}
+
 workspace "Astra"
     architecture "x64"
     configurations { "Debug", "Release", "Dist" }
@@ -73,7 +78,15 @@ workspace "Astra"
             includedirs
             {
                 "%{IncludeDir.Astra}",
-                "%{IncludeDir.Mosaic}",
+                "%{IncludeDir.Mosaic}"
+            }
+
+            -- Third-party headers are SYSTEM includes (-isystem / /external:I):
+            -- warnings-as-errors below polices Astra and its tests, not
+            -- GoogleTest (e.g. clang 20+'s -Wcharacter-conversion fires inside
+            -- gtest-printers.h). Mosaic is ours and stays a normal include.
+            externalincludedirs
+            {
                 "%{IncludeDir.GoogleTest}",
                 "%{IncludeDir.GoogleMock}"
             }
@@ -105,19 +118,35 @@ workspace "Astra"
                     "/diagnostics:caret",   -- Show carets pointing to errors
                     "/bigobj",              -- Allow larger object files (helps with templates)
                     "/fp:fast",             -- Fast floating point - matching benchmark
-                    "/openmp:experimental"  -- Enable OpenMP SIMD support
+                    "/openmp:experimental", -- Enable OpenMP SIMD support
+                    "/WX"                   -- Warnings are errors (the test binary is warning-clean at /W3)
                 }
                 defines {
                     "__SSE2__",             -- Define SSE2 support - matching benchmark
                     "__SSE4_2__"            -- Define SSE4.2 support (for CRC32) - matching benchmark
                 }
 
+            -- Warnings are errors on gcc/clang too. Two groups are opted out, on
+            -- purpose and for the whole test binary:
+            --   -Wmissing-field-initializers: fires on every designated initializer
+            --     that leaves trailing members value-initialized (SystemMetadata,
+            --     SystemEntry) -- intended, well-defined, and pure noise.
+            --   -Wmaybe-uninitialized (gcc-only): gcc's -O2 false positive when a
+            --     system wrapper holding a disengaged std::optional<View> is moved
+            --     (GCC PR 80635 family). View's members all have initializers; the
+            --     sanitizer lane and MSVC C4701 keep the real uninitialized-read
+            --     cases covered. clang rejects an unknown -Wno- under -Werror, so
+            --     -Wno-unknown-warning-option precedes it (gcc ignores that one).
             filter "system:linux"
                 links { "pthread" }
                 buildoptions {
                     "-Wall",
                     "-Wextra",
                     "-Wpedantic",
+                    "-Werror",
+                    "-Wno-missing-field-initializers",
+                    "-Wno-unknown-warning-option",
+                    "-Wno-maybe-uninitialized",
                     "-fdiagnostics-color=always",
                     "-mavx"                 -- Enable AVX paths in Core/Simd.hpp (parity with /arch:AVX on MSVC)
                 }
@@ -127,6 +156,10 @@ workspace "Astra"
                     "-Wall",
                     "-Wextra",
                     "-Wpedantic",
+                    "-Werror",
+                    "-Wno-missing-field-initializers",
+                    "-Wno-unknown-warning-option",
+                    "-Wno-maybe-uninitialized",
                     "-fdiagnostics-color=always",
                     "-mavx"                 -- Enable AVX paths in Core/Simd.hpp (parity with /arch:AVX on MSVC)
                 }
@@ -168,6 +201,16 @@ workspace "Astra"
                 staticruntime "off"
                 buildoptions { "-fsanitize=thread" }
                 linkoptions  { "-fsanitize=thread" }
+
+            -- RTTI-off lane (opt-in via --no-rtti; used by the CI rtti-off job).
+            -- Astra is RTTI-free by design (Theme H); the per-configuration
+            -- rtti "on" above exists only for GoogleTest's convenience, and
+            -- GoogleTest detects RTTI per translation unit (GTEST_HAS_RTTI from
+            -- __GXX_RTTI/_CPPRTTI), so switching just the test binary off is
+            -- enough to prove every Astra header and test builds and passes
+            -- without it. Declared after the configuration filters so it wins.
+            filter { "options:no-rtti" }
+                rtti "off"
 
             filter {}
 

@@ -335,7 +335,7 @@ TEST(TlsfTest, DeterministicStressPattern)
             live[idx] = live.back();
             live.pop_back();
         }
-        if ((op & 511) == 0) ASSERT_TRUE(tlsf.Validate()) << "op " << op;
+        if ((op & 511) == 0) { ASSERT_TRUE(tlsf.Validate()) << "op " << op; }
     }
     for (void* p : live) tlsf.Free(p);
     EXPECT_EQ(tlsf.GetFreeBytes(), initialFree);

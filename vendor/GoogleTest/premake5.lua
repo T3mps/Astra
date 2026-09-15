@@ -22,14 +22,9 @@ project "GoogleTest"
         "googlemock/include"
     }
     
-    defines
-    {
-        "GTEST_HAS_PTHREAD=0"  -- Disable pthread on Windows
-    }
-    
     filter "system:windows"
         systemversion "latest"
-        defines { "_SILENCE_TR1_NAMESPACE_DEPRECATION_WARNING" }
+        defines { "_SILENCE_TR1_NAMESPACE_DEPRECATION_WARNING", "GTEST_HAS_PTHREAD=0" }  -- no pthread on Windows
     
     filter "system:linux or system:macosx"
         defines { "GTEST_HAS_PTHREAD=1" }

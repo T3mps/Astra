@@ -923,9 +923,7 @@ TEST(LoadRobustness, AliveEntityIdOutOfRangeIsRejected)
     cr->RegisterComponents<Position, Velocity>();
 
     constexpr size_t kHeaderSize = 32;   // BinaryHeader is static_assert'd to exactly 32 bytes.
-    constexpr size_t kEntitiesPerSegmentOffset = kHeaderSize;
-    constexpr size_t kEntitiesPerSegmentShiftOffset = kHeaderSize + sizeof(IDType);
-    constexpr size_t kEntitiesPerSegmentMaskOffset = kHeaderSize + 2 * sizeof(IDType);
+    // Three IDType entitiesPerSegment{,Shift,Mask} fields precede releaseThreshold.
     constexpr size_t kReleaseThresholdOffset = kHeaderSize + 3 * sizeof(IDType);
     constexpr size_t kAutoReleaseOffset = kReleaseThresholdOffset + sizeof(float);
     constexpr size_t kMaxEmptySegmentsOffset = kAutoReleaseOffset + sizeof(bool);

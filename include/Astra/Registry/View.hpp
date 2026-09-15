@@ -1155,9 +1155,12 @@ namespace Astra
             if (dc != 0) allZero = false;
         }
 
+        // The three pack-fed parameters are [[maybe_unused]]: with an empty Fs
+        // pack the fold is a no-op and gcc's -Wunused-but-set-parameter fires.
         template<size_t... Fs>
-        ASTRA_FORCEINLINE bool ResolveRequiredFilter(ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm, size_t count,
-                                                     const uint64_t** reqWords, bool& allZero, std::index_sequence<Fs...>)
+        ASTRA_FORCEINLINE bool ResolveRequiredFilter([[maybe_unused]] ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm,
+                                                     [[maybe_unused]] size_t count, [[maybe_unused]] const uint64_t** reqWords,
+                                                     bool& allZero, std::index_sequence<Fs...>)
         {
             bool anyFull = false;
             allZero = true;
@@ -1230,9 +1233,11 @@ namespace Astra
         // ============ Change-detection chunk reject (spec §3.4, instantiated only when HasChangeFilter) ============
 
         // True iff every T in the tuple has a column version newer than `since` in
-        // this chunk. Empty tuple => true (the fold's identity).
+        // this chunk. Empty tuple => true (the fold's identity), which is why the
+        // pack-fed parameters are [[maybe_unused]] (gcc -Wunused-but-set-parameter).
         template<typename... Ts>
-        ASTRA_FORCEINLINE static bool AllNewer(ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm, Tick since, std::tuple<Ts...>*) noexcept
+        ASTRA_FORCEINLINE static bool AllNewer([[maybe_unused]] ArchetypeChunk* chunk, [[maybe_unused]] const ArchetypeColumnMeta& cm,
+                                               [[maybe_unused]] Tick since, std::tuple<Ts...>*) noexcept
         {
             return (IsNewer(chunk->GetColumnVersion(cm.idToColumn[TypeID<std::remove_const_t<Ts>>::Value()]), since) && ...);
         }
@@ -1262,9 +1267,11 @@ namespace Astra
 
         // One excluded-mask pass per change-TRACKED term of the tuple; untracked
         // terms contribute nothing here (the chunk reject already decided them).
+        // An empty tuple makes the fold a no-op, hence the [[maybe_unused]]s.
         template<bool UseAdded, typename... Ts>
-        ASTRA_FORCEINLINE static void BuildExcluded(ArchetypeChunk* chunk, const ArchetypeColumnMeta& cm, size_t count, Tick since,
-                                                    uint64_t* excluded, bool& anyExcluded, std::tuple<Ts...>*) noexcept
+        ASTRA_FORCEINLINE static void BuildExcluded([[maybe_unused]] ArchetypeChunk* chunk, [[maybe_unused]] const ArchetypeColumnMeta& cm,
+                                                    [[maybe_unused]] size_t count, [[maybe_unused]] Tick since,
+                                                    [[maybe_unused]] uint64_t* excluded, [[maybe_unused]] bool& anyExcluded, std::tuple<Ts...>*) noexcept
         {
             ((IsChangeTrackedV<Ts>
                 ? ExcludeNotNewer<UseAdded>(chunk->GetTicks(cm.idToColumn[TypeID<std::remove_const_t<Ts>>::Value()]), count, since, excluded, anyExcluded)
