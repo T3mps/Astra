@@ -239,6 +239,43 @@ TEST(SystemParam, TwoSameSignatureFreeFunctionsBothRegisterAndRun)
     EXPECT_TRUE(s.HasSystem<MoveEnemies>());
 }
 
+TEST(SystemParam, SiblingSameSignatureLambdasAreDistinctSystems)
+{
+    // Every lambda expression is its own closure type, so two sibling lambdas
+    // with the same signature are two systems on every compiler. GCC's
+    // pretty-name prints every closure in a function as `fn()::<lambda(Args)>`
+    // (no per-lambda numbering, unlike MSVC's <lambda_N> and Clang's
+    // `(lambda at file:line:col)`), so a NAME hash cannot tell them apart --
+    // lambda systems are keyed by a per-type anchor instead. All three lambda
+    // entry points (context / view / param) are covered.
+    Astra::Registry reg;
+    Astra::Entity e = reg.CreateEntity<Position>();
+    reg.GetComponent<Position>(e)->x = 0.0f;
+    int ctxRuns = 0;
+
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem([&](Astra::SystemContext&){ ctxRuns += 1; }).IsOk());                                     // context lambda
+    ASSERT_TRUE(s.AddSystem([&](Astra::SystemContext&){ ctxRuns += 10; }).IsOk());                                    //   ...same signature
+    ASSERT_TRUE(s.AddSystem([](Astra::Entity, Position& p){ p.x += 1.0f; }).IsOk());                                 // view lambda
+    ASSERT_TRUE(s.AddSystem([](Astra::Entity, Position& p){ p.x += 10.0f; }).IsOk());                                //   ...same signature
+    ASSERT_TRUE(s.AddSystem([](Astra::View<Position>& v){ v.ForEach([](Position& p){ p.x += 100.0f; }); }).IsOk());  // param lambda
+    ASSERT_TRUE(s.AddSystem([](Astra::View<Position>& v){ v.ForEach([](Position& p){ p.x += 1000.0f; }); }).IsOk()); //   ...same signature
+    EXPECT_EQ(s.Size(), 6u);
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+    EXPECT_EQ(ctxRuns, 11);                                          // both context lambdas ran once
+    EXPECT_FLOAT_EQ(reg.GetComponent<Position>(e)->x, 1111.0f);     // all four view/param lambdas ran once
+
+    // The SAME closure type is still one system: re-registering it is refused.
+    auto same = [](Astra::SystemContext&) {};
+    ASSERT_TRUE(s.AddSystem(same).IsOk());
+    auto dup = s.AddSystem(same);
+    ASSERT_TRUE(dup.IsErr());
+    EXPECT_EQ(*dup.GetError(), Astra::SystemError::AlreadyRegistered);
+    EXPECT_EQ(s.Size(), 7u);
+}
+
 TEST(SystemParam, DisambiguationViewLambdaAndContextLambdaStillRoute)
 {
     // A view-lambda, a context lambda, and a param-system coexist and each runs.

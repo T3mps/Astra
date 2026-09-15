@@ -34,6 +34,37 @@ namespace Astra
         OrderingCycle       // a Before/After cycle was detected at plan build
     };
 
+    namespace Detail
+    {
+        // Systems are keyed by a 64-bit id that must be unique per system TYPE
+        // within the process (m_systemIndices, Before<T>/After<T> edges,
+        // HasSystem<T>/RemoveSystem<T>). Named types use TypeID<T>::Hash(), the
+        // stable pretty-name hash a SystemTraits<Before<Other>> resolves
+        // against. Closure types cannot: GCC prints every lambda in a function
+        // as `fn()::<lambda(Args)>` (no per-lambda numbering, unlike MSVC's
+        // <lambda_N> and Clang's `(lambda at file:line:col)`), so two sibling
+        // same-signature lambdas would hash identically and the second would be
+        // refused as AlreadyRegistered. A lambda system can never be named from
+        // another module, so its key only has to be unique in-process: the
+        // address of a per-type anchor is exactly that, and the same closure
+        // type still maps to the same key (re-registering it stays
+        // AlreadyRegistered). Wrapper types embed the closure's name, so the
+        // check sees through LambdaSystemWrapper / the param wrappers too.
+        // The anchor is deliberately MUTABLE: linkers fold identical read-only
+        // COMDAT data (MSVC /OPT:ICF), which would alias two anchors.
+        template<typename T>
+        struct SystemKeyAnchor { inline static char value = 0; };
+
+        template<typename T>
+        ASTRA_NODISCARD inline uint64_t SystemKey() noexcept
+        {
+            if constexpr (TypeID<T>::Name().find("lambda") != std::string_view::npos)
+                return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&SystemKeyAnchor<T>::value));
+            else
+                return TypeID<T>::Hash();
+        }
+    }
+
     class SystemScheduler
     {
     public:
@@ -85,10 +116,11 @@ namespace Astra
             if (IsExecuting())
                 return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
 
-            // Systems are keyed by TypeID::Hash() (64-bit). A hash collision
-            // would make a DISTINCT type look already-registered and be dropped;
-            // astronomically unlikely, but it is a hash, not a dense unique id.
-            const uint64_t typeId = TypeID<T>::Hash();
+            // Systems are keyed by Detail::SystemKey<T>() (64-bit; a name hash for
+            // named types). A hash collision would make a DISTINCT type look
+            // already-registered and be dropped; astronomically unlikely, but it
+            // is a hash, not a dense unique id.
+            const uint64_t typeId = Detail::SystemKey<T>();
             if (m_systemIndices.Contains(typeId))
             {
                 // No ASTRA_ASSERT — duplicate registration is a handleable
@@ -145,7 +177,7 @@ namespace Astra
             if (IsExecuting())
                 return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
 
-            const uint64_t typeId = TypeID<T>::Hash();
+            const uint64_t typeId = Detail::SystemKey<T>();
             if (m_systemIndices.Contains(typeId))
                 return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
 
@@ -248,7 +280,7 @@ namespace Astra
         // IM-25: constrained by System<T> || ContextSystem<T> so a pure
         // context system (invocable only with SystemContext&, which fails the
         // System<T> concept) can be removed symmetrically with how it was
-        // added. The body keys purely on TypeID<T>::Hash(), so either concept
+        // added. The body keys purely on Detail::SystemKey<T>(), so either concept
         // is sufficient; both AddSystem overloads store under the same key.
         template<typename T>
         requires (System<T> || ContextSystem<T>)
@@ -260,7 +292,7 @@ namespace Astra
             // makes safe, so this must no-op gracefully rather than abort.
             if (IsExecuting()) return;
 
-            uint64_t typeId = TypeID<T>::Hash();
+            uint64_t typeId = Detail::SystemKey<T>();
             auto it = m_systemIndices.Find(typeId);
             if (it == m_systemIndices.end())
                 return;
@@ -308,7 +340,7 @@ namespace Astra
         requires (System<T> || ContextSystem<T>)
         ASTRA_NODISCARD bool HasSystem() const
         {
-            return m_systemIndices.Contains(TypeID<T>::Hash());
+            return m_systemIndices.Contains(Detail::SystemKey<T>());
         }
 
         // Symmetric with AddSystem<FnPtr>() (free-function param-system
@@ -727,8 +759,8 @@ namespace Astra
             ((mask |= MakeComponentMask<std::tuple_element_t<Is, Tuple>>()), ...);
         }
 
-        // Push TypeID<Each>::Hash() for each system type in the tuple into `out`
-        // (the same 64-bit key m_systemIndices uses to look systems up).
+        // Push Detail::SystemKey<Each>() for each system type in the tuple into
+        // `out` (the same 64-bit key m_systemIndices uses to look systems up).
         template<typename Tuple>
         void ExtractSystemIdList(std::vector<uint64_t>& out)
         {
@@ -738,7 +770,7 @@ namespace Astra
         template<typename Tuple, size_t... Is>
         void ExtractSystemIdListImpl(std::vector<uint64_t>& out, std::index_sequence<Is...>)
         {
-            ((out.push_back(TypeID<std::tuple_element_t<Is, Tuple>>::Hash())), ...);
+            ((out.push_back(Detail::SystemKey<std::tuple_element_t<Is, Tuple>>())), ...);
         }
 
         // For each read resource R: a ConcurrentReadSafe resource sets its bit in
@@ -832,7 +864,7 @@ namespace Astra
 
         // True if there is a DIRECT ordering edge predIdx -> succIdx, i.e. succ
         // declares After<pred> or pred declares Before<succ>. (Systems are keyed
-        // by TypeID::Hash(), stored in metadata.typeId.) Direct edges suffice for
+        // by Detail::SystemKey<T>(), stored in metadata.typeId.) Direct edges suffice for
         // the grouping barrier: because the plan is grouped over the topological
         // order in contiguous runs, any transitive predecessor sits in an earlier,
         // already-closed group, so it can never be a current-group member.
@@ -1123,16 +1155,16 @@ namespace Astra
         }
         // Symmetric with AddFreeFnParamSystemImpl above: reconstruct the same
         // FreeFunctionSystemWrapper<FnPtr, Params...> type from decltype(FnPtr)
-        // to compute the identical TypeID::Hash() key for HasSystem<FnPtr>().
+        // to compute the identical SystemKey for HasSystem<FnPtr>().
         template<auto FnPtr, typename Ret, typename... Params>
         ASTRA_NODISCARD bool HasFreeFnParamSystemImpl(Ret(*)(Params...)) const
         {
             using Wrapper = FreeFunctionSystemWrapper<FnPtr, Params...>;
-            return m_systemIndices.Contains(TypeID<Wrapper>::Hash());
+            return m_systemIndices.Contains(Detail::SystemKey<Wrapper>());
         }
         // Symmetric with HasFreeFnParamSystemImpl above: reconstruct the same
         // FreeFunctionSystemWrapper<FnPtr, Params...> type from decltype(FnPtr)
-        // to compute the identical TypeID::Hash() key, then erase it using the
+        // to compute the identical SystemKey, then erase it using the
         // exact same erase/reindex logic as the type-based RemoveSystem<T>()
         // (public section above): drop the entry, drop the index, shift every
         // later index down by one, and re-stamp insertionOrder so it stays
@@ -1143,7 +1175,7 @@ namespace Astra
         void RemoveFreeFnParamSystemImpl(Ret(*)(Params...))
         {
             using Wrapper = FreeFunctionSystemWrapper<FnPtr, Params...>;
-            uint64_t typeId = TypeID<Wrapper>::Hash();
+            uint64_t typeId = Detail::SystemKey<Wrapper>();
             auto it = m_systemIndices.Find(typeId);
             if (it == m_systemIndices.end())
                 return;
@@ -1182,10 +1214,11 @@ namespace Astra
             if (IsExecuting())
                 return Result<void, SystemError>::Err(SystemError::SchedulerExecuting);
 
-            // Systems are keyed by TypeID::Hash() (64-bit). A collision would make a
-            // DISTINCT type look already-registered; astronomically unlikely, but it
-            // is a hash, not a dense unique id.
-            const uint64_t typeId = TypeID<SystemType>::Hash();
+            // Systems are keyed by Detail::SystemKey<T>() (64-bit; a name hash for
+            // named types). A collision would make a DISTINCT type look
+            // already-registered; astronomically unlikely, but it is a hash, not a
+            // dense unique id.
+            const uint64_t typeId = Detail::SystemKey<SystemType>();
             if (m_systemIndices.Contains(typeId))
                 return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
 
@@ -1252,7 +1285,7 @@ namespace Astra
         }
 
         std::vector<SystemEntry> m_systems;                             // All registered systems
-        FlatMap<uint64_t, size_t> m_systemIndices;                      // key: TypeID<T>::Hash() — systems must not consume dense ComponentIDs
+        FlatMap<uint64_t, size_t> m_systemIndices;                      // key: Detail::SystemKey<T>() — systems must not consume dense ComponentIDs
         bool m_scheduleHadCycle = false;            // set by ComputeScheduleOrder; surfaced in Task 3
         std::vector<size_t> m_cycleMembers;         // insertionOrders forced during a cycle break (Task 3 log)
         bool m_reportAmbiguities = false;  // opt-in ambiguity reporting (Phase D §12)

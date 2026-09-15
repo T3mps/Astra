@@ -43,7 +43,7 @@ namespace Astra
         bool requiresExclusive = false;
 
         // Explicit ordering edges (Phase D), resolved to the target systems'
-        // TypeID::Hash() -- the same 64-bit key m_systemIndices uses. Filled by
+        // Detail::SystemKey<T>() -- the same 64-bit key m_systemIndices uses. Filled by
         // ExtractSystemTraits; resolved to indices in BuildExecutionPlan.
         std::vector<uint64_t> beforeIds;
         std::vector<uint64_t> afterIds;
