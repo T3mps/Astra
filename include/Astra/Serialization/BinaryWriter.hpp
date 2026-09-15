@@ -132,6 +132,7 @@ namespace Astra
         void WriteBytes(const void* data, size_t size)
         {
             if (m_error != SerializationError::None) return;
+            if (size == 0) return;   // mirror of ReadBytes: `data` may be an empty container's null data()
             
             const std::byte* bytes = static_cast<const std::byte*>(data);
             
