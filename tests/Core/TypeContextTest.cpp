@@ -71,11 +71,18 @@ namespace
             c.Meta().Register(123456u, "QueuedType");
         });
         Astra::TypeContext fresh;
-        Astra::TypeContext* prev = Astra::GetTypeContext();
+        // Restore the RAW slot afterwards, not GetTypeContext(): the resolver
+        // substitutes the module default when nothing is installed, so
+        // "restoring" it would install a context that was never installed and
+        // leave the slot non-null for every later test (the
+        // ComponentModule.OpenRefusesWithoutInstalledContext precondition
+        // failed under --gtest_shuffle exactly this way).
+        Astra::TypeContext* prevSlot = Astra::Detail::CurrentTypeContextSlot();
         Astra::SetTypeContext(&fresh);
         EXPECT_NE(fresh.Meta().Get(123456u), nullptr);
-        Astra::SetTypeContext(prev);  // restore for other tests
-        EXPECT_EQ(prev->Meta().Get(123456u), nullptr);
+        Astra::SetTypeContext(prevSlot);  // restore for other tests (nullptr => uninstall)
+        EXPECT_EQ(Astra::Detail::CurrentTypeContextSlot(), prevSlot);
+        EXPECT_EQ(Astra::GetTypeContext()->Meta().Get(123456u), nullptr);
     }
 }
 
