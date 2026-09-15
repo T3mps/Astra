@@ -44,14 +44,19 @@ namespace Astra
         // as `fn()::<lambda(Args)>` (no per-lambda numbering, unlike MSVC's
         // <lambda_N> and Clang's `(lambda at file:line:col)`), so two sibling
         // same-signature lambdas would hash identically and the second would be
-        // refused as AlreadyRegistered. A lambda system can never be named from
-        // another module, so its key only has to be unique in-process: the
-        // address of a per-type anchor is exactly that, and the same closure
-        // type still maps to the same key (re-registering it stays
+        // refused as AlreadyRegistered. A lambda system's key only has to be
+        // unique within one process image (a closure type is nameable from
+        // another TU only via decltype of an inline factory, and the anchor
+        // below is a per-image COMDAT, so lambda-keyed systems are image-local
+        // -- a cross-DSO HasSystem<L>/After<L> is not supported): the address
+        // of a per-type anchor is exactly that, and the same closure type
+        // still maps to the same key (re-registering it stays
         // AlreadyRegistered). Wrapper types embed the closure's name, so the
         // check sees through LambdaSystemWrapper / the param wrappers too.
         // The anchor is deliberately MUTABLE: linkers fold identical read-only
-        // COMDAT data (MSVC /OPT:ICF), which would alias two anchors.
+        // COMDAT data (MSVC /OPT:ICF), which would alias two anchors. It is
+        // instantiated on the DECAYED type so SystemKey<const T> == SystemKey<T>,
+        // matching TypeID's own normalization on the name-hash branch.
         template<typename T>
         struct SystemKeyAnchor { inline static char value = 0; };
 
@@ -59,7 +64,7 @@ namespace Astra
         ASTRA_NODISCARD inline uint64_t SystemKey() noexcept
         {
             if constexpr (TypeID<T>::Name().find("lambda") != std::string_view::npos)
-                return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&SystemKeyAnchor<T>::value));
+                return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&SystemKeyAnchor<typename TypeID<T>::Type>::value));
             else
                 return TypeID<T>::Hash();
         }

@@ -28,6 +28,11 @@ project "GoogleTest"
     
     filter "system:linux or system:macosx"
         defines { "GTEST_HAS_PTHREAD=1" }
+
+    -- Astra's --no-rtti lane: keep GTEST_HAS_RTTI consistent between this
+    -- library and the RTTI-off AstraTest translation units.
+    filter "options:no-rtti"
+        rtti "off"
         
     filter "configurations:Debug"
         runtime "Debug"

@@ -85,11 +85,15 @@ workspace "Astra"
             -- warnings-as-errors below polices Astra and its tests, not
             -- GoogleTest (e.g. clang 20+'s -Wcharacter-conversion fires inside
             -- gtest-printers.h). Mosaic is ours and stays a normal include.
+            -- externalwarnings "Off" is what makes /external:I mean anything on
+            -- MSVC: without it premake emits /external:W3, i.e. the same level
+            -- as the project, and /WX would still fail on a gtest warning.
             externalincludedirs
             {
                 "%{IncludeDir.GoogleTest}",
                 "%{IncludeDir.GoogleMock}"
             }
+            externalwarnings "Off"
             
             links
             {
@@ -204,11 +208,11 @@ workspace "Astra"
 
             -- RTTI-off lane (opt-in via --no-rtti; used by the CI rtti-off job).
             -- Astra is RTTI-free by design (Theme H); the per-configuration
-            -- rtti "on" above exists only for GoogleTest's convenience, and
-            -- GoogleTest detects RTTI per translation unit (GTEST_HAS_RTTI from
-            -- __GXX_RTTI/_CPPRTTI), so switching just the test binary off is
-            -- enough to prove every Astra header and test builds and passes
-            -- without it. Declared after the configuration filters so it wins.
+            -- rtti "on" above exists only for GoogleTest's convenience. The
+            -- GoogleTest project honours the same option (vendor/GoogleTest/
+            -- premake5.lua), so GTEST_HAS_RTTI -- which gtest derives per
+            -- translation unit from __GXX_RTTI/_CPPRTTI -- agrees across the
+            -- whole link. Declared after the configuration filters so it wins.
             filter { "options:no-rtti" }
                 rtti "off"
 

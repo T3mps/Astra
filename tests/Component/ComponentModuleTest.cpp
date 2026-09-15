@@ -605,6 +605,7 @@ namespace
         {
             auto scratch = std::make_shared<Astra::ComponentRegistry>();
             auto pop = Astra::ComponentModule::Open(scratch, "PopDrainedMeta");
+            if (!static_cast<bool>(pop)) return false;   // Open refused (no context installed): fail loudly, not "still held"
             pop.Register<T>();
         }                                        // pop dies: last ref released, entry erased
         return meta.Get(hash) == nullptr;
