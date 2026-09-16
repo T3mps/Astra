@@ -477,9 +477,10 @@ namespace Astra
 
             // The override notice is BUILT under the lock (DescribeOverride
             // reads m_moduleNames and the live slot's name) but EMITTED after
-            // the lock releases: ASTRA_LOG_INFO reaches a user-installed
+            // the lock releases: the log macro reaches a user-installed
             // LogSink, and user code must never run under m_registrationMutex.
             std::string overrideNotice;
+            bool overrideSameName = false;
             bool refusedReplace = false;
             InstallResult result = InstallResult::Installed;
             {
@@ -493,6 +494,7 @@ namespace Astra
                     if (m_owner[id] != owner)
                     {
                         overrideNotice = DescribeOverride(owner, m_owner[id], m_components[id].name);
+                        overrideSameName = (ModuleNameOf(owner) == ModuleNameOf(m_owner[id]));
                         m_shadow[id].push_back(ShadowEntry{m_owner[id], m_components[id], m_metaModule[id]});
                         result = InstallResult::Overrode;
                     }
@@ -528,7 +530,16 @@ namespace Astra
             }
             if (!overrideNotice.empty())
             {
-                ASTRA_LOG_INFO(overrideNotice);
+                // Two owners with the SAME module name are the designed shadow-push,
+                // not a cross-module override: e.g. a second Runtime/world opening its
+                // own engine roster ("Arcane") on the shared ComponentRegistry, which
+                // ReleaseModule later pops in any order (symmetric teardown). Log that
+                // at trace so it does not read as a conflict; a genuine different-name
+                // override still surfaces at info.
+                if (overrideSameName)
+                    ASTRA_LOG_TRACE(overrideNotice);
+                else
+                    ASTRA_LOG_INFO(overrideNotice);
             }
             return result;
         }
@@ -606,21 +617,25 @@ namespace Astra
             }
         }
 
-        // Builds the ASTRA_LOG_INFO override-notice body for InstallOwned's
-        // different-owner branch. `componentName` may be null (defensive only --
-        // the live slot always has a name once m_present is set).
+        // Owner id -> module name (index owner-1 into m_moduleNames; 0 == anonymous).
+        // Caller holds m_registrationMutex (reads m_moduleNames).
+        ASTRA_NODISCARD std::string_view ModuleNameOf(uint32_t owner) const
+        {
+            return (owner != 0 && static_cast<size_t>(owner - 1) < m_moduleNames.size())
+                ? std::string_view(m_moduleNames[owner - 1])
+                : std::string_view("(anonymous)");
+        }
+
+        // Builds the override-notice body for InstallOwned's different-owner branch
+        // (emitted at info, or trace when the two owners share a name -- see the call
+        // site). `componentName` may be null (defensive only -- the live slot always
+        // has a name once m_present is set).
         std::string DescribeOverride(uint32_t newOwner, uint32_t prevOwner, const char* componentName) const
         {
-            auto nameOf = [this](uint32_t o) -> std::string_view
-            {
-                return (o != 0 && static_cast<size_t>(o - 1) < m_moduleNames.size())
-                    ? std::string_view(m_moduleNames[o - 1])
-                    : std::string_view("(anonymous)");
-            };
             std::string msg = "ComponentModule: module '";
-            msg += nameOf(newOwner);
+            msg += ModuleNameOf(newOwner);
             msg += "' overrides '";
-            msg += nameOf(prevOwner);
+            msg += ModuleNameOf(prevOwner);
             msg += "' for component '";
             msg += componentName ? componentName : "";
             msg += "'";

@@ -7,7 +7,9 @@
 #include <Astra/Core/TypeID.hpp>
 #include <Astra/Reflection/MetaRegistry.hpp>
 #include <Astra/Reflection/Macros.hpp>
+#include <Astra/Core/Log.hpp>
 #include "../TestComponents.hpp"
+#include "../Support/DiagnosticsTestGuards.hpp"
 
 // Reuses the shared Astra::Test::Position/Velocity types rather than minting
 // fresh ones: the test binary sits near the 128 ComponentID ceiling (see
@@ -860,4 +862,57 @@ TEST(ComponentModule, InstallOwnedRefusesSameOwnerMetaNullnessFlip)
     // The unflipped same-owner replace still works.
     EXPECT_EQ(creg->InstallOwned(id, owner, unreflected, &image), Astra::InstallResult::Replaced);
     EXPECT_EQ(creg->GetComponentDescriptor(id)->meta, nullptr);
+}
+
+namespace
+{
+    // Captures "overrides" notices by level: a same-name shadow-push must NOT
+    // surface at info (it reads as a conflict); a different-name override must.
+    struct OverrideCapture { int info = 0; int belowInfo = 0; };
+    void OverrideSink(const Astra::LogRecord& r, void* user) noexcept
+    {
+        auto* c = static_cast<OverrideCapture*>(user);
+        if (std::string_view(r.message).find("overrides") == std::string_view::npos) return;
+        if (r.level == Astra::LogLevel::Info) c->info++;
+        else                                  c->belowInfo++;   // trace/debug (if delivered)
+    }
+
+    // RAII for the process-wide runtime log level (ScopedLogSink restores the sink
+    // but not the level; leaving it raised would perturb other shuffled tests).
+    struct ScopedLogLevel
+    {
+        Astra::LogLevel prev;
+        explicit ScopedLogLevel(Astra::LogLevel l) : prev(Astra::GetLogLevel()) { Astra::SetLogLevel(l); }
+        ~ScopedLogLevel() { Astra::SetLogLevel(prev); }
+    };
+}
+
+// Two DISTINCT module handles with the SAME name on ONE shared ComponentRegistry
+// -- a second Runtime/world opening its own "Arcane" engine roster. The second
+// Register takes InstallOwned's different-owner branch (distinct owner ids) but
+// both resolve to the same module name: the designed shadow-push, which must be
+// logged at trace, not info, so it does not read as a conflict. A genuinely
+// different-named override is a real conflict and stays at info.
+TEST(ComponentModule, SameNameOverrideLogsBelowInfoDifferentNameStaysInfo)
+{
+    InstalledContext ctx;
+    ScopedLogLevel level(Astra::LogLevel::Trace);   // deliver everything the compile floor allows
+    OverrideCapture cap;
+    Astra::Testing::ScopedLogSink sink(&OverrideSink, &cap);
+
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+
+    auto first = Astra::ComponentModule::Open(creg, "Same");
+    ASSERT_TRUE(static_cast<bool>(first));
+    first.Register<Astra::Test::Position>();
+
+    auto second = Astra::ComponentModule::Open(creg, "Same");   // same name, distinct handle
+    ASSERT_TRUE(static_cast<bool>(second));
+    second.Register<Astra::Test::Position>();                   // same-name override -> NOT info
+    EXPECT_EQ(cap.info, 0) << "a same-name shadow-push must not surface as an info-level override";
+
+    auto other = Astra::ComponentModule::Open(creg, "Other");   // different name
+    ASSERT_TRUE(static_cast<bool>(other));
+    other.Register<Astra::Test::Position>();                    // different-name override -> info
+    EXPECT_GE(cap.info, 1) << "a different-name override is a real conflict and stays at info";
 }
