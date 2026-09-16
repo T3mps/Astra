@@ -273,7 +273,7 @@ namespace Astra
 
     // Build the per-type discriminator used by TypeContext to DETECT identity
     // collisions (see TypeContext::GetOrAssignComponentID). Structural fields are
-    // always present (all configs); the RTTI type_info is added only where RTTI
+    // always present (all configs); the RTTI discriminator is added only where RTTI
     // is enabled. Never enters the hash/id/wire format.
     template<typename T>
     ASTRA_NODISCARD inline TypeIdentity MakeTypeIdentity() noexcept
@@ -286,7 +286,15 @@ namespace Astra
             (std::is_trivially_destructible_v<T> ? TIF_TriviallyDestructible : 0) |
             (std::is_empty_v<T>                 ? TIF_Empty                 : 0));
 #if defined(__cpp_rtti) || defined(_CPPRTTI)
-        id.rtti = &typeid(T);
+        // Hash the RTTI MANGLED name (not the pointer): an owned value that survives
+        // the source image's unload (see TypeIdentity). MSVC's raw_name() carries the
+        // per-TU tag operator== compares; the Itanium name() matches down to one
+        // documented residual -- see TypeContext::IsTypeIdentityCollision.
+    #if defined(_MSC_VER)
+        id.rttiName = Detail::XXHash::XXHash64(std::string_view(typeid(T).raw_name()));
+    #else
+        id.rttiName = Detail::XXHash::XXHash64(std::string_view(typeid(T).name()));
+    #endif
 #endif
         return id;
     }

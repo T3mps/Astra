@@ -236,4 +236,21 @@ TEST(TypeIdentityFactory, RttiCatchesSameLayoutDistinctTypes)
     EXPECT_EQ(id1, Astra::INVALID_COMPONENT);
     EXPECT_GE(cap.errors, 1);
 }
+
+// The RTTI discriminator is a self-contained value (a hash of the mangled name),
+// NOT a pointer into the resolving image -- so it survives that image's unload,
+// which is the whole point of the field's redesign (a plugin DLL that first
+// resolved a type used to leave a dangling type_info* here). It must still be
+// stable per type and distinct for same-layout distinct types.
+TEST(TypeIdentityFactory, RttiDiscriminatorIsStableSelfContainedValue)
+{
+    static_assert(std::is_same_v<decltype(Astra::TypeIdentity{}.rttiName), uint64_t>,
+                  "discriminator must be an owned value, not a pointer that can dangle");
+    const auto a1 = Astra::MakeTypeIdentity<LayoutA>();
+    const auto a2 = Astra::MakeTypeIdentity<LayoutA>();
+    const auto b  = Astra::MakeTypeIdentity<LayoutB>();
+    EXPECT_NE(a1.rttiName, 0u);                 // present under RTTI
+    EXPECT_EQ(a1.rttiName, a2.rttiName);         // stable across calls for the same type
+    EXPECT_NE(a1.rttiName, b.rttiName);          // same layout {int x;}, distinct types -> distinct
+}
 #endif

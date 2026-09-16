@@ -15,10 +15,6 @@
 #include "Log.hpp"
 #include "ModuleIdentity.hpp"
 
-#if defined(__cpp_rtti) || defined(_CPPRTTI)
-#include <typeinfo>
-#endif
-
 // NOTE: deliberately does NOT include MetaRegistry.hpp -- MetaRegistry's
 // templated API uses TypeID, and TypeID.hpp includes this header. The meta
 // registry is held through a forward declaration; the accessor body is
@@ -81,9 +77,16 @@ namespace Astra
         uint32_t size  = 0;   // sizeof(T); always >= 1 for a real type, so 0 == unspecified
         uint32_t align = 0;   // alignof(T)
         uint8_t  flags = 0;   // TypeIdentityFlags bits
-#if defined(__cpp_rtti) || defined(_CPPRTTI)
-        const std::type_info* rtti = nullptr;  // &typeid(T) where RTTI is enabled
-#endif
+        // Stable discriminator hashed from the RTTI mangled name at MakeTypeIdentity<T>()
+        // time (0 == unspecified: RTTI off, or a raw test-helper call). This REPLACES a
+        // former `const std::type_info*` field: storing the pointer meant the collision
+        // check dereferenced RTTI owned by whichever image FIRST resolved the type, which
+        // became a use-after-unload the moment that image was a plugin DLL that unloaded
+        // (a later cross-module resolve dereferenced the freed type_info). A hash of the
+        // mangled name is a self-contained value that cannot dangle; it matches the old
+        // `type_info::operator==` discrimination on MSVC (raw_name()) and on Itanium
+        // down to one documented residual -- see IsTypeIdentityCollision.
+        uint64_t rttiName = 0;
     };
 
     // Process-wide type identity service. Component/type IDs are assigned
@@ -157,10 +160,22 @@ namespace Astra
         // dimension => not treated as a collision (raw test-helper calls).
         ASTRA_NODISCARD static bool IsTypeIdentityCollision(const TypeIdentity& a, const TypeIdentity& b) noexcept
         {
-#if defined(__cpp_rtti) || defined(_CPPRTTI)
-            if (a.rtti != nullptr && b.rtti != nullptr)
-                return *a.rtti != *b.rtti;  // ABI-correct, cross-module-safe; disambiguates anon namespaces
-#endif
+            // A hash DIFFERENCE is proof of distinct types (cross-module- and
+            // unload-safe: reads only the two owned uint64_t values, never a
+            // type_info pointer into a possibly-unmapped image). A hash MATCH is NOT
+            // proof of the same type, so it FALLS THROUGH to the structural fields
+            // rather than concluding "identical". That fall-through (a) still catches
+            // the memory-corrupting case where a ~2^-64 name-hash collision pairs
+            // differently-laid-out types, and (b) preserves detection under the
+            // Itanium ABI, where type_info::name() strips the leading '*' that marks
+            // internal-linkage types -- so two distinct same-unqualified-named
+            // anon-namespace types across TUs hash identically here (MSVC's raw_name()
+            // keeps its per-TU tag, so they differ there). The residual -- same NAME,
+            // same LAYOUT, distinct types, cross-TU, Itanium RTTI -- is an undetectable
+            // logical mislabel, exactly the RTTI-off lane's documented caveat, and can
+            // never corrupt memory (identical layout).
+            if (a.rttiName != 0 && b.rttiName != 0 && a.rttiName != b.rttiName)
+                return true;
             if (a.size != 0 && b.size != 0)
                 return a.size != b.size || a.align != b.align || a.flags != b.flags;
             return false;
