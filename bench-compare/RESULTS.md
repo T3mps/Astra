@@ -1210,5 +1210,393 @@ tracked tier costs ~46% more than the coarse tier (8.856 vs. 6.074 ns/entity) �
 of the per-entity run-scan running (and finding everything newer) on top of the coarse chunk
 accept, exactly the two-tier trade-off the spec's Decision 2 describes.
 
+## 3-way campaign (2026-09-11, dev+change-detection @ b664aa8)
+
+Record-refresh campaign: the last 3-way run of record was 2026-07-24/25 (Definitive scoreboard +
+Lever 3); `include/` has since gained the full 3-stage system-queries program (View enrichment,
+SystemParam binder) and, most recently, Stage 3 change detection (`b664aa8`, branch
+`feat/change-detection` = dev + change detection). This section is a pure evidence refresh — numbers
+only, no tuning, no fixes — run on the current tree exactly as instructed.
+
+**Recipe** (identical Dist-parity full-opt flags as every table above):
+`/std:c++20 /O2 /GL /DNDEBUG /D__SSE2__ /D__SSE4_2__ /arch:AVX /fp:fast /Zc:__cplusplus /EHsc
+/nologo /DASTRA_BUILD_DIST /I..\include /I..\vendor\Mosaic\include /I..\tests bench_astra.cpp
+/Fe:bench_astra.exe /link /LTCG advapi32.lib`, invoked through `build_one.bat` (vcvars64 + `cl`).
+`bench_astra.exe` rebuilt fresh from current `include/` (previous exe dated 2026-07-25); build
+log (`build_astra.log`) shows zero warnings/errors; one untimed smoke run (34 rows, exit 0, not
+counted as a round). `bench_flecs.exe`/`bench_entt.exe` **reused as-is** (built 2026-07-24
+18:36) — verified by mtime: `vendor/flecs.c`/`vendor/flecs.h`/`vendor/entt.hpp` all
+2026-07-21 19:12, older than both exes (2026-07-24 18:36), so no rebuild triggered per the task's
+mtime rule. Both also smoke-run once clean (25 and 22 rows respectively, exit 0). A round-0
+smoke cross-check (`analyze_definitive.py` on all three fresh smoke outputs) passed the items
+check with zero mismatches and reproduced the same data-driven op→libs grouping as the July
+campaign (15 3-way ops, 6 2-way ops, the rest 1-way-exempt) before the real campaign ran.
+
+### Quiet-check — GATE NEVER CLEARED (proceeded per ground rules)
+
+`typeperf "\Processor(_Total)\% Processor Time" -sc 5`, 5 pre-campaign attempts (~2 min apart,
+the instructed retry loop) plus one post-campaign check; none dropped near the ~10% target:
+
+| Attempt | Time | Samples (%) | Avg |
+|---|---|---|---|
+| 1 (pre) | 12:42:59-12:43:03 | 35.29, 25.91, 26.63, 27.38, 36.48 | **30.34%** |
+| 2 (pre) | 12:45:36-12:45:40 | 20.85, 25.31, 18.05, 20.25, 22.50 | **21.39%** |
+| 3 (pre, right after the astra rebuild) | 12:46:58-12:47:03 | 35.71, 34.79, 41.21, 43.93, 42.18 | **39.57%** |
+| 4 (pre) | 12:49:08-12:49:12 | 33.00, 31.51, 28.13, 25.80, 22.20 | **28.13%** |
+| 5 (pre, last allowed retry) | 12:51:19-12:51:23 | 41.36, 37.07, 32.31, 36.35, 49.77 | **39.37%** |
+| post-campaign (after round 6) | 12:56:08-12:56:13 | 26.68, 26.54, 27.64, 26.06, 27.48 | **26.88%** |
+
+Per ground rules ("if it never drops below ~12%, proceed anyway, record every reading, name the
+offending processes, don't kill anything") the campaign ran anyway. `Get-Process | sort CPU -desc`
+named the same offenders both times checked: **node** (a long-running background process, by far
+the largest cumulative-CPU total), **Discord** (×2 processes), **brave** (×2 processes),
+**steamwebhelper** (×2 processes), **ArcaneEditor**. None were closed.
+
+**Caveat on the post-round-3 checkpoint:** the campaign ran as one unattended script (all 6
+rounds back-to-back); no discrete typeperf sample was taken specifically between rounds 3 and 4,
+only the pre-campaign (attempt 5, immediately before round 1) and post-campaign (immediately
+after round 6) readings above. The per-round wall-clock times below show no anomalous slowdown
+around round 3 specifically — offered as the closest available evidence of in-campaign
+stability, not a substitute for the missed literal measurement.
+
+### Campaign
+
+6 interleaved rounds, `astra → flecs → entt` per round, each exe's stdout prefixed `roundN,` and
+appended to `bench-compare/campaign_2026-09-11.csv` (486 rows = 6 × 81; stderr →
+`campaign_2026-09-11.err`, only the expected `# <lib> sink=...` debug lines, zero failures).
+Wall time per round: round1 46.1s, round2 47.0s, round3 40.5s, round4 40.3s, round5 41.6s,
+round6 40.4s (total ≈256s). `python analyze_definitive.py campaign_2026-09-11.csv` — **items
+check PASS, zero mismatches**, same op→libs grouping as the round-0 smoke check; full output
+saved to `campaign_2026-09-11_analysis.txt`.
+
+### Tier-A table (3-way; median [min,max] ns/op, 6 rounds; N=1,000,000 unless noted)
+
+| op | N | Astra | flecs | EnTT | vs flecs | vs EnTT |
+|---|---|---|---|---|---|---|
+| create | 1M | 70.427 [60.050, 87.795] | 115.37 [106.28, 135.54] | 62.349 [56.244, 68.125] | 1.638× NON-OVERLAPPING (astra ahead) | 0.885× overlap/noise |
+| create_batch | 1M | 30.675 [27.623, 39.927] | 22.997 [21.249, 28.880] | 56.057 [51.382, 72.371] | 0.750× overlap/noise | 1.827× NON-OVERLAPPING (astra ahead) |
+| add_component | 1M | 52.755 [48.480, 64.785] | 63.357 [60.268, 71.173] | 19.690 [16.604, 21.586] | 1.201× overlap/noise | 0.373× NON-OVERLAPPING (astra behind) |
+| remove_component | 1M | 32.758 [30.964, 38.287] | 39.931 [37.135, 42.847] | 17.939 [17.342, 18.458] | 1.219× overlap/noise | 0.548× NON-OVERLAPPING (astra behind) |
+| add_batch | 1M | 113.11 [99.909, 134.07] | 109.28 [106.56, 125.07] | 19.279 [16.519, 22.392] | 0.966× overlap/noise | 0.170× NON-OVERLAPPING (astra behind) |
+| remove_batch | 1M | 88.559 [78.387, 124.64] | 81.542 [72.434, 90.489] | 15.526 [15.191, 15.869] | 0.921× overlap/noise | 0.175× NON-OVERLAPPING (astra behind) |
+| destroy | 1M | 24.983 [23.000, 29.938] | 15.890 [14.985, 19.003] | 50.435 [49.395, 54.587] | 0.636× NON-OVERLAPPING (astra behind) | 2.019× NON-OVERLAPPING (astra ahead) |
+| iterate1 | 1M | 0.9045 [0.4460, 1.944] | 0.7610 [0.4100, 1.713] | 1.047 [0.7120, 2.452] | 0.841× overlap/noise | 1.158× overlap/noise |
+| iterate1 | 10M | 1.268 [1.022, 1.769] | 1.195 [1.031, 1.460] | 1.497 [1.263, 2.024] | 0.942× overlap/noise | 1.180× overlap/noise |
+| iterate2_half | 1M (items=500K) | 0.7160 [0.3970, 1.418] | 0.3875 [0.2560, 1.304] | 2.262 [1.724, 3.033] | 0.541× overlap/noise | 3.159× NON-OVERLAPPING (astra ahead) |
+| iterate2_one | 1M (items=1) | 0.000 | 0.000 | 0.000 | overlap/noise | overlap/noise (all three ~0) |
+| iterate5 | 1M | 2.660 [2.183, 4.535] | 2.720 [1.977, 3.399] | 6.258 [5.770, 7.488] | 1.023× overlap/noise | 2.353× NON-OVERLAPPING (astra ahead) |
+| iterate5 | 10M | 2.702 [2.243, 3.953] | 2.371 [1.994, 3.692] | 6.585 [5.882, 10.698] | 0.877× overlap/noise | 2.437× NON-OVERLAPPING (astra ahead) |
+| random_get | 1M | 150.91 [122.03, 204.07] | 99.251 [88.546, 123.14] | 56.184 [49.805, 89.025] | 0.658× overlap/noise | 0.372× NON-OVERLAPPING (astra behind) |
+| get_multi | 1M (items=2M) | 223.18 [183.50, 303.34] | 155.09 [140.68, 209.60] | 108.00 [91.137, 119.99] | 0.695× overlap/noise | 0.484× NON-OVERLAPPING (astra behind) |
+
+`iterate2`/`iterate3` are 2-way (astra/flecs; EnTT reports them under `iterate2_view`/
+`iterate3_view`, informational only, same treatment as the July campaign):
+
+| op | N | Astra | flecs | ratio | flag |
+|---|---|---|---|---|---|
+| iterate2 | 1M | 2.155 [1.752, 3.000] | 1.963 [1.409, 3.138] | 0.911× | overlap/noise |
+| iterate2 | 10M | 2.173 [1.563, 2.545] | 1.813 [1.486, 2.620] | 0.834× | overlap/noise |
+| iterate3 | 1M | 2.098 [1.854, 3.038] | 2.295 [1.775, 3.164] | 1.094× | overlap/noise |
+| iterate3 | 10M | 2.097 [1.605, 2.701] | 2.061 [1.811, 3.674] | 0.983× | overlap/noise |
+
+### Tier-B table (Astra vs flecs only; median [min,max] ns/op, 6 rounds)
+
+| op | N | Astra | flecs | ratio | flag |
+|---|---|---|---|---|---|
+| relations_children | 100K nodes (items=100) | 0.0190 [0.0190, 0.0200] | 0.0100 [0.0090, 0.0100] | 0.526× | NON-OVERLAPPING (astra behind) |
+| relations_descendants | 100K nodes (items=99,999) | 10.869 [10.477, 12.025] | 62.378 [58.633, 141.11] | 5.739× | NON-OVERLAPPING (astra ahead) |
+| relations_ancestors | 100K nodes (items=448,889) | 220.47 [196.45, 272.06] | 86.451 [84.086, 93.369] | 0.392× | NON-OVERLAPPING (astra behind) |
+| system_tick_seq | 1M × 3 systems (items=3M) | 3.149 [2.278, 5.509] | 3.312 [2.679, 4.585] | 1.052× | overlap/noise |
+| parallel_iterate2 | 1M | 0.5180 [0.3810, 0.7250] | 0.4290 [0.2490, 0.8630] | 0.828× | overlap/noise |
+| parallel_iterate2 | 10M | 0.9910 [0.9700, 1.053] | 1.041 [0.9860, 1.214] | 1.050× | overlap/noise |
+
+**Tuning-target list** (script-generated, Astra behind with non-overlapping bands): `destroy`
+(vs flecs, +57.2%), `relations_ancestors` (vs flecs, +155.0%), `relations_children` (vs flecs,
++90.0%), `add_batch` (vs entt, +486.7%), `add_component` (vs entt, +167.9%), `get_multi` (vs
+entt, +106.6%), `random_get` (vs entt, +168.6%), `remove_batch` (vs entt, +470.4%),
+`remove_component` (vs entt, +82.6%). These percentages are same-session, paired-ratio numbers
+(reliable per the campaign's own load-noise caveat below) — they should not be read against the
+July percentages, which ran at a different, much quieter load.
+
+### `random_get` vs `random_get_const` against both competitors' `random_get`
+
+`random_get_const` is new (Stage-3 addition, `std::as_const(*reg).GetComponent<T>` — no chunk
+stamp). Not part of the script's automated op-name matching (1-way exempt); computed by hand with
+the identical band-overlap rule:
+
+| op | Astra median [min,max] | vs flecs random_get 99.251 [88.546, 123.14] | vs entt random_get 56.184 [49.805, 89.025] |
+|---|---|---|---|
+| `random_get` (non-const) | 150.91 [122.03, 204.07] | 0.658× overlap/noise | 0.372× NON-OVERLAPPING (astra behind) |
+| `random_get_const` | 114.37 [106.55, 155.44] | 0.868× overlap/noise | 0.491× NON-OVERLAPPING (astra behind) |
+
+### Today vs 2026-07-24 (Astra medians; prior-source column states which section the number is from)
+
+| op | N | Today (2026-09-11) | 2026-07-24 Definitive | 2026-07-24 Lever-3 | Today vs July band |
+|---|---|---|---|---|---|
+| create | 1M | 70.427 [60.050, 87.795] | 53.49 [51.99, 55.96] | — | outside (above) |
+| create_batch | 1M | 30.675 [27.623, 39.927] | 34.06 [33.42, 36.85] | 22.59 [21.49, 23.68] (ckpt2) | outside both (between them) |
+| add_component | 1M | 52.755 [48.480, 64.785] | 38.77 [38.36, 40.25] | 39.84 [39.01, 41.37] (ckpt2 flat-watch) | outside (above) |
+| remove_component | 1M | 32.758 [30.964, 38.287] | 26.29 [25.49, 27.38] | 26.04 [25.75, 27.67] (ckpt2 flat-watch) | outside (above) |
+| add_batch | 1M | 113.11 [99.909, 134.07] | 80.26 [79.30, 81.51] | — | outside (above) |
+| remove_batch | 1M | 88.559 [78.387, 124.64] | 62.45 [59.49, 64.43] | — | outside (above) |
+| destroy | 1M | 24.983 [23.000, 29.938] | 26.14 [25.84, 27.23] | 19.67 [19.34, 20.20] (ckpt2) | outside both (between them) |
+| iterate1 | 1M | 0.9045 [0.4460, 1.944] | 0.461 [0.373, 0.539] | — | outside (above) |
+| iterate1 | 10M | 1.268 [1.022, 1.769] | 0.765 [0.698, 0.843] | — | outside (above) |
+| iterate2 | 1M | 2.155 [1.752, 3.000] | 0.980 [0.821, 1.437] | — | outside (above) |
+| iterate2 | 10M | 2.173 [1.563, 2.545] | 1.171 [1.130, 1.281] | — | outside (above) |
+| iterate3 | 1M | 2.098 [1.854, 3.038] | 1.123 [0.926, 1.404] | — | outside (above) |
+| iterate3 | 10M | 2.097 [1.605, 2.701] | 1.292 [1.271, 1.380] | — | outside (above) |
+| iterate5 | 1M | 2.660 [2.183, 4.535] | 1.450 [1.357, 1.632] | — | outside (above) |
+| iterate5 | 10M | 2.702 [2.243, 3.953] | 1.542 [1.488, 1.902] | — | outside (above) |
+| iterate2_half | 1M | 0.7160 [0.3970, 1.418] | 0.273 [0.250, 0.316] | — | outside (above) |
+| iterate2_one | 1M | 0.000 | 0.000 | — | within (both at timer floor) |
+| random_get | 1M | 150.91 [122.03, 204.07] | 56.95 [53.85, 59.33] | 55.82 [50.98, 58.17] (ckpt2 flat-watch) | outside (above) |
+| random_get_const | 1M | 114.37 [106.55, 155.44] | new | new | n/a |
+| get_multi | 1M | 223.18 [183.50, 303.34] | 114.31 [109.12, 142.79] | — | outside (above) |
+| relations_children | 100K | 0.0190 [0.0190, 0.0200] | 0.0160 [0.0150, 0.0160] | — | outside (above) |
+| relations_descendants | 100K | 10.869 [10.477, 12.025] | 7.325 [6.981, 7.489] | — | outside (above) |
+| relations_ancestors | 100K | 220.47 [196.45, 272.06] | 122.33 [115.81, 125.35] | — | outside (above) |
+| system_tick_seq | 1M×3 | 3.149 [2.278, 5.509] | 1.533 [1.504, 1.689] | — | outside (above) |
+| parallel_iterate2 | 1M | 0.5180 [0.3810, 0.7250] | 0.288 [0.239, 0.391] | — | outside (above) |
+| parallel_iterate2 | 10M | 0.9910 [0.9700, 1.053] | 0.850 [0.840, 0.854] | — | outside (above) |
+| cd_untracked_changed_{0,10,50,100} | 1M | 0.000 / 0.6055 / 3.896 / 6.986 | new | new | n/a |
+| cd_tracked_changed_{0,10,50,100} | 1M | 0.000 / 0.9160 / 5.019 / 9.702 | new | new | n/a |
+
+Every op that existed in July moved outside its July band in the slower direction this session,
+**except** `create_batch` and `destroy`, whose today's medians fall between the original 2026-07-24
+Definitive-scoreboard band and the later same-day Lever-3-optimized band (i.e. still faster than
+the pre-Lever-3 number, slower than the post-Lever-3 number), and `iterate2_one`, which stayed at
+the timer's zero floor in both sessions.
+
+### `Changed<T>` throughput today (Astra-only, median [min,max] of the same 6 rounds)
+
+| Op | % changed | Median [min, max] (ns/entity) |
+|---|---|---|
+| `cd_untracked_changed_0` | 0% | 0.0000 [0.0000, 0.0000] |
+| `cd_untracked_changed_10` | 10% | 0.6055 [0.5750, 0.7780] |
+| `cd_untracked_changed_50` | 50% | 3.896 [3.440, 4.453] |
+| `cd_untracked_changed_100` | 100% | 6.986 [6.784, 8.282] |
+| `cd_tracked_changed_0` | 0% | 0.0000 [0.0000, 0.0010] |
+| `cd_tracked_changed_10` | 10% | 0.9160 [0.8770, 1.422] |
+| `cd_tracked_changed_50` | 50% | 5.019 [4.539, 5.396] |
+| `cd_tracked_changed_100` | 100% | 9.702 [8.880, 11.002] |
+
+### What changed since July — plain language, numbers only
+
+Every 3-way and 2-way op moved outside its 2026-07-24 band this session, in the slower direction,
+with two partial exceptions (`create_batch`, `destroy` — see table above) and one op that stayed
+at the timer floor (`iterate2_one`). But this campaign never got a quiet machine: all 5
+pre-campaign typeperf attempts read 21-40% average CPU (vs July's ~10%), and the offending
+processes (`node`, `Discord`, `brave`, `steamwebhelper`, `ArcaneEditor`) were the user's own
+background applications, not left running by this task. **flecs's own numbers — unmodified code,
+rebuilt 2026-07-24, unchanged since — moved by comparable or larger margins this session**:
+flecs `create` 90.00→115.37 (1.28×), flecs `iterate1`@1M 0.392→0.761 (1.94×), flecs `iterate2`@1M
+0.904→1.963 (2.17×), flecs `random_get` 56.76→99.25 (1.75×), flecs `system_tick_seq`
+1.579→3.312 (2.10×), flecs `relations_ancestors` 76.96→86.45 (1.12×), flecs
+`relations_descendants` 48.94→62.38 (1.27×). Since flecs's code did not change between the two
+sessions, this spread (1.1×-2.2×, heavier on short/tight ops like `iterate1`/`iterate2`/
+`system_tick_seq`, lighter on `destroy`/`relations_ancestors`) is attributable to this session's
+load, not to code changes in either library — meaning most of the cross-session absolute-value
+movement in the table above is not a reliable regression signal on its own. The same-session,
+paired Astra-vs-flecs-vs-EnTT ratios in the Tier-A/Tier-B tables (run under identical conditions
+within each round) remain the trustworthy same-session comparison, and by that measure Astra's
+standing relative to both competitors — ahead on `create`/`create_batch`(vs entt)/`destroy`(vs
+entt)/`iterate2_half`(vs entt)/`iterate5`(vs entt)/`relations_descendants`, behind on
+`destroy`/`relations_ancestors`/`relations_children` (vs flecs) and `add_batch`/`add_component`/
+`get_multi`/`random_get`/`remove_batch`/`remove_component` (vs entt) — is qualitatively the same
+shape as the July Definitive scoreboard's per-family verdicts (Astra's structural/batch lane vs
+entt, and destroy/relations_ancestors vs flecs, were tuning targets there too). Two op families
+have a known, tracked-in-git architectural addition since July, independent of this session's
+noise: (1) `add_component`/`remove_component`/non-const `random_get` now pay a mandatory
+chunk-version stamp per the change-detection design (measured in isolation, at a quieter load, in
+the "Change detection" section above: `add_component` +21.8%, `remove_component` +0.05ns
+marginal, `random_get` gap explained entirely by the stamp per the `random_get_const` A/B there);
+(2) `relations_children`/`relations_descendants`/`relations_ancestors`'s non-const yields now
+stamp too, per commit `be0693c` ("Ruling M" — `Relations::ForEachChild/Descendant/Ancestor`
+routed through the stamping `GetComponentMut`), which post-dates the CD-gate section's own
+2026-09-11 run and was not previously measured against flecs. No further interpretation is drawn
+beyond what these tracked sources and today's numbers state.
+
+## Clean-room campaign (2026-09-19, dev @ `b8291b9`)
+
+### Why this section exists: a machine-specific artifact was root-caused between the 09-11 and 09-19 sessions
+
+The 09-11 campaign above never got a quiet machine (21–40% background load, gate never cleared) and
+its absolute numbers were already flagged unreliable cross-session. A follow-up investigation on
+09-15 found something worse than load noise: on this box, `bench_astra.exe`'s **structural** ops
+(`create`/`add_component`/`create_batch`/…) were **8–60× slower** than every prior baseline, while
+`iterate*`/`random_get` were unchanged — a signature pointing at allocation, not the CPU. Root
+cause, confirmed by direct measurement (`ctypes` timing 64 raw `VirtualAlloc` calls): Astra's chunk
+pool requests `MEM_LARGE_PAGES` for its arenas (`Core/Memory.hpp`), and on a long-uptime box with
+fragmented physical RAM, `VirtualAlloc(..., MEM_LARGE_PAGES)` took a **median 150 ms and failed
+60% of the time** (vs 1.2 µs for a regular-page allocation of the same size) — a stall paid once
+per arena grow, entirely inside the kernel call, invisible to CPU pinning or clock locking. flecs
+and EnTT use plain `malloc` and were unaffected. Full writeup: memory
+`astra-bench-hugepage-stall.md`.
+
+A second, distinct variable surfaced when this session (post-reboot) re-ran the check: large-page
+`VirtualAlloc` failed **instantly** (0.7 µs, not 150 ms) rather than stalling — because
+`SeLockMemoryPrivilege` was present in the shell's token but **disabled**, and Astra's
+`IsHugePagesAvailable()` gates on the strict `PrivilegeCheck` for the *enabled* bit, not mere
+presence. Windows does not auto-enable an assigned-but-unused privilege, and nothing in Astra
+calls `AdjustTokenPrivileges` to turn it on, so a normal, unprivileged process launch silently
+takes the regular-page path regardless of fragmentation. Confirmed by enabling the privilege via
+`AdjustTokenPrivileges` and re-testing from a genuine **child process** (privilege state is
+inherited at `CreateProcess`, not grantable after): 32/32 large-page allocations succeeded at a
+median 1.9 µs once both (a) the privilege was enabled and (b) the reboot had defragmented RAM.
+
+**Both are now permanent parts of `bench-compare/bench-clean.ps1`**, alongside the pinning/priority/
+quiet-gate/power-scheme-lock this script already provided (see its header comment for the full
+mechanism list): the script P/Invokes `AdjustTokenPrivileges` to enable `SeLockMemoryPrivilege` in
+its own process before spawning any child bench, and logs the outcome either way so a run where the
+account lacks the right (a real "not available on this box" case, not a bug) is self-documenting
+rather than silently producing misleading structural-op numbers.
+
+### Protocol
+
+Reboot (fresh that afternoon, ~20 min prior — the fragmentation fix) → `bench-clean.ps1` self-elevates
+via a UAC prompt (needed only for the `powercfg` base-clock lock; the privilege-enable and P-core
+pinning do not require elevation) → enables `SeLockMemoryPrivilege` → switches to a dedicated
+"Astra Benchmark" power scheme (Processor performance boost mode = Disabled, min/max state 100%) →
+pins the process to the eight P-core HT pairs minus core 0's (mask `0xFFFC`, core 0 takes
+interrupts/DPCs) at High priority → per round, gates on ≥4 of those 14 logical cores under 10% busy
+(≤6 retries × 20 s, proceeds and records the reading past that) → runs `astra → flecs → entt`,
+appending `roundN,`-prefixed stdout to the CSV → restores the original power scheme in a `finally`
+(Ctrl+C included).
+
+`bench_astra.exe` rebuilt fresh from current `include/` (`build_fresh.bat`; dev had moved 2 commits
+past the last fresh build, both in `TypeContext`/`ComponentRegistry` — see the road-to-A rtti-dangle
+fix — neither on any benchmarked hot path, confirmed by the flat `iterate1`/`random_get` numbers
+below). `bench_flecs.exe`/`bench_entt.exe` reused as-is (2026-07-24 18:36; competitor sources
+unchanged since).
+
+### Per-round record
+
+| Round | Gate | Idle cores | Avg busy% | %Processor Performance | Wall time |
+|---|---|---|---|---|---|
+| 1 | CLEAR | 5/14 | 30% | 89% | 54.8 s |
+| 2 | CLEAR | 5/14 | 28% | 88% | 53.6 s |
+| 3 | CLEAR | 9/14 | 20% | 87% | 50.5 s |
+| 4 | CLEAR | 10/14 | 15% | 85% | 50.5 s |
+| 5 | CLEAR | 7/14 | 27% | 86% | 50.6 s |
+| 6 | CLEAR | 10/14 | 17% | 87% | 50.6 s |
+
+Every round cleared the quiet gate on the first attempt (contrast the 09-11 session: 5 retries,
+never cleared). Wall times are a tight 50–55 s band — the historical shape (vs. the 09-15
+pre-fix smoke run's 230 s for `astra` alone, entirely the large-page stall). Clock held at
+85–89% of `MaxClockSpeed` throughout (boost successfully suppressed; not exactly 100% — some
+residual variance from the mixed HT/physical-core mask — but stable session-to-session, unlike
+turbo-on runs). 486 rows (6 × 81), items check PASS, zero cross-lib mismatches.
+
+### Tier-A table (3-way; N=1,000,000 unless noted; **min of 6 rounds** [min, max] — see "min vs median" below)
+
+| op | N | Astra | flecs | EnTT | vs flecs | vs EnTT |
+|---|---|---|---|---|---|---|
+| create | 1M | 83.931 [83.931, 94.289] | 138.85 [138.85, 146.59] | 71.938 [71.938, 80.072] | 1.654× NON-OVERLAPPING (astra ahead) | 0.857× NON-OVERLAPPING (astra behind) |
+| create_batch | 1M | 28.441 [28.441, 35.302] | 22.812 [22.812, 26.613] | 63.693 [63.693, 71.051] | 0.802× NON-OVERLAPPING (astra behind) | 2.239× NON-OVERLAPPING (astra ahead) |
+| add_component | 1M | 66.774 [66.774, 72.614] | 76.963 [76.963, 83.597] | 21.239 [21.239, 24.176] | 1.153× NON-OVERLAPPING (astra ahead) | 0.318× NON-OVERLAPPING (astra behind) |
+| remove_component | 1M | 41.521 [41.521, 45.867] | 49.290 [49.290, 52.001] | 24.790 [24.790, 26.527] | 1.187× NON-OVERLAPPING (astra ahead) | 0.597× NON-OVERLAPPING (astra behind) |
+| add_batch | 1M | 122.86 [122.86, 134.24] | 133.16 [133.16, 147.83] | 19.438 [19.438, 23.069] | 1.084× overlap/noise | 0.158× NON-OVERLAPPING (astra behind) |
+| remove_batch | 1M | 98.714 [98.714, 108.69] | 93.787 [93.787, 104.10] | 23.208 [23.208, 25.064] | 0.950× overlap/noise | 0.235× NON-OVERLAPPING (astra behind) |
+| destroy | 1M | 28.707 [28.707, 31.918] | 22.703 [22.703, 25.019] | 74.537 [74.537, 78.114] | 0.791× NON-OVERLAPPING (astra behind) | 2.596× NON-OVERLAPPING (astra ahead) |
+| iterate1 | 1M | 0.4530 [0.4530, 0.8720] | 0.4670 [0.4670, 1.712] | 0.6790 [0.6790, 0.9850] | 1.031× overlap/noise | 1.499× overlap/noise |
+| iterate1 | 10M | 0.9580 [0.9580, 1.308] | 0.8060 [0.8060, 1.489] | 1.268 [1.268, 1.586] | 0.841× overlap/noise | 1.324× overlap/noise |
+| iterate2_half | 1M (items=500K) | 0.3260 [0.3260, 0.6910] | 0.3390 [0.3390, 1.116] | 1.613 [1.613, 1.917] | 1.040× overlap/noise | 4.948× NON-OVERLAPPING (astra ahead) |
+| iterate2_one | 1M (items=1) | 0.000 | 0.000 | 0.000 | overlap/noise | overlap/noise (all three at timer floor) |
+| iterate5 | 1M | 1.672 [1.672, 3.229] | 1.415 [1.415, 2.197] | 7.273 [7.273, 9.788] | 0.846× overlap/noise | 4.350× NON-OVERLAPPING (astra ahead) |
+| iterate5 | 10M | 2.211 [2.211, 2.934] | 2.121 [2.121, 2.546] | 7.980 [7.980, 9.593] | 0.959× overlap/noise | 3.609× NON-OVERLAPPING (astra ahead) |
+| random_get | 1M | 117.32 [117.32, 131.40] | 84.297 [84.297, 97.996] | 51.987 [51.987, 80.121] | 0.718× NON-OVERLAPPING (astra behind) | 0.443× NON-OVERLAPPING (astra behind) |
+| get_multi | 1M (items=2M) | 198.01 [198.01, 219.54] | 150.28 [150.28, 176.59] | 93.699 [93.699, 134.16] | 0.759× NON-OVERLAPPING (astra behind) | 0.473× NON-OVERLAPPING (astra behind) |
+
+`iterate2`/`iterate3` are 2-way (astra/flecs; EnTT reports them under `iterate2_view`/`iterate3_view`,
+informational only):
+
+| op | N | Astra | flecs | ratio | flag |
+|---|---|---|---|---|---|
+| iterate2 | 1M | 1.286 [1.286, 1.921] | 1.252 [1.252, 1.974] | 0.974× | overlap/noise |
+| iterate2 | 10M | 1.676 [1.676, 2.278] | 1.545 [1.545, 2.592] | 0.922× | overlap/noise |
+| iterate3 | 1M | 1.125 [1.125, 2.021] | 1.196 [1.196, 3.088] | 1.063× | overlap/noise |
+| iterate3 | 10M | 1.863 [1.863, 2.120] | 1.699 [1.699, 2.038] | 0.912× | overlap/noise |
+
+### Tier-B table (Astra vs flecs only)
+
+| op | N | Astra | flecs | ratio | flag |
+|---|---|---|---|---|---|
+| relations_children | 100K nodes (items=100) | 0.0260 [0.0260, 0.0260] | 0.0130 [0.0130, 0.0210] | 0.500× | NON-OVERLAPPING (astra behind) |
+| relations_descendants | 100K nodes (items=99,999) | 14.517 [14.517, 17.374] | 74.576 [74.576, 94.923] | 5.137× | NON-OVERLAPPING (astra ahead) |
+| relations_ancestors | 100K nodes (items=448,889) | 240.24 [240.24, 283.89] | 128.44 [128.44, 146.07] | 0.535× | NON-OVERLAPPING (astra behind) |
+| system_tick_seq | 1M × 3 systems | 2.098 [2.098, 2.671] | 1.857 [1.857, 2.189] | 0.885× | overlap/noise |
+| parallel_iterate2 | 1M | 0.1780 [0.1780, 0.6120] | 0.2460 [0.2460, 1.647] | 1.382× | overlap/noise |
+| parallel_iterate2 | 10M | 0.9690 [0.9690, 1.140] | 1.064 [1.064, 1.144] | 1.098× | overlap/noise |
+
+**Tuning-target list** (Astra behind, non-overlapping bands): `create_batch` (vs flecs, +24.7%),
+`destroy` (vs flecs, +26.4%), `get_multi` (vs flecs +31.8% / vs entt +111.3%), `random_get` (vs
+flecs +39.2% / vs entt +125.7%), `relations_ancestors` (vs flecs, +87.0%), `relations_children`
+(vs flecs, +100.0%) — plus EnTT's usual structural/random-access lane (`add_batch`/`add_component`/
+`remove_batch`/`remove_component`), which the user's standing ruling treats as model-inherent, not
+a target. This list is essentially identical in shape to both the 07-24 Definitive scoreboard and
+the 09-11 session's — the same handful of ops have been the real tuning targets across three
+sessions now.
+
+### min vs median, and why this section leads with min
+
+`analyze_definitive.py` gained a `--stat {median,min}` flag this session. Every prior table in this
+file uses **median** of N rounds. For a CPU-bound microbenchmark, sampling noise (a stray
+preemption, a cache-cold round) only ever **adds** time — the true cost is a floor, not a center —
+so **min of rounds is the more defensible headline statistic for the clean-room protocol**, and is
+what the Tier-A/B tables above report. The median-of-rounds numbers for the same data (not tabulated
+above; reproduce with `--stat median`) sit 2–7% above the min table throughout, e.g. `create`
+87.417 vs 83.931 (median vs min) — a small, uniform gap, not a different shape or a different
+tuning-target list.
+
+### Same-session ratio stability across all 6 rounds (the real trust test)
+
+Absolutes alone don't prove a number is trustworthy — the 09-15 investigation showed absolutes can
+be off by 60× and still look self-consistent within one bad round. The test that matters is whether
+the **paired ratio** (flecs_ns / astra_ns, computed independently each round) stays put across
+rounds:
+
+| op | r1 | r2 | r3 | r4 | r5 | r6 | spread |
+|---|---|---|---|---|---|---|---|
+| create | 1.624 | 1.555 | 1.694 | 1.685 | 1.615 | 1.593 | 8.6% |
+| create_batch | 0.754 | 0.774 | 0.781 | 0.833 | 0.740 | 0.814 | 12.0% |
+| add_component | 1.072 | 1.143 | 1.232 | 1.153 | 1.161 | 1.149 | 13.9% |
+| destroy | 0.766 | 0.779 | 0.832 | 0.759 | 0.785 | 0.813 | 9.3% |
+| random_get | 0.683 | 0.642 | 0.706 | 0.698 | 0.757 | 0.820 | 24.9% |
+
+Spread = (max − min) / mean of the 6 per-round ratios. For comparison, the identical check run
+mid-investigation on the **fragmented, privilege-disabled** box (09-15, `ratio_check.csv`, discarded)
+gave spreads of 42–118% on these same ops, with `create` reading Astra 4–7× *slower* than flecs —
+the wrong sign entirely. Astra's own per-round coefficient of variation on `create` dropped from
+80% (fragmented) to **11.8%** this session, now in the same range as flecs's own historical noise
+floor (~15–18%, per the 07-23 quiet-machine session). This is the evidence that the fix (reboot +
+privilege + clock lock + pinning) restored genuine reproducibility, not just better-looking absolutes.
+
+### Verdict against both historical baselines
+
+Against **07-24 Definitive** (Astra medians, quiet machine, turbo-on, no privilege/pinning
+protocol): most ops still read slower today in absolute ns — expected, since this session runs at
+a **locked base clock** (no turbo) specifically to buy cross-session comparability, which 07-24 did
+not have. `create` 87.4 (median) vs 53.5 then; `random_get` 88.4 (median, `random_get_const`) vs
+55.8 then. The *qualitative* standing vs flecs is unchanged: ahead on `create`/`add_component`/
+`remove_component`/`create_batch`(vs entt)/`destroy`(vs entt)/`relations_descendants`, behind on
+`create_batch`/`destroy`/`relations_ancestors`/`relations_children`/`random_get`/`get_multi` (vs
+flecs) and the EnTT structural lane — the same tuning-target roster as every prior session.
+
+Against **09-11** (loaded box, gate never cleared, no privilege/pinning protocol): today's numbers
+are a mix of faster and slower depending on op — `create` 87.4 vs 70.4 then (today's is the
+locked-clock number, so not directly comparable), but the ratio-stability table above is the
+number that actually improved: 09-11 never measured its own within-session reproducibility, and
+the 09-15 ad-hoc check that did found it badly broken. This session is the first with both a
+quantified reproducibility floor and a clean absolute-number provenance chain.
+
+**Bottom line:** the clean-room protocol works. It does not produce numbers identical to any prior
+session (different clock policy, different competitor exe ages), and it should not be expected to —
+its contribution is that its *own* numbers are now provably stable round-to-round, which none of
+the prior sessions could claim. Future campaigns should use `bench-clean.ps1` and report `--stat
+min` as the headline, with `--stat median` and the per-round CSV kept for the reproducibility check
+above.
+
 ## Reproduce
 `bench-compare/` — `build_one.bat` (vcvars+cl wrapper), `bench_{astra,entt,flecs}.cpp`, shared `bench_common.hpp`. EnTT/flecs sources under `bench-compare/vendor/`. **Build with the full-opt flag set above (2026-07-24 baseline), not bare `/O2`.**
+`bench-clean.ps1` (2026-09-19): clean-room wrapper for a busy dev box — see its header comment for the full mechanism list (privilege-enable, power-scheme lock, P-core pinning, quiet gate). Requires one UAC approval per run (the `powercfg` clock lock). `python analyze_definitive.py --stat min <csv>` for the matching headline statistic.
