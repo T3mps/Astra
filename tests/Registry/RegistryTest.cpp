@@ -251,6 +251,24 @@ TEST_F(RegistryTest, ClearRegistry)
     EXPECT_EQ(registry->Size(), 1u);
 }
 
+TEST_F(RegistryTest, ClearInvalidatesEveryPreClearHandle)
+{
+    using namespace Astra::Test;
+    std::vector<Astra::Entity> before;
+    for (int i = 0; i < 8; ++i)
+        before.push_back(registry->CreateEntityWith(Position{float(i), 0.0f, 0.0f}));
+    registry->Clear();
+
+    std::vector<Astra::Entity> after;
+    for (int i = 0; i < 8; ++i)
+        after.push_back(registry->CreateEntity());
+    for (Astra::Entity e : before)
+        EXPECT_FALSE(registry->IsValid(e));
+    for (Astra::Entity e : after)
+        EXPECT_TRUE(registry->IsValid(e));
+    EXPECT_EQ(registry->Size(), 8u);
+}
+
 // Test parent-child relationships
 TEST_F(RegistryTest, ParentChildRelationships)
 {

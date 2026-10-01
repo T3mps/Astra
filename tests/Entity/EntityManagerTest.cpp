@@ -370,7 +370,7 @@ TEST_F(EntityManagerTest, ClearMethod)
     pool.Clear();
     
     EXPECT_EQ(pool.Size(), 0u);
-    EXPECT_EQ(pool.Capacity(), 0u);
+    EXPECT_EQ(pool.Capacity(), 100u);   // Clear keeps m_nextID: ids are recycled, never re-minted (s3.4)
     EXPECT_TRUE(pool.Empty());
     
     // All entities should be invalid
@@ -378,6 +378,64 @@ TEST_F(EntityManagerTest, ClearMethod)
     {
         EXPECT_FALSE(pool.IsValid(entity));
     }
+}
+
+// Clear() recycles (Arcane spec 2026-09-30 s3.4). The old reset (free list
+// emptied, m_nextID = 0) re-issued (0,1), (1,1), ..., so every pre-Clear handle
+// revalidated at once.
+TEST_F(EntityManagerTest, ClearInvalidatesEveryPreClearHandle)
+{
+    Astra::EntityManager pool;
+    std::vector<Astra::Entity> before;
+    pool.CreateBatch(10, std::back_inserter(before));
+    pool.Clear();
+
+    std::vector<Astra::Entity> after;
+    pool.CreateBatch(10, std::back_inserter(after));
+    for (const Astra::Entity& old : before)
+        EXPECT_FALSE(pool.IsValid(old));
+    for (const Astra::Entity& now : after)
+        EXPECT_TRUE(pool.IsValid(now));
+}
+
+TEST_F(EntityManagerTest, ClearKeepsIdsFreedBeforeIt)
+{
+    Astra::EntityManager pool;
+    const Astra::Entity a = pool.Create();
+    const Astra::Entity b = pool.Create();
+    const Astra::Entity c = pool.Create();
+    ASSERT_TRUE(pool.Destroy(b));                 // b's id is free at version 2
+    pool.Clear();                                 // a and c recycle at version 2
+
+    EXPECT_EQ(pool.Size(), 0u);
+    EXPECT_EQ(pool.Capacity(), 3u);
+    EXPECT_EQ(pool.RecycledCount(), 3u);
+
+    std::unordered_set<Astra::EntityManager::IDType> reused;
+    for (int i = 0; i < 3; ++i)
+    {
+        const Astra::Entity e = pool.Create();
+        EXPECT_EQ(e.GetVersion(), 2u);
+        reused.insert(e.GetID());
+    }
+    EXPECT_EQ(reused, (std::unordered_set<Astra::EntityManager::IDType>{ a.GetID(), b.GetID(), c.GetID() }));
+    EXPECT_EQ(pool.Capacity(), 3u);               // no fresh id was minted
+}
+
+TEST_F(EntityManagerTest, ClearRetiresALiveSlotAtTheVersionLimit)
+{
+    Astra::EntityManager pool;
+    Astra::Entity e = pool.Create();
+    for (std::size_t i = 1; i < Astra::Entity::VERSION_MASK; ++i)
+    {
+        ASSERT_TRUE(pool.Destroy(e));
+        e = pool.Create();
+    }
+    ASSERT_EQ(e.GetVersion(), Astra::Entity::VERSION_MASK);
+    pool.Clear();
+    EXPECT_EQ(pool.GetRetiredCount(), 1u);
+    EXPECT_EQ(pool.RecycledCount(), 0u);
+    EXPECT_NE(pool.Create().GetID(), e.GetID());
 }
 
 // Test Reserve method
@@ -655,9 +713,9 @@ TEST_F(EntityManagerTest, RecycledCountTracking)
     pool.CreateBatch(25, std::back_inserter(entities));
     EXPECT_EQ(pool.RecycledCount(), 25u);
     
-    // Clear resets recycled count
+    // Clear recycles every live id (75) on top of the 25 still free
     pool.Clear();
-    EXPECT_EQ(pool.RecycledCount(), 0u);
+    EXPECT_EQ(pool.RecycledCount(), 100u);
 }
 
 // Test custom segment size in MemoryConfig

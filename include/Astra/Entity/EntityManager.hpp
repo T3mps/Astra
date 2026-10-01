@@ -219,9 +219,19 @@ namespace Astra
         ASTRA_NODISCARD EntityTable&       GetRecordTable()       noexcept { return m_table; }
         ASTRA_NODISCARD const EntityTable& GetRecordTable() const noexcept { return m_table; }
 
+        // Clear() RECYCLES (Astra "now" batch, 2026-09-30). Every live id goes
+        // back on the free list at its next version, and an exhausted one
+        // retires. The free list and m_nextID are KEPT, then the table empties.
+        // Ids freed before Clear stay free and are reused after it; LIFO hands
+        // out the just-cleared ids first. EntityIDStack::Clear (the raw reset)
+        // is no longer called here.
         void Clear() noexcept
         {
-            m_idStack.Clear();
+            for (auto it = m_table.begin(); it != m_table.end(); ++it)
+            {
+                const auto [id, version] = *it;
+                RecycleOrRetire(id, version);
+            }
             m_table.Clear();
         }
 
