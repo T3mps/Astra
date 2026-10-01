@@ -450,22 +450,22 @@ TEST_F(EntityTest, BatchOperations)
     EXPECT_EQ(validCount, batchSize);
 }
 
-// Theme H3: version wraparound must key off the version MASK, not the VersionType's
-// natural width, so it is correct for a non-byte-width version field (e.g. 12 bits).
-TEST(EntityVersionWrap, WrapsAtMaskForNonByteWidth)
+// Astra "now" batch (2026-09-30, Arcane spec s3.4): an exhausted slot RETIRES.
+// NextEntityVersion returns NULL_VERSION at the version MASK for every field
+// width. It used to wrap to 1, which let a stale handle revalidate after
+// VERSION_MASK reuses of one slot. The mask, not the VersionType's natural
+// width, decides (theme H3): a 12-bit field in a uint16 retires at 4095.
+TEST(EntityVersionWrap, RetiresAtMaskForEveryWidth)
 {
     using Astra::Detail::NextEntityVersion;
 
-    // 12-bit version field: VersionType would be uint16_t, but the field wraps at
-    // 4095 (VERSION_MASK), NOT at uint16 max. Old (v+1)==NULL logic gives 4096 here
-    // (not 0), which then packs to 0 = invalid -> the recycled entity looks dead.
-    EXPECT_EQ(NextEntityVersion<uint16_t>(5,    4095, 0, 1), 6);
-    EXPECT_EQ(NextEntityVersion<uint16_t>(4094, 4095, 0, 1), 4095);
-    EXPECT_EQ(NextEntityVersion<uint16_t>(4095, 4095, 0, 1), 1);   // wrap 4095 -> skip 0 -> 1
+    EXPECT_EQ(NextEntityVersion<uint16_t>(5,    4095, 0), 6);
+    EXPECT_EQ(NextEntityVersion<uint16_t>(4094, 4095, 0), 4095);
+    EXPECT_EQ(NextEntityVersion<uint16_t>(4095, 4095, 0), 0);   // retire: never 4096, never 1
 
-    // 8-bit version field still wraps correctly (regression guard).
-    EXPECT_EQ(NextEntityVersion<uint8_t>(255, 255, 0, 1), 1);
-    EXPECT_EQ(NextEntityVersion<uint8_t>(7,   255, 0, 1), 8);
+    EXPECT_EQ(NextEntityVersion<uint8_t>(7,   255, 0), 8);
+    EXPECT_EQ(NextEntityVersion<uint8_t>(254, 255, 0), 255);
+    EXPECT_EQ(NextEntityVersion<uint8_t>(255, 255, 0), 0);      // retire: never 1
 }
 
 TEST(EntityRecord, DefaultIsDeadAndUnlocated)

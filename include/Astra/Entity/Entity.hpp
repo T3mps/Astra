@@ -108,16 +108,18 @@ namespace Astra
             StorageType m_entity;
         };
 
-        // Next entity version with wraparound at `versionMask`, skipping the reserved
-        // `nullVersion` (recycles to `initialVersion`). Masking to the version field
-        // width makes this correct for ANY VersionBits, not just {8,16,32} -- a field
-        // narrower than its VersionType (e.g. 12 bits in a uint16) wraps at the mask,
-        // never at the type's natural width.
+        // Next entity version, or `nullVersion` once `current` reaches
+        // `versionMask`: the slot RETIRES instead of wrapping (Astra "now"
+        // batch, 2026-09-30). The old wrap to the initial version let a stale
+        // handle revalidate after versionMask reuses of one slot, and LIFO
+        // recycling makes one slot take all the churn. This is the same
+        // saturating rule as BasicEntity::NextVersion. Masking keeps it correct
+        // for ANY VersionBits: a 12-bit field in a uint16 retires at 4095.
         template<typename V>
-        ASTRA_NODISCARD constexpr V NextEntityVersion(V current, V versionMask, V nullVersion, V initialVersion) noexcept
+        ASTRA_NODISCARD constexpr V NextEntityVersion(V current, V versionMask, V nullVersion) noexcept
         {
-            const V next = static_cast<V>((current + 1) & versionMask);
-            return (next == nullVersion) ? initialVersion : next;
+            const V masked = static_cast<V>(current & versionMask);
+            return (masked >= versionMask) ? nullVersion : static_cast<V>(masked + 1);
         }
     }
 

@@ -1192,8 +1192,8 @@ namespace Astra
          * ENCODING (collision-free by construction): the version field is set
          * to 0 and the id field holds a per-buffer monotonic counter. A real
          * entity handed out by EntityManager ALWAYS carries a nonzero version
-         * (INITIAL_VERSION == 1; recycling wraps 255->1, never to NULL_VERSION
-         * == 0; IsValid() rejects version 0), so a version-0 handle can never
+         * (INITIAL_VERSION == 1; recycling never reaches 0; exhausted slots
+         * retire; IsValid() rejects version 0), so a version-0 handle can never
          * equal any real entity -- see IsPlaceholderEntity. It is also never the
          * all-ones INVALID sentinel (whose version field is all ones, != 0). The
          * id field is ID_BITS wide (2^24 values in the default build), so a

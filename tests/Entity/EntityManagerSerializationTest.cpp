@@ -339,6 +339,41 @@ TEST_F(EntityManagerSerializationTest, VersionWraparound)
     }
 }
 
+// A retired id is below nextID, dead in the table and on no free list. Load
+// reproduces exactly that, so it stays retired with no format change (s3.4).
+TEST_F(EntityManagerSerializationTest, RetiredIdStaysRetiredAcrossSaveLoad)
+{
+    EntityManager pool;
+    const Entity first = pool.Create();
+    Entity e = first;
+    for (std::size_t i = 1; i < Entity::VERSION_MASK; ++i)
+    {
+        ASSERT_TRUE(pool.Destroy(e));
+        e = pool.Create();
+    }
+    ASSERT_TRUE(pool.Destroy(e));                            // retire
+    ASSERT_EQ(pool.GetRetiredCount(), 1u);
+    const Entity other = pool.Create();                      // a fresh id, alive across the round trip
+
+    std::vector<std::byte> buffer;
+    {
+        BinaryWriter writer(buffer);
+        pool.Serialize(writer);
+        ASSERT_FALSE(writer.HasError());
+    }
+    BinaryReader reader(buffer);
+    auto result = EntityManager::Deserialize(reader);
+    ASSERT_TRUE(result.IsOk());
+    auto& loaded = *result.GetValue();
+
+    EXPECT_FALSE(loaded->IsValid(first));
+    EXPECT_FALSE(loaded->IsValid(e));
+    EXPECT_TRUE(loaded->IsValid(other));
+    EXPECT_EQ(loaded->RecycledCount(), 0u);
+    for (int i = 0; i < 4; ++i)
+        EXPECT_NE(loaded->Create().GetID(), first.GetID());
+}
+
 TEST_F(EntityManagerSerializationTest, GlobalFreeList)
 {
     EntityManager pool;

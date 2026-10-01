@@ -54,6 +54,7 @@ namespace Astra
             // with INVALID when combined with max version
             if (m_nextID >= Entity::ID_MASK)
             {
+                NoteFreshIdsExhausted();
                 return {INVALID_ID, NULL_VERSION};
             }
 
@@ -80,7 +81,9 @@ namespace Astra
             size_t remaining = count - fromRecycled;
             size_t availableFresh = (m_nextID >= Entity::ID_MASK) ? 0 : (Entity::ID_MASK - m_nextID);
             size_t toAllocate = std::min(remaining, availableFresh);
-            
+            if (toAllocate < remaining)
+                NoteFreshIdsExhausted();
+
             IDType startID = m_nextID;
             m_nextID += static_cast<IDType>(toAllocate);
             
@@ -176,8 +179,21 @@ namespace Astra
         }
 
     private:
+        // One-time diagnostic (Astra "now" batch). With slot retirement, the
+        // fresh-id space is a world's lifetime budget: about 16.7M ids x
+        // VERSION_MASK creates at the default 24/8 split. It is logged once per
+        // stack so a create loop cannot flood the sink.
+        void NoteFreshIdsExhausted() noexcept
+        {
+            if (m_exhaustionLogged)
+                return;
+            m_exhaustionLogged = true;
+            ASTRA_LOG_WARN("Astra: entity ids exhausted -- every id is in use or retired; Create() returns Entity::Invalid() until one is freed. A long-running world should build with ASTRA_ENTITY_BITS=64.");
+        }
+
         SmallVector<RecycledEntry, 256> m_recycledIDs;  // 256 entries inline (~1.25KB)
         IDType m_nextID = 0;
+        bool m_exhaustionLogged = false;
     };
 }
 

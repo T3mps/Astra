@@ -191,6 +191,102 @@ TEST_F(EntityManagerTest, VersionWraparound)
     }
 }
 
+// Slot retirement (Arcane spec 2026-09-30 s3.4): one slot destroyed and created
+// VERSION_MASK (255) times retires on the last destroy. The next create mints a
+// FRESH id, and no handle to the old slot is ever valid again.
+TEST_F(EntityManagerTest, ExhaustedSlotRetiresOnTheLastDestroy)
+{
+    Astra::EntityManager pool;
+    const Astra::Entity first = pool.Create();               // (id, 1)
+    Astra::Entity e = first;
+    for (std::size_t i = 1; i < Astra::Entity::VERSION_MASK; ++i)
+    {
+        ASSERT_TRUE(pool.Destroy(e));
+        e = pool.Create();
+        ASSERT_EQ(e.GetID(), first.GetID());                  // LIFO: the same slot takes the churn
+    }
+    ASSERT_EQ(e.GetVersion(), Astra::Entity::VERSION_MASK);
+    EXPECT_EQ(pool.GetRetiredCount(), 0u);
+
+    ASSERT_TRUE(pool.Destroy(e));                             // the 255th destroy: retire
+    EXPECT_EQ(pool.GetRetiredCount(), 1u);
+    EXPECT_EQ(pool.RecycledCount(), 0u);                      // never recycled
+
+    for (int i = 0; i < 300; ++i)                             // more churn than one wrap ever needed
+    {
+        const Astra::Entity fresh = pool.Create();
+        ASSERT_NE(fresh.GetID(), first.GetID());
+        EXPECT_FALSE(pool.IsValid(first));
+        EXPECT_FALSE(pool.IsValid(e));
+        ASSERT_TRUE(pool.Destroy(fresh));
+    }
+}
+
+// The same rule on DestroyBatch's >= 32 branch (and CreateBatch's AllocateBatch).
+TEST_F(EntityManagerTest, BatchDestroyRetiresExhaustedSlots)
+{
+    Astra::EntityManager pool;
+    constexpr std::size_t kCount = 40;                        // >= 32: the batch branches
+    std::vector<Astra::Entity> live;
+    ASSERT_EQ(pool.CreateBatch(kCount, std::back_inserter(live)), kCount);
+    const std::vector<Astra::Entity> firstGen = live;
+
+    for (std::size_t round = 1; round < Astra::Entity::VERSION_MASK; ++round)
+    {
+        ASSERT_EQ(pool.DestroyBatch(live.begin(), live.end()), kCount);
+        live.clear();
+        ASSERT_EQ(pool.CreateBatch(kCount, std::back_inserter(live)), kCount);
+    }
+    for (const Astra::Entity& e : live)
+        ASSERT_EQ(e.GetVersion(), Astra::Entity::VERSION_MASK);
+
+    ASSERT_EQ(pool.DestroyBatch(live.begin(), live.end()), kCount);
+    EXPECT_EQ(pool.GetRetiredCount(), kCount);
+    EXPECT_EQ(pool.RecycledCount(), 0u);
+
+    std::vector<Astra::Entity> fresh;
+    ASSERT_EQ(pool.CreateBatch(kCount, std::back_inserter(fresh)), kCount);
+    for (const Astra::Entity& f : fresh)
+    {
+        EXPECT_GE(f.GetID(), kCount);                         // fresh ids, past every retired slot
+        EXPECT_EQ(f.GetVersion(), 1u);
+    }
+    for (const Astra::Entity& old : firstGen)
+        EXPECT_FALSE(pool.IsValid(old));
+}
+
+// A MIXED large batch: one exhausted slot among fresh ones. Only it retires; the
+// rest recycle, and the return value still counts every destroyed entity.
+TEST_F(EntityManagerTest, MixedBatchDestroyRetiresOnlyTheExhaustedSlot)
+{
+    Astra::EntityManager pool;
+    Astra::Entity worn = pool.Create();
+    for (std::size_t i = 1; i < Astra::Entity::VERSION_MASK; ++i)
+    {
+        ASSERT_TRUE(pool.Destroy(worn));
+        worn = pool.Create();
+    }
+    ASSERT_EQ(worn.GetVersion(), Astra::Entity::VERSION_MASK);
+
+    std::vector<Astra::Entity> batch{ worn };
+    ASSERT_EQ(pool.CreateBatch(39, std::back_inserter(batch)), 39u);   // fresh ids 1..39, version 1
+    ASSERT_EQ(batch.size(), 40u);                                      // >= 32: the batch branch
+
+    EXPECT_EQ(pool.DestroyBatch(batch.begin(), batch.end()), 40u);
+    EXPECT_EQ(pool.GetRetiredCount(), 1u);
+    EXPECT_EQ(pool.RecycledCount(), 39u);
+    for (const Astra::Entity& e : batch)
+        EXPECT_FALSE(pool.IsValid(e));
+
+    std::vector<Astra::Entity> again;
+    ASSERT_EQ(pool.CreateBatch(39, std::back_inserter(again)), 39u);
+    for (const Astra::Entity& e : again)
+    {
+        EXPECT_NE(e.GetID(), worn.GetID());
+        EXPECT_EQ(e.GetVersion(), 2u);
+    }
+}
+
 // Test batch destruction
 TEST_F(EntityManagerTest, BatchDestruction)
 {

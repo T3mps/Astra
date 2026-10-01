@@ -1056,3 +1056,23 @@ TEST_F(RegistryTest, DisabledInvariantSurvivesChurnAndDefragment)
         EXPECT_EQ(registry->IsEnabled<EnA>(es[i]), expectedEnabled[i]) << "defrag lost bit at " << i;
     ExpectAllChunksInvariant(*registry);
 }
+
+// The third destroy path: Registry::DestroyEntity -> EntityManager::Destroy(entity, rec).
+TEST_F(RegistryTest, DestroyEntityRetiresAnExhaustedSlot)
+{
+    const Astra::Entity first = registry->CreateEntity();
+    Astra::Entity e = first;
+    for (std::size_t i = 1; i < Astra::Entity::VERSION_MASK; ++i)
+    {
+        registry->DestroyEntity(e);
+        e = registry->CreateEntity();
+        ASSERT_EQ(e.GetID(), first.GetID());
+    }
+    registry->DestroyEntity(e);
+    EXPECT_EQ(registry->GetEntityManager().GetRetiredCount(), 1u);
+
+    const Astra::Entity fresh = registry->CreateEntity();
+    EXPECT_NE(fresh.GetID(), first.GetID());
+    EXPECT_FALSE(registry->IsValid(first));
+    EXPECT_FALSE(registry->IsValid(e));
+}
