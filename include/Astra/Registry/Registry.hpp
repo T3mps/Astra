@@ -1505,15 +1505,23 @@ namespace Astra
             return Relations<QueryArgs...>(m_archetypeManager, entity, m_relationshipGraph, m_workScheduler);
         }
         
-        void SetParent(Entity child, Entity parent)
+        // Forwards to RelationshipGraph::SetParent (ordered children, `index`
+        // as documented there) and returns its verdict. ParentChanged fires only
+        // when the graph accepted AND the parent changed, so a same-parent
+        // reorder and every refusal emit nothing. The bool is deliberately not
+        // [[nodiscard]]: fire-and-forget callers need no churn.
+        bool SetParent(Entity child, Entity parent, std::size_t index = RelationshipGraph::npos)
         {
-            if (m_entityManager.IsValid(child) && m_entityManager.IsValid(parent))
-            {
-                m_relationshipGraph->SetParent(child, parent);
-                
-                // Emit parent changed signal
+            if (!m_entityManager.IsValid(child) || !m_entityManager.IsValid(parent))
+                return false;
+
+            const Entity previous = m_relationshipGraph->GetParent(child);
+            if (!m_relationshipGraph->SetParent(child, parent, index))
+                return false;
+
+            if (previous != parent)
                 m_signalManager.Emit<Events::ParentChanged>(child, parent);
-            }
+            return true;
         }
 
         void RemoveParent(Entity child)

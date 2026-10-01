@@ -1094,3 +1094,38 @@ TEST_F(RegistryTest, DestroyEntityRetiresAnExhaustedSlot)
     EXPECT_FALSE(registry->IsValid(first));
     EXPECT_FALSE(registry->IsValid(e));
 }
+
+// Arcane spec 2026-09-30 s3.4: SetParent returns the graph's verdict and emits
+// ParentChanged only when the graph accepted AND the parent changed. A reorder
+// fires nothing, and a refusal (self, cycle, dead) returns false and emits nothing.
+TEST_F(RegistryTest, SetParentReportsSuccessAndSignalsOnlyARealParentChange)
+{
+    registry->EnableSignals(Astra::Signal::ParentChanged);
+    int fired = 0;
+    auto* signals = registry->GetSignalManager();
+    auto handler = signals->On<Astra::Events::ParentChanged>().Register(
+        [&](const Astra::Events::ParentChanged&) { ++fired; });
+
+    const Astra::Entity root = registry->CreateEntity();
+    const Astra::Entity a = registry->CreateEntity();
+    const Astra::Entity b = registry->CreateEntity();
+    EXPECT_TRUE(registry->SetParent(a, root));
+    EXPECT_TRUE(registry->SetParent(b, root));
+    EXPECT_EQ(fired, 2);
+
+    EXPECT_FALSE(registry->SetParent(a, root));                 // same parent, npos: no-op
+    EXPECT_TRUE(registry->SetParent(b, root, 0));               // reorder: true, no signal
+    EXPECT_EQ(fired, 2);
+    EXPECT_EQ(registry->GetChildren(root), (std::vector<Astra::Entity>{ b, a }));
+
+    EXPECT_FALSE(registry->SetParent(root, root));              // self
+    EXPECT_FALSE(registry->SetParent(root, a));                 // cycle
+    const Astra::Entity dead = registry->CreateEntity();
+    registry->DestroyEntity(dead);
+    EXPECT_FALSE(registry->SetParent(a, dead));                 // dead parent
+    EXPECT_FALSE(registry->SetParent(dead, root));              // dead child
+    EXPECT_EQ(fired, 2);
+    EXPECT_EQ(registry->GetParent(a), root);
+
+    signals->On<Astra::Events::ParentChanged>().Unregister(handler);
+}
