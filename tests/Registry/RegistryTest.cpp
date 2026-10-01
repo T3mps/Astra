@@ -1129,3 +1129,26 @@ TEST_F(RegistryTest, SetParentReportsSuccessAndSignalsOnlyARealParentChange)
 
     signals->On<Astra::Events::ParentChanged>().Unregister(handler);
 }
+
+// Arcane spec 2026-09-30 s3.4: a per-construction id (ParallelCommandBuffer's
+// idiom). Two registries differ, and so do a registry and its Load.
+TEST_F(RegistryTest, InstanceIdsAreDistinctAndLoadMintsAFreshOne)
+{
+    Astra::Registry other;
+    Astra::Registry third(Astra::EntityManager::Config{}, Astra::ArchetypeChunkPool::Config{});
+    EXPECT_NE(registry->GetInstanceId(), 0u);
+    EXPECT_NE(registry->GetInstanceId(), other.GetInstanceId());
+    EXPECT_NE(other.GetInstanceId(), third.GetInstanceId());
+    EXPECT_NE(registry->GetInstanceId(), third.GetInstanceId());
+
+    registry->CreateEntity();
+    auto saved = registry->Save();
+    ASSERT_TRUE(saved.IsOk());
+    auto buffer = std::move(*saved.GetValue());
+    auto loaded = Astra::Registry::Load(buffer, registry->ShareComponentRegistry());
+    ASSERT_TRUE(loaded.IsOk()) << "load error " << static_cast<int>(*loaded.GetError());
+    const auto& restored = *loaded.GetValue();
+    EXPECT_NE(restored->GetInstanceId(), registry->GetInstanceId());
+    EXPECT_NE(restored->GetInstanceId(), other.GetInstanceId());
+    EXPECT_NE(restored->GetInstanceId(), third.GetInstanceId());
+}

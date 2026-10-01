@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -54,7 +56,8 @@ namespace Astra
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
             m_workScheduler(config.workScheduler),
-            m_config(config)
+            m_config(config),
+            m_instanceId(s_nextInstanceId.fetch_add(1, std::memory_order_relaxed))
         {}
 
         Registry(const EntityManager::Config& entityConfig, const ArchetypeChunkPool::Config& chunkConfig) :
@@ -64,7 +67,8 @@ namespace Astra
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry),
             m_workScheduler(nullptr),
-            m_config{entityConfig, chunkConfig, {}, nullptr}
+            m_config{entityConfig, chunkConfig, {}, nullptr},
+            m_instanceId(s_nextInstanceId.fetch_add(1, std::memory_order_relaxed))
         {}
 
         Registry(std::shared_ptr<ComponentRegistry> componentRegistry, const Config& config = {}) :
@@ -74,7 +78,8 @@ namespace Astra
             m_relationshipGraph(std::make_shared<RelationshipGraph>()),
             m_resourceStorage(m_componentRegistry, config.resourceStorageConfig),
             m_workScheduler(config.workScheduler),
-            m_config(config)
+            m_config(config),
+            m_instanceId(s_nextInstanceId.fetch_add(1, std::memory_order_relaxed))
         {}
 
         // A Registry is a heavy, stateful container: copying is not supported (the old
@@ -1293,6 +1298,16 @@ namespace Astra
 
         ASTRA_NODISCARD EntityManager& GetEntityManager() noexcept { return m_entityManager; }
         ASTRA_NODISCARD const EntityManager& GetEntityManager() const noexcept { return m_entityManager; }
+
+        // A per-construction id (Astra "now" batch, 2026-09-30) from a static
+        // atomic starting at 1, ParallelCommandBuffer's idiom. Load constructs
+        // through the shared_ptr ctor, so a loaded registry gets a FRESH id.
+        // Registry is non-copyable and non-movable, so an id is never
+        // duplicated. It seeds nothing (not ticks, not StructureVersion).
+        // Note: an inline static is per module image on Windows, so the id is
+        // unique among registries constructed in one module.
+        ASTRA_NODISCARD std::uint64_t GetInstanceId() const noexcept { return m_instanceId; }
+
         ASTRA_NODISCARD ComponentRegistry* GetComponentRegistry() noexcept { return m_componentRegistry.get(); }
         ASTRA_NODISCARD const ComponentRegistry* GetComponentRegistry() const noexcept { return m_componentRegistry.get(); }
         ASTRA_NODISCARD std::shared_ptr<ComponentRegistry> ShareComponentRegistry() const noexcept { return m_componentRegistry; }
@@ -1901,5 +1916,7 @@ namespace Astra
         CommandBlockArena m_commandBlockArena;
         std::shared_ptr<IWorkScheduler> m_workScheduler;  // null = sequential inline fallback
         Config m_config;   // retained so Clear()/Load() preserve pool + storage policy
+        inline static std::atomic<std::uint64_t> s_nextInstanceId{1};   // 0 is never assigned
+        std::uint64_t m_instanceId;   // last member: initialized last in every ctor
     };
 }
