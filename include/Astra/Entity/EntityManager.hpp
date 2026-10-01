@@ -539,6 +539,16 @@ namespace Astra
                     return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(SerializationError::CorruptedData);
                 }
 
+                // A recycled nextVersion is what Allocate() hands back out.
+                // NULL_VERSION (0) is IsValid()'s "dead" value and the
+                // CommandBuffer placeholder encoding, and no valid save carries
+                // it: Destroy recycles at 1..VERSION_MASK or retires the slot
+                // (never recycled). Reject it before a version-0 handle exists.
+                if (nextVersion == NULL_VERSION)
+                {
+                    return Result<std::unique_ptr<EntityManager>, SerializationError>::Err(SerializationError::CorruptedData);
+                }
+
                 recycledEntries.push_back({id, nextVersion});
             }
 

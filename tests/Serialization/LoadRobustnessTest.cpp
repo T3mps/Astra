@@ -1060,6 +1060,52 @@ TEST(LoadRobustness, EntityManagerRecycledIdSegmentIndexExplosionIsRejected)
     EXPECT_TRUE(result.IsErr());   // must fail cleanly -- no id re-enters circulation to explode later
 }
 
+// Arcane spec 2026-09-30 s3.4: a recycled entry's nextVersion is what
+// Allocate() hands back out. 0 is NULL_VERSION, which is also the CommandBuffer
+// deferred-placeholder encoding (CommandBuffer::MakePlaceholder). No valid save
+// carries it: Destroy recycles at 1..VERSION_MASK or retires. A load that would
+// mint a version-0 handle must be refused.
+TEST(LoadRobustness, EntityManagerRecycledNullNextVersionIsRejected)
+{
+    using IDType = Astra::EntityManager::IDType;
+    using VersionType = Astra::EntityManager::VersionType;
+
+    const auto craft = [](VersionType recycledNextVersion)
+    {
+        std::vector<std::byte> buf;
+        Astra::BinaryWriter writer(buf);
+        writer(static_cast<IDType>(1024));            // entitiesPerSegment: the Config clamp floor (valid)
+        writer(static_cast<IDType>(10));              // entitiesPerSegmentShift: 1 << 10 == 1024
+        writer(static_cast<IDType>(1023));            // entitiesPerSegmentMask
+        writer(0.1f);                                  // releaseThreshold
+        writer(true);                                   // autoRelease
+        writer(static_cast<uint64_t>(2));                // maxEmptySegments
+        writer(static_cast<IDType>(2));                   // nextFreshID
+        writer(static_cast<uint32_t>(1));                  // recycledCount = 1
+        writer(static_cast<IDType>(1));                     // a legitimate recycled id
+        writer(recycledNextVersion);                         // the field under test
+        writer(static_cast<uint32_t>(1));                     // aliveCount = 1
+        writer(static_cast<IDType>(0));                        // alive id 0 ...
+        writer(static_cast<VersionType>(1));                    // ... at version 1
+        EXPECT_FALSE(writer.HasError());
+        writer.Flush();
+        return buf;
+    };
+
+    {   // control: the same archive with nextVersion 2 loads
+        const std::vector<std::byte> ok = craft(static_cast<VersionType>(2));
+        Astra::BinaryReader reader{std::span<const std::byte>(ok)};
+        EXPECT_TRUE(Astra::EntityManager::Deserialize(reader).IsOk());
+    }
+    {
+        const std::vector<std::byte> bad = craft(static_cast<VersionType>(0));
+        Astra::BinaryReader reader{std::span<const std::byte>(bad)};
+        auto result = Astra::EntityManager::Deserialize(reader);
+        ASSERT_TRUE(result.IsErr());
+        EXPECT_EQ(*result.GetError(), Astra::SerializationError::CorruptedData);
+    }
+}
+
 // 2026-09-11 grading finding S1: Archetype::Deserialize rebuilt every chunk from
 // its own validated chunkEntityCount but then assigned m_entityCount from the
 // HEADER's wire value, and ArchetypeManager::Deserialize read the trailing
