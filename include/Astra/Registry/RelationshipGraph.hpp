@@ -1,6 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <algorithm>
+#include <cstddef>
+#include <optional>
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
@@ -158,60 +161,72 @@ namespace Astra
             return false;
         }
 
-        void SetParent(Entity child, Entity parent)
+        // SetParent's `index` sentinel: append (and, for the current parent, "no move").
+        static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+
+        // Ordered children (Astra "now" batch, 2026-09-30). `index` is a
+        // position in the parent's child list AFTER `child` is removed from it,
+        // clamped to that list's size. npos appends.
+        //   - same parent + npos: a no-op -> false, with no version bump (the
+        //     old code re-appended, silently moving the child last);
+        //   - same parent + index: a reorder -> true, with a version bump;
+        //   - every rejection (invalid, self, cycle) -> false, with no change.
+        // Caller-recoverable inputs are rejected gracefully in ALL configs.
+        // Asserts are reserved for internal invariants.
+        bool SetParent(Entity child, Entity parent, std::size_t index = npos)
         {
-            // Caller-recoverable inputs: rejected gracefully in ALL configs.
-            // (Asserting here made the Debug suite abort on tests that verify
-            // the rejection contract; asserts are reserved for internal invariants.)
             if (!child.IsValid() || !parent.IsValid() || child == parent)
-                return;
+                return false;
 
             // Rejecting a cycle: if child is an ancestor of parent, setting
             // parent as child's parent would create a cycle.
             if (IsAncestorOf(child, parent))
-                return;
+                return false;
 
-            // Remove from old parent if exists
+            if (GetParent(child) == parent)
+            {
+                if (index == npos)
+                    return false;
+                // Normally present. operator[] re-creates the entry only for a
+                // graph loaded inconsistent (Deserialize does not cross-check).
+                auto& children = m_children[parent];
+                if (auto pos = std::find(children.begin(), children.end(), child); pos != children.end())
+                    children.erase(pos);
+                InsertChildAt(children, child, index);
+                IncrementVersion();
+                return true;
+            }
+
             RemoveParent(child);
-
-            // Set new parent
             m_parents[child] = parent;
-            m_children[parent].push_back(child);
-
-            // Invalidate caches
+            InsertChildAt(m_children[parent], child, index);
             IncrementVersion();
+            return true;
         }
 
         void RemoveParent(Entity child)
         {
             auto it = m_parents.Find(child);
-            if (it != m_parents.end())
+            if (it == m_parents.end())
+                return;
+
+            const Entity parent = it->second;
+            m_parents.Erase(it);
+
+            // Order-preserving erase: the siblings keep their order (the old
+            // swap-and-pop moved the last sibling into the hole). Find, not
+            // operator[], so a parent with no children entry gets none inserted.
+            if (auto cit = m_children.Find(parent); cit != m_children.end())
             {
-                Entity parent = it->second;
-                m_parents.Erase(it);
-                
-                // Remove from parent's children list (swap-and-pop for O(1) removal)
-                auto& children = m_children[parent];
-                auto it = std::find(children.begin(), children.end(), child);
-                if (it != children.end())
-                {
-                    // Swap with last element and pop (changes order but faster)
-                    if (it != children.end() - 1)
-                    {
-                        *it = std::move(children.back());
-                    }
-                    children.pop_back();
-                }
-                
-                // Clean up empty children container
+                auto& children = cit->second;
+                if (auto pos = std::find(children.begin(), children.end(), child); pos != children.end())
+                    children.erase(pos);
                 if (children.empty())
-                {
-                    m_children.Erase(parent);
-                }
-                
-                // Invalidate caches
-                IncrementVersion();
+                    m_children.Erase(cit);
             }
+
+            // Invalidate caches
+            IncrementVersion();
         }
 
         bool HasParent(Entity child) const
@@ -235,6 +250,23 @@ namespace Astra
         {
             auto it = m_children.Find(parent);
             return (it != m_children.end()) ? it->second.size() : 0;
+        }
+
+        // Position of `child` in its parent's child list, or nullopt for a root
+        // (or an entity the graph does not know). O(siblings).
+        ASTRA_NODISCARD std::optional<std::size_t> GetChildIndex(Entity child) const
+        {
+            const auto pit = m_parents.Find(child);
+            if (pit == m_parents.end())
+                return std::nullopt;
+            const auto cit = m_children.Find(pit->second);
+            if (cit == m_children.end())
+                return std::nullopt;
+            const auto& children = cit->second;
+            const auto pos = std::find(children.begin(), children.end(), child);
+            if (pos == children.end())
+                return std::nullopt;
+            return static_cast<std::size_t>(pos - children.begin());
         }
         
         void AddLink(Entity a, Entity b)
@@ -826,6 +858,11 @@ namespace Astra
             }
         }
         
+        static void InsertChildAt(ChildrenContainer& children, Entity child, std::size_t index)
+        {
+            const std::size_t at = std::min<std::size_t>(index, children.size());
+            children.insert(children.begin() + static_cast<std::ptrdiff_t>(at), child);
+        }
         // Increment version to invalidate all caches
         void IncrementVersion()
         {

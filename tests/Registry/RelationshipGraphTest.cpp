@@ -575,3 +575,75 @@ TEST_F(RelationshipGraphTest, StructureVersionIncrementsOnClear)
     graph->Clear();
     EXPECT_GT(graph->StructureVersion(), before);
 }
+
+// ---- Ordered children (Arcane spec 2026-09-30 s3.4) -------------------------
+
+TEST_F(RelationshipGraphTest, RemovingAMiddleChildKeepsSiblingOrder)
+{
+    auto e = CreateEntities(6);
+    for (int i = 1; i <= 4; ++i)
+        ASSERT_TRUE(graph->SetParent(e[i], e[0]));            // [1, 2, 3, 4]
+
+    graph->RemoveParent(e[2]);                                // swap-and-pop gave [1, 4, 3]
+    {
+        const auto& kids = graph->GetChildren(e[0]);
+        EXPECT_EQ(std::vector<Astra::Entity>(kids.begin(), kids.end()),
+                  (std::vector<Astra::Entity>{ e[1], e[3], e[4] }));
+    }
+    ASSERT_TRUE(graph->SetParent(e[3], e[5]));                // moving out also erases in order
+    const auto& kids = graph->GetChildren(e[0]);
+    EXPECT_EQ(std::vector<Astra::Entity>(kids.begin(), kids.end()),
+              (std::vector<Astra::Entity>{ e[1], e[4] }));
+}
+
+TEST_F(RelationshipGraphTest, SetParentWithIndexInsertsAtThePostRemovalPositionAndClamps)
+{
+    auto e = CreateEntities(6);
+    const auto parent = e[0];
+    for (int i = 1; i <= 3; ++i)
+        ASSERT_TRUE(graph->SetParent(e[i], parent));           // [1, 2, 3]
+    EXPECT_TRUE(graph->SetParent(e[4], parent, 0));            // [4, 1, 2, 3]
+    EXPECT_TRUE(graph->SetParent(e[5], parent, 99));           // clamped: [4, 1, 2, 3, 5]
+    // Same-parent reorder: the index counts AFTER e[1] leaves ([4, 2, 3, 5]).
+    EXPECT_TRUE(graph->SetParent(e[1], parent, 3));            // [4, 2, 3, 1, 5]
+
+    const auto& kids = graph->GetChildren(parent);
+    EXPECT_EQ(std::vector<Astra::Entity>(kids.begin(), kids.end()),
+              (std::vector<Astra::Entity>{ e[4], e[2], e[3], e[1], e[5] }));
+    ASSERT_TRUE(graph->GetChildIndex(e[1]).has_value());
+    EXPECT_EQ(*graph->GetChildIndex(e[1]), 3u);
+    EXPECT_EQ(*graph->GetChildIndex(e[4]), 0u);
+    EXPECT_EQ(*graph->GetChildIndex(e[5]), 4u);
+    EXPECT_FALSE(graph->GetChildIndex(parent).has_value());    // a root has no index
+}
+
+TEST_F(RelationshipGraphTest, SameParentWithoutIndexIsANoOpWithoutAVersionBump)
+{
+    auto e = CreateEntities(3);
+    ASSERT_TRUE(graph->SetParent(e[1], e[0]));
+    ASSERT_TRUE(graph->SetParent(e[2], e[0]));
+
+    const std::uint32_t before = graph->StructureVersion();
+    EXPECT_FALSE(graph->SetParent(e[1], e[0]));                // the old code re-appended it last
+    EXPECT_EQ(graph->StructureVersion(), before);
+    EXPECT_EQ(*graph->GetChildIndex(e[1]), 0u);
+
+    EXPECT_TRUE(graph->SetParent(e[1], e[0], 1));              // an explicit reorder
+    EXPECT_GT(graph->StructureVersion(), before);
+    EXPECT_EQ(*graph->GetChildIndex(e[1]), 1u);
+}
+
+TEST_F(RelationshipGraphTest, EveryRejectedSetParentReturnsFalseAndChangesNothing)
+{
+    auto e = CreateEntities(3);
+    ASSERT_TRUE(graph->SetParent(e[1], e[0]));
+    ASSERT_TRUE(graph->SetParent(e[2], e[1]));
+
+    const std::uint32_t before = graph->StructureVersion();
+    EXPECT_FALSE(graph->SetParent(e[0], e[0]));                       // self
+    EXPECT_FALSE(graph->SetParent(e[0], e[2]));                       // cycle
+    EXPECT_FALSE(graph->SetParent(Astra::Entity::Invalid(), e[0]));   // invalid child
+    EXPECT_FALSE(graph->SetParent(e[0], Astra::Entity::Invalid()));   // invalid parent
+    EXPECT_EQ(graph->StructureVersion(), before);
+    EXPECT_FALSE(graph->GetParent(e[0]).IsValid());
+}

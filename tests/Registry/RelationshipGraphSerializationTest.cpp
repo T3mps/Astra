@@ -535,3 +535,65 @@ TEST_F(RelationshipGraphSerializationTest, EmptyAfterClear)
         EXPECT_FALSE(newGraph.AreLinked(e2, e3));
     }
 }
+
+// RemoveParent looks the parent up with Find, so an inconsistent load (child ->
+// parent in the parent table, no children entry) inserts nothing. The old
+// operator[] inserted an empty entry that the empty-cleanup erased again, so
+// this case passes before the change too. It pins the outcome.
+TEST_F(RelationshipGraphSerializationTest, RemoveParentWithNoChildrenEntryInsertsNothing)
+{
+    const Entity parent = CreateTestEntity(1);
+    const Entity child = CreateTestEntity(2);
+    std::vector<std::byte> buffer;
+    {
+        BinaryWriter writer(buffer);
+        writer(static_cast<uint32_t>(1));      // parentCount
+        writer(child.GetValue());
+        writer(parent.GetValue());
+        writer(static_cast<uint32_t>(0));      // parentWithChildrenCount: NO entry for parent
+        writer(static_cast<uint32_t>(0));      // linkedEntityCount
+        ASSERT_FALSE(writer.HasError());
+    }
+    BinaryReader reader(buffer);
+    auto result = RelationshipGraph::Deserialize(reader);
+    ASSERT_TRUE(result.IsOk());
+    auto& graph = *result.GetValue();
+    ASSERT_EQ(graph.GetParent(child), parent);
+    ASSERT_EQ(graph.GetParentCount(), 0u);
+
+    graph.RemoveParent(child);
+    EXPECT_FALSE(graph.GetParent(child).IsValid());
+    EXPECT_EQ(graph.GetParentCount(), 0u);
+    EXPECT_FALSE(graph.GetChildIndex(child).has_value());
+}
+
+// Undo of a delete/reorder restores a registry blob, so the ORDER must survive
+// Serialize/Deserialize (s3.4 desk: "Undo restores the original order").
+TEST_F(RelationshipGraphSerializationTest, ReorderedChildOrderSurvivesRoundTrip)
+{
+    RelationshipGraph graph;
+    const Entity parent = CreateTestEntity(1);
+    const Entity a = CreateTestEntity(2);
+    const Entity b = CreateTestEntity(3);
+    const Entity c = CreateTestEntity(4);
+    ASSERT_TRUE(graph.SetParent(a, parent));
+    ASSERT_TRUE(graph.SetParent(b, parent));
+    ASSERT_TRUE(graph.SetParent(c, parent));
+    ASSERT_TRUE(graph.SetParent(c, parent, 0));      // [c, a, b]
+    graph.RemoveParent(a);                            // [c, b]
+
+    std::vector<std::byte> buffer;
+    {
+        BinaryWriter writer(buffer);
+        graph.Serialize(writer);
+        ASSERT_FALSE(writer.HasError());
+    }
+    BinaryReader reader(buffer);
+    auto result = RelationshipGraph::Deserialize(reader);
+    ASSERT_TRUE(result.IsOk());
+    auto& loaded = *result.GetValue();
+    const auto& kids = loaded.GetChildren(parent);
+    EXPECT_EQ(std::vector<Entity>(kids.begin(), kids.end()), (std::vector<Entity>{ c, b }));
+    ASSERT_TRUE(loaded.GetChildIndex(b).has_value());
+    EXPECT_EQ(*loaded.GetChildIndex(b), 1u);
+}
