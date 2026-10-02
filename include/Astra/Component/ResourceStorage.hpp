@@ -607,18 +607,21 @@ namespace Astra
 
         // ====================== Serialization (archive v2+) ======================
 
+        // Writes every valid resource EXCEPT the transient ones
+        // (AstraTransientResource, Component.hpp): those are re-published by
+        // their owner, and a restored copy would be stale or dangle.
         void Serialize(BinaryWriter& writer) const
         {
             uint32_t count = 0;
             for (const auto& slot : m_resources)
             {
-                if (slot.isValid) ++count;
+                if (slot.isValid && !slot.descriptor.isTransientResource) ++count;
             }
             writer(count);
 
             for (const auto& slot : m_resources)
             {
-                if (!slot.isValid) continue;
+                if (!slot.isValid || slot.descriptor.isTransientResource) continue;
                 writer(slot.descriptor.hash);
                 slot.descriptor.serializeVersioned(writer, slot.ptr);
             }
@@ -645,6 +648,24 @@ namespace Astra
                 const ComponentDescriptor* desc = registry->GetComponentDescriptorByHash(hash);
                 if (!desc || desc->id >= MAX_COMPONENTS)
                     return false;   // caller maps this to UnknownComponent
+
+                // A transient resource is never created by a load. Serialize no
+                // longer writes one, but a block written before its type opted
+                // out still carries it: decode into scratch storage (consuming
+                // the bytes keeps the entries after it aligned) and drop it --
+                // a live instance, if any, is left untouched.
+                if (desc->isTransientResource)
+                {
+                    const size_t scratchSize = desc->size == 0 ? 1 : desc->size;
+                    AllocResult scratch = AllocateMemory(scratchSize, desc->alignment);
+                    if (!scratch.ptr) return false;
+                    desc->DefaultConstruct(scratch.ptr);
+                    const bool decoded = desc->deserializeVersioned(reader, scratch.ptr);
+                    desc->Destruct(scratch.ptr);
+                    FreeMemory(scratch.ptr, scratchSize);
+                    if (!decoded) return false;
+                    continue;
+                }
 
                 // Allocate a slot (same layout policy as SetByID)…
                 uint16_t index = m_sparse[desc->id];

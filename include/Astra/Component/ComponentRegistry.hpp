@@ -351,6 +351,7 @@ namespace Astra
                 "AstraChangeTracked on a tag (empty) component is meaningless: a tag has no value to change. "
                 "Use Added<T>/Signal::ComponentAdded for presence, or give the component data.");
             desc.isChangeTracked = IsChangeTrackedV<T>;
+            desc.isTransientResource = IsTransientResourceV<T>;
 
             // An enableable component must carry storage: the disabled bit lives
             // per-entity in the chunk's column data, and an empty/tag type has no

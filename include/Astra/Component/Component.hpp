@@ -90,6 +90,33 @@ namespace Astra
     template<typename T>
     inline constexpr bool IsChangeTrackedV = ChangeTrackedTraits<std::remove_const_t<T>>::value;
 
+    /**
+     * Opt-out of persistence for a RESOURCE. A resource is transient iff it declares
+     * `static constexpr bool AstraTransientResource = true` or specializes
+     * Astra::TransientResourceTraits<T>. ResourceStorage::Serialize never writes a
+     * transient resource, so a Registry::Save/Load round trip (a snapshot, an undo
+     * memento, a hot-reload hand-off) never revives it: the loaded registry simply
+     * lacks it until its owner publishes it again. For state that is re-derived or
+     * republished every frame (a clock, an input view holding a pointer, a physics
+     * world), where a restored copy would be stale or dangling. Meaningless on an
+     * entity component (entity storage ignores it). Same if-constexpr-gated shape
+     * as ChangeTrackedTraits.
+     */
+    template<typename T>
+    struct TransientResourceTraits
+    {
+        static constexpr bool value = []() constexpr
+        {
+            if constexpr (requires { { T::AstraTransientResource } -> std::convertible_to<bool>; })
+                return T::AstraTransientResource;
+            else
+                return false;
+        }();
+    };
+
+    template<typename T>
+    inline constexpr bool IsTransientResourceV = TransientResourceTraits<std::remove_const_t<T>>::value;
+
     namespace Detail
     {
         // A yielded component whose access is non-const and which has storage. Only
@@ -133,6 +160,7 @@ namespace Astra
         bool is_empty;
         bool isEnableable = false;   // defaults false (same rationale as is_trivially_destructible above): a hand-built descriptor stays safe; the registry factory assigns IsEnableableV<T>
         bool isChangeTracked = false;   // defaults false (hand-built descriptors stay safe); the registry factory assigns IsChangeTrackedV<T>
+        bool isTransientResource = false;   // defaults false (a hand-built descriptor persists as before); the registry factory assigns IsTransientResourceV<T>
         ConstructFn* defaultConstruct;
         DestructFn* destruct;
         CopyConstructFn* copyConstruct;
