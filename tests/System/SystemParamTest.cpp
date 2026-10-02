@@ -319,3 +319,119 @@ TEST(SystemParam, MultiViewAndNoViewSystemsCompileAndRun)
     EXPECT_FLOAT_EQ(reg.GetComponent<Velocity>(b)->dx, 1.0f);
     EXPECT_EQ(reg.GetResource<Health>()->current, 5);
 }
+
+// ---- Arcane input-seam spec 2026-10-02 s5.1: ordering on param systems, -------
+// ---- own-type keys, access traits refused, absent-resource log once. ----------
+
+#include "../Support/DiagnosticsTestGuards.hpp"
+#include <string>
+#include <vector>
+
+namespace
+{
+    std::vector<char> g_paramOrder;
+
+    struct TypedB { void operator()(Astra::Registry&) { g_paramOrder.push_back('B'); } };
+
+    // Ordering-only traits on a param functor: its access comes from its params.
+    struct ParamA : Astra::SystemTraits<Astra::Before<TypedB>>
+    {
+        void operator()(Astra::Res<Health>) { g_paramOrder.push_back('A'); }
+    };
+    struct ParamC : Astra::SystemTraits<Astra::After<TypedB>>
+    {
+        void operator()(Astra::Res<Health>) { g_paramOrder.push_back('C'); }
+    };
+    // A typed system ordered against a NAMED param system.
+    struct TypedD : Astra::SystemTraits<Astra::After<ParamA>>
+    {
+        void operator()(Astra::Registry&) { g_paramOrder.push_back('D'); }
+    };
+    // Access declared twice (traits + params): refused at compile time.
+    struct BadParam : Astra::SystemTraits<Astra::Reads<Position>>
+    {
+        void operator()(Astra::Res<Health>) {}
+    };
+    struct BadExclusive : Astra::SystemTraits<Astra::Exclusive>
+    {
+        void operator()(Astra::Res<Health>) {}
+    };
+
+    template<typename Fn>
+    concept CanAddParamSystem = requires(Astra::SystemScheduler& s, Fn fn) { s.AddSystem(std::move(fn)); };
+
+    struct LogCount { int errors = 0; };
+    void CountingSink(const Astra::LogRecord& r, void* user) noexcept
+    {
+        if (r.level == Astra::LogLevel::Error) static_cast<LogCount*>(user)->errors++;
+    }
+}
+
+static_assert(CanAddParamSystem<ParamA>);
+static_assert(!CanAddParamSystem<BadParam>);
+static_assert(!CanAddParamSystem<BadExclusive>);
+static_assert(std::is_same_v<Astra::Detail::ParamOrdering<ParamA>::BeforeTypes, std::tuple<TypedB>>);
+static_assert(!Astra::Detail::ParamOrdering<ParamA>::HasAccessTraits);
+static_assert(Astra::Detail::ParamOrdering<BadParam>::HasAccessTraits);
+
+TEST(SystemParam, NamedParamSystemHonoursBeforeAndAfterAgainstATypedSystem)
+{
+    Astra::Registry reg;
+    reg.SetResource(Health{1, 1});
+    g_paramOrder.clear();
+
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<TypedB>().IsOk());   // registered FIRST
+    ASSERT_TRUE(s.AddSystem(ParamC{}).IsOk());   // After<TypedB>
+    ASSERT_TRUE(s.AddSystem(ParamA{}).IsOk());   // Before<TypedB>, registered LAST
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+    EXPECT_EQ(std::string(g_paramOrder.begin(), g_paramOrder.end()), "ABC");
+}
+
+TEST(SystemParam, NamedParamSystemIsKeyedByItsOwnType)
+{
+    Astra::Registry reg;
+    reg.SetResource(Health{1, 1});
+    g_paramOrder.clear();
+
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem<TypedD>().IsOk());   // After<ParamA>, registered first
+    ASSERT_TRUE(s.AddSystem(ParamA{}).IsOk());
+    EXPECT_TRUE(s.HasSystem<ParamA>());
+    EXPECT_FALSE(s.AddSystem(ParamA{}).IsOk());  // AlreadyRegistered under the same key
+
+    Astra::SequentialExecutor exec;
+    s.Execute(reg, &exec);
+    EXPECT_EQ(std::string(g_paramOrder.begin(), g_paramOrder.end()), "AD");
+
+    s.RemoveSystem<ParamA>();
+    EXPECT_FALSE(s.HasSystem<ParamA>());
+}
+
+TEST(SystemParam, AbsentResourceLogsOncePerDisappearance)
+{
+    LogCount count;
+    Astra::Testing::ScopedLogSink guard(&CountingSink, &count);
+
+    Astra::Registry reg;
+    int ran = 0;
+    Astra::SystemScheduler s;
+    ASSERT_TRUE(s.AddSystem([&](Astra::Res<Health>) { ++ran; }).IsOk());
+    Astra::SequentialExecutor exec;
+
+    for (int i = 0; i < 3; ++i) s.Execute(reg, &exec);   // absent x3
+    EXPECT_EQ(ran, 0);
+    EXPECT_EQ(count.errors, 1);                            // ONE log, not three
+
+    reg.SetResource(Health{1, 1});
+    s.Execute(reg, &exec);
+    EXPECT_EQ(ran, 1);                                     // resumes
+    EXPECT_EQ(count.errors, 1);
+
+    reg.RemoveResource<Health>();
+    for (int i = 0; i < 3; ++i) s.Execute(reg, &exec);   // gone again
+    EXPECT_EQ(ran, 1);
+    EXPECT_EQ(count.errors, 2);                            // one more log for the new disappearance
+}

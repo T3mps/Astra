@@ -121,6 +121,39 @@ namespace Astra
         template<typename R, typename... A>
         struct FnSignature<R(*)(A...)>          { using Params = std::tuple<A...>; };
 
+        // ---- Ordering on a param functor (Arcane input-seam spec s5.1) ------
+        // A param functor may derive SystemTraits<...> carrying ONLY ordering
+        // (Before/After/AmbiguousWith). Its ACCESS comes from its parameters;
+        // traits that also declare access (Reads/Writes/ReadsResources/
+        // WritesResources/Exclusive) would be a second, disagreeing source, so
+        // HasAccessTraits lets the scheduler refuse them (SystemScheduler::
+        // AddSystem). Functors without SystemTraits (lambdas, function
+        // pointers) get empty ordering.
+        template<typename Fn, typename = void>
+        struct ParamOrdering
+        {
+            using BeforeTypes        = std::tuple<>;
+            using AfterTypes         = std::tuple<>;
+            using AmbiguousWithTypes = std::tuple<>;
+            static constexpr bool HasAccessTraits = false;
+        };
+        template<typename Fn>
+        struct ParamOrdering<Fn, std::void_t<typename Fn::BeforeTypes, typename Fn::AfterTypes,
+                                             typename Fn::AmbiguousWithTypes,
+                                             typename Fn::ReadsComponents, typename Fn::WritesComponents,
+                                             typename Fn::ReadsResourceTypes, typename Fn::WritesResourceTypes>>
+        {
+            using BeforeTypes        = typename Fn::BeforeTypes;
+            using AfterTypes         = typename Fn::AfterTypes;
+            using AmbiguousWithTypes = typename Fn::AmbiguousWithTypes;
+            static constexpr bool HasAccessTraits =
+                std::tuple_size_v<typename Fn::ReadsComponents>     != 0 ||
+                std::tuple_size_v<typename Fn::WritesComponents>    != 0 ||
+                std::tuple_size_v<typename Fn::ReadsResourceTypes>  != 0 ||
+                std::tuple_size_v<typename Fn::WritesResourceTypes> != 0 ||
+                Fn::RequiresExclusive;
+        };
+
         // Non-empty and every element is a SystemParam.
         template<typename Tuple> struct AllParams : std::false_type {};
         template<typename... A> struct AllParams<std::tuple<A...>>
@@ -257,12 +290,21 @@ namespace Astra
     };
 
     // Lambda / functor param-system (registered by value). Fn is the closure
-    // type (unique per lambda -> unique wrapper type -> unique TypeID hash).
+    // type (unique per lambda -> unique system key, see KeyType below).
     template<typename Fn, typename... Params>
     class FunctionSystemWrapper : public SystemParamBinder<Params...>
     {
         Fn m_fn;
     public:
+        // Keyed by the FUNCTOR, not the wrapper (input-seam spec s5.1): a named
+        // param system is then HasSystem<Fn>/RemoveSystem<Fn>-addressable and a
+        // valid Before<Fn>/After<Fn> target, exactly like a typed system. A
+        // lambda's closure type still keys by its per-image anchor (SystemKey).
+        using KeyType            = Fn;
+        using BeforeTypes        = typename Detail::ParamOrdering<Fn>::BeforeTypes;
+        using AfterTypes         = typename Detail::ParamOrdering<Fn>::AfterTypes;
+        using AmbiguousWithTypes = typename Detail::ParamOrdering<Fn>::AmbiguousWithTypes;
+
         explicit FunctionSystemWrapper(Fn fn) : m_fn(std::move(fn)) {}
         void operator()(SystemContext& ctx)
         {

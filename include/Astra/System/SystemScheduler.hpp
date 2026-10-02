@@ -68,6 +68,11 @@ namespace Astra
             else
                 return TypeID<T>::Hash();
         }
+
+        // The type a system is KEYED by: T::KeyType when T declares one (the
+        // param FunctionSystemWrapper names its functor), else T itself.
+        template<typename T, typename = void> struct KeyOf { using type = T; };
+        template<typename T> struct KeyOf<T, std::void_t<typename T::KeyType>> { using type = typename T::KeyType; };
     }
 
     class SystemScheduler
@@ -242,13 +247,23 @@ namespace Astra
 
         // Param-function system: a lambda/functor whose params are
         // View<...>&/Res<T>/ResMut<T>/Commands. Access is derived from the
-        // params (design §5). Deduces the param pack off operator().
+        // params (design §5); a named functor may add ORDERING through
+        // SystemTraits<Before/After/AmbiguousWith> (input-seam spec s5.1).
+        // Deduces the param pack off operator().
         template<typename Fn>
-        requires ParamFunctor<Fn>
+        requires (ParamFunctor<Fn> && !Detail::ParamOrdering<std::decay_t<Fn>>::HasAccessTraits)
         ASTRA_NODISCARD Result<void, SystemError> AddSystem(Fn&& fn)
         {
             return AddParamSystemImpl(std::forward<Fn>(fn), &std::decay_t<Fn>::operator());
         }
+
+        // Refused: a param functor whose SystemTraits ALSO declare access
+        // (Reads/Writes/ReadsResources/WritesResources/Exclusive). Its params
+        // already state access; two sources would disagree. Use ordering-only
+        // traits, or make it a typed operator()(Registry&) system.
+        template<typename Fn>
+        requires (ParamFunctor<Fn> && Detail::ParamOrdering<std::decay_t<Fn>>::HasAccessTraits)
+        Result<void, SystemError> AddSystem(Fn&& fn) = delete;
 
         // Param-function system registered as a free function (non-type template
         // argument), so two same-signature free functions get distinct wrapper
@@ -287,8 +302,10 @@ namespace Astra
         // System<T> concept) can be removed symmetrically with how it was
         // added. The body keys purely on Detail::SystemKey<T>(), so either concept
         // is sufficient; both AddSystem overloads store under the same key.
+        // ParamFunctor<T>: a named param functor is keyed by its own type
+        // (KeyOf), so it is removable by that type too (input-seam spec s5.1).
         template<typename T>
-        requires (System<T> || ContextSystem<T>)
+        requires (System<T> || ContextSystem<T> || ParamFunctor<T>)
         void RemoveSystem()
         {
             // Prevent modification during execution to avoid use-after-free.
@@ -341,8 +358,10 @@ namespace Astra
 
         // IM-25: see RemoveSystem above -- relaxed to accept a context system
         // (invocable only with SystemContext&) so add/remove/has are symmetric.
+        // ParamFunctor<T>: a named param functor is keyed by its own type
+        // (KeyOf), so HasSystem<Fn>() finds it (input-seam spec s5.1).
         template<typename T>
-        requires (System<T> || ContextSystem<T>)
+        requires (System<T> || ContextSystem<T> || ParamFunctor<T>)
         ASTRA_NODISCARD bool HasSystem() const
         {
             return m_systemIndices.Contains(Detail::SystemKey<T>());
@@ -1223,7 +1242,9 @@ namespace Astra
             // named types). A collision would make a DISTINCT type look
             // already-registered; astronomically unlikely, but it is a hash, not a
             // dense unique id.
-            const uint64_t typeId = Detail::SystemKey<SystemType>();
+            // Keyed by KeyOf<SystemType>: a param FunctionSystemWrapper keys by
+            // its functor (input-seam spec s5.1), every other system by itself.
+            const uint64_t typeId = Detail::SystemKey<typename Detail::KeyOf<SystemType>::type>();
             if (m_systemIndices.Contains(typeId))
                 return Result<void, SystemError>::Err(SystemError::AlreadyRegistered);
 
