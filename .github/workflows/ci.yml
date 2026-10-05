@@ -4,6 +4,9 @@ on:
     branches: ["**"]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   PREMAKE_VERSION: 5.0.0-beta6
 
@@ -15,7 +18,7 @@ jobs:
       matrix:
         config: [Debug, Release, Dist]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Download premake
         shell: pwsh
         run: |
@@ -24,43 +27,54 @@ jobs:
       - name: Generate
         run: .\premake5.exe vs2022
       - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
       - name: Build (${{ matrix.config }})
         run: msbuild Astra.sln /p:Configuration=${{ matrix.config }} /m /v:minimal
       - name: Test
         run: .\bin\${{ matrix.config }}-windows-x86_64\AstraTest\AstraTest.exe --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
 
+  # Pinned compilers, not the runner default: GCC 14 and Clang 19 (on
+  # libstdc++ 14) x Debug / Release. Each lane builds the test suite and the
+  # alternate entity-width compile checks, compiles every public header on
+  # its own, and runs AstraTest.
   linux:
+    name: linux (${{ matrix.toolchain.name }}, ${{ matrix.config.name }})
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - compiler: g++
-            cc: gcc
-            packages: g++
-          - compiler: clang++
-            cc: clang
-            packages: clang
-    runs-on: ubuntu-latest
+        toolchain:
+          - name: gcc-14
+            cc: gcc-14
+            cxx: g++-14
+            packages: g++-14
+          - name: clang-19
+            cc: clang-19
+            cxx: clang++-19
+            packages: clang-19 libstdc++-14-dev
+        config:
+          - name: Debug
+            make: debug
+          - name: Release
+            make: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.packages }}
+          sudo apt-get install -y ${{ matrix.toolchain.packages }}
+          ${{ matrix.toolchain.cxx }} --version
       - name: Download premake
         run: |
           curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
       - name: Generate
         run: ./premake5 gmake2
-      - name: Build (Release, tests)
-        run: make config=release AstraTest -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.compiler }}
+      - name: Build (${{ matrix.config.name }})
+        run: make config=${{ matrix.config.make }} AstraTest AstraCompile16 AstraCompile64 -j"$(nproc)" CC=${{ matrix.toolchain.cc }} CXX=${{ matrix.toolchain.cxx }}
+      - name: Headers compile standalone
+        run: bash ci/check-headers.sh ${{ matrix.toolchain.cxx }} ${{ matrix.config.make }}
       - name: Test
-        run: ./bin/Release-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
-      - name: Build (Debug, tests)
-        run: make config=debug AstraTest -j"$(nproc)" CC=${{ matrix.cc }} CXX=${{ matrix.compiler }}
-      - name: Test (Debug)
-        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
+        run: ./bin/${{ matrix.config.name }}-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
 
   # Proves every Astra header and test builds and passes with RTTI off: Astra is
   # RTTI-free by design (TypeIdentity's type_info discriminator is guarded), and
@@ -68,7 +82,7 @@ jobs:
   linux-no-rtti:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install clang
         run: |
           sudo apt-get update
@@ -90,7 +104,7 @@ jobs:
   sanitize-asan-ubsan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install clang
         run: |
           sudo apt-get update
@@ -111,7 +125,7 @@ jobs:
   sanitize-tsan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install clang
         run: |
           sudo apt-get update

@@ -1,4 +1,33 @@
-# CI — Sanitizer Lane
+# CI
+
+## Lanes
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs, on every push and
+pull request:
+
+| Job | Runner | What it proves |
+|---|---|---|
+| `windows-msvc` (Debug, Release, Dist) | windows-latest | the whole solution builds; AstraTest passes |
+| `linux` (gcc-14, clang-19) x (Debug, Release) | ubuntu-24.04 | AstraTest + the AstraCompile16/64 entity-width checks build warning-free; every public header compiles standalone ([`check-headers.sh`](check-headers.sh)); AstraTest passes |
+| `linux-no-rtti` | ubuntu | the suite builds and passes with RTTI off |
+| `sanitize-asan-ubsan`, `sanitize-tsan` | ubuntu | see below |
+
+The `linux` lanes pin their compilers (GCC 14, Clang 19 on libstdc++ 14)
+instead of taking the runner's default, so a runner-image update cannot
+silently change what is tested. Actions are pinned by commit SHA and the
+workflow token is read-only (`permissions: contents: read`).
+
+To reproduce a `linux` lane locally on Ubuntu 24.04:
+
+```bash
+sudo apt-get install -y g++-14 clang-19
+premake5 gmake2
+make config=debug AstraTest AstraCompile16 AstraCompile64 -j"$(nproc)" CC=gcc-14 CXX=g++-14
+bash ci/check-headers.sh g++-14 debug
+./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle
+```
+
+## Sanitizer Lane
 
 Astra's primary CI builds under MSVC (Windows) and gcc/clang (Linux). MSVC masks a
 whole class of dynamic faults — memory corruption, undefined behavior, data races.
