@@ -153,6 +153,34 @@ namespace Astra
             }
         }
 
+        // Index of the first ';' in s that is not nested inside <>, (), [], {}
+        // or a character literal; s.size() when there is none.
+        constexpr size_t FindTopLevelSemicolon(std::string_view s) noexcept
+        {
+            int depth = 0;
+            for (size_t i = 0; i < s.size(); ++i)
+            {
+                const char c = s[i];
+                if (c == '\'')
+                {
+                    // Skip a character literal (a char NTTP may print as '<' or '\'').
+                    for (++i; i < s.size() && s[i] != '\''; ++i)
+                    {
+                        if (s[i] == '\\')
+                            ++i;
+                    }
+                    continue;
+                }
+                if (c == '<' || c == '(' || c == '[' || c == '{')
+                    ++depth;
+                else if (c == '>' || c == ')' || c == ']' || c == '}')
+                    --depth;
+                else if (c == ';' && depth == 0)
+                    return i;
+            }
+            return s.size();
+        }
+
         // Cross-platform compile-time type name extraction
         template<typename T>
         constexpr std::string_view TypeNameInternal() noexcept
@@ -186,6 +214,15 @@ namespace Astra
             size_t end = funcName.rfind(suffix);
             if (end == std::string_view::npos || end <= start)
                 return "Unknown";
+
+            #if defined(ASTRA_COMPILER_GCC)
+                // GCC lists the function's other template-dependent bindings after
+                // T, ';'-separated: "[with T = Foo; std::string_view =
+                // std::basic_string_view<char>]". Without this cut every GCC name
+                // (and so every TypeHash) carries that tail, and name-keyed lookups
+                // (MetaRegistry::GetByName, Registry::GetComponentByName) never match.
+                end = start + FindTopLevelSemicolon(funcName.substr(start, end - start));
+            #endif
 
             // Extract the type name
             std::string_view typeName = funcName.substr(start, end - start);

@@ -97,6 +97,25 @@ TEST_F(TypeIDTests, TemplatedTypesWork)
     EXPECT_NE(intName, floatName);
 }
 
+// GCC's __PRETTY_FUNCTION__ appends "; std::string_view = ..." after T; the
+// extracted name must be T alone on every compiler.
+TEST_F(TypeIDTests, NameIsTheTypeAlone)
+{
+    using namespace Astra;
+
+    constexpr std::string_view player = TypeID<Game::Player>::Name();
+    EXPECT_EQ(player.find(';'), std::string_view::npos) << player;
+    EXPECT_TRUE(player.ends_with("Game::Player")) << player;
+
+    constexpr std::string_view templated = TypeID<TemplatedComponent<int>>::Name();
+    EXPECT_EQ(templated.find(';'), std::string_view::npos) << templated;
+    EXPECT_TRUE(templated.ends_with("TemplatedComponent<int>")) << templated;
+
+    EXPECT_EQ(Detail::FindTopLevelSemicolon("Foo; std::string_view = std::basic_string_view<char>"), 3u);
+    EXPECT_EQ(Detail::FindTopLevelSemicolon("A<B<';'>>; tail"), 9u);
+    EXPECT_EQ(Detail::FindTopLevelSemicolon("A<int>"), 6u);
+}
+
 TEST_F(TypeIDTests, HashesAreStable)
 {
     using namespace Astra;
