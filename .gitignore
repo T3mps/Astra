@@ -42,3 +42,6 @@ cmake-build-*/
 *.so
 *.dylib
 *.exe
+# Build tooling fetched by scripts/build.* and test reports
+.tools/
+test-results/

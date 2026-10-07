@@ -17,12 +17,19 @@ case "$CONFIG" in
     *) echo "unknown config: $CONFIG" >&2; exit 2 ;;
 esac
 
+# -mavx mirrors AstraTest on x86-64; arm64 (Apple silicon) has no AVX and
+# takes Mosaic's NEON paths.
+case "$(uname -m)" in
+    x86_64|amd64) ARCHFLAGS="-mavx" ;;
+    *)            ARCHFLAGS="" ;;
+esac
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/include"
 
 check_one() {
     local header="$1"
-    if ! output="$(printf '#include <%s>\n' "$header" | "$CXX" -std=c++20 -fsyntax-only -mavx \
+    if ! output="$(printf '#include <%s>\n' "$header" | "$CXX" -std=c++20 -fsyntax-only $ARCHFLAGS \
             -Wall -Wextra -Wpedantic -Werror -Wno-missing-field-initializers \
             -Wno-unknown-warning-option -Wno-maybe-uninitialized \
             $DEFINES -I. -I"$ROOT/vendor/Mosaic/include" -x c++ - 2>&1)"; then
@@ -31,11 +38,11 @@ check_one() {
     fi
 }
 export -f check_one
-export CXX DEFINES ROOT
+export CXX DEFINES ROOT ARCHFLAGS
 
 headers=$(find Astra -name '*.hpp' | sort)
 count=$(printf '%s\n' "$headers" | wc -l)
-if printf '%s\n' "$headers" | xargs -P "$(nproc)" -I{} bash -c 'check_one "$@"' _ {}; then
+if printf '%s\n' "$headers" | xargs -P "$(getconf _NPROCESSORS_ONLN)" -I{} bash -c 'check_one "$@"' _ {}; then
     echo "check-headers: all $count headers compile standalone ($CXX, $CONFIG)"
 else
     echo "check-headers: standalone header failures ($CXX, $CONFIG)" >&2
