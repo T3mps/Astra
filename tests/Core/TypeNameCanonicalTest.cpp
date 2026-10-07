@@ -256,11 +256,17 @@ TEST(TypeNameCanonical, LiveNamesAreCompileTimeConstants)
     SUCCEED();
 }
 
-// std::int64_t is a different fundamental type per data model, not a spelling
-// difference: long on LP64 (Linux, macOS), long long on LLP64 (Windows).
-TEST(TypeNameCanonical, Int64AliasFollowsTheDataModel)
+// std::int64_t is a different fundamental type per platform ABI, not a
+// spelling difference: long on LP64 Linux, but long long on LLP64 Windows AND
+// on Darwin, whose <stdint.h> declares it long long even though long is also
+// 64 bits there.
+TEST(TypeNameCanonical, Int64AliasFollowsThePlatformAbi)
 {
+#if defined(__APPLE__) || defined(_WIN32)
+    constexpr std::string_view expected = "long long";
+#else
     constexpr std::string_view expected = sizeof(long) == 8 ? "long" : "long long";
+#endif
     EXPECT_EQ(Astra::TypeID<std::int64_t>::Name(), expected);
 }
 

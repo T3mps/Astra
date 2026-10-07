@@ -45,9 +45,12 @@
 //       MSVC prints the underlying value;
 //   - unsigned 64-bit non-type arguments above INT64_MAX (MSVC prints them
 //       as negative) and char arguments outside 0..127 (signedness);
-//   - fixed-width aliases whose underlying type differs by data model:
-//       std::int64_t is "long" on LP64 Linux/macOS but "long long" on LLP64
-//       Windows -- a distinct type, not a spelling difference;
+//   - fixed-width aliases whose underlying type differs by platform ABI:
+//       std::int64_t / std::uint64_t are "long" / "unsigned long" on LP64
+//       Linux but "long long" / "unsigned long long" on Windows AND on macOS
+//       (Darwin's <stdint.h> picks long long although long is 64-bit there)
+//       -- a distinct type, not a spelling difference; std::size_t is
+//       "unsigned long" on Linux and macOS, "unsigned long long" on Windows;
 //   - lambdas and function-local types, whose names are compiler-invented.
 // Types in those groups hash consistently within one compiler, but not
 // across compilers.
