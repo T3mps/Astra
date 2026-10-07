@@ -8,8 +8,8 @@ standard listed under [Deviations](#deviations) with its reason.
 
 ## Overview
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push and
-pull request. Job `build-test` is the matrix; job `extra` carries the RTTI-off
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every pull
+request, on pushes to `main` and `dev`, and on demand (`workflow_dispatch`). Job `build-test` is the matrix; job `extra` carries the RTTI-off
 and sanitizer lanes. A newer push to the same ref cancels the older run
 (`concurrency: ci-<ref>`).
 
@@ -131,4 +131,5 @@ the modes produce incompatible objects.
 | `Dist` is not in the matrix | The standard matrix is Debug + Release. `Dist` differs from Release only in `symbols "off"` / `optimize "full"`; the scripts still build it locally. |
 | Clang 19 runs on libstdc++ 14 rather than libc++ | It matches what Linux consumers link; libc++ is covered by the macOS leg. |
 | Extra lanes use Clang 19 (formerly the image's default `clang`, 18) | Pins the compiler like the main matrix; `libclang-rt-19-dev` provides the sanitizer runtimes. |
+| Branch pushes are not a trigger; pull requests, `main`/`dev` pushes and `workflow_dispatch` are | Running both `push` and `pull_request` for a PR branch ran every head twice and starved the shared macOS arm64 pool (jobs failed to be acquired). Matches Arcane's trigger set. |
 | No `docs/ci.md` existed in Arcane or Manifold2D at the time of writing | This file sets the section order (Overview, Matrix, Toolchains, Build driver, Tests, Extra lanes, Supply chain, Reproducing locally, Deviations) for the other two to follow. |

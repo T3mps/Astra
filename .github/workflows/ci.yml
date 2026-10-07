@@ -5,10 +5,13 @@ name: CI
 # entry points on every OS (scripts/build.{sh,ps1}, scripts/run-tests.{sh,ps1}),
 # each test run twice with two shuffle seeds. docs/ci.md is the reference.
 
+# Branch pushes run through their pull request; a push trigger on every
+# branch as well would run each PR head twice on the shared runner pool.
 on:
   push:
-    branches: ["**"]
+    branches: [main, dev]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
