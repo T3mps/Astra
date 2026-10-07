@@ -43,6 +43,9 @@
     #endif
 #elif defined(MOSAIC_ARCH_ARM64) || defined(MOSAIC_ARCH_ARM32)
     #include <arm_neon.h>
+    #if defined(MOSAIC_HAS_ARM_CRC32)
+        #include <arm_acle.h>   // __crc32cd (ACLE declares the CRC32 intrinsics here, not in arm_neon.h)
+    #endif
 #endif
 
 namespace Mosaic
@@ -702,8 +705,14 @@ namespace Mosaic
                 }
     #endif
 #elif MOSAIC_HAS_BUILTIN(__builtin_prefetch)
-                int locality = 3 - static_cast<int>(hint);
-                __builtin_prefetch(ptr, 0, locality);
+                // The locality argument must be a constant expression.
+                switch (hint)
+                {
+                case PrefetchHint::T0:  __builtin_prefetch(ptr, 0, 3); break;
+                case PrefetchHint::T1:  __builtin_prefetch(ptr, 0, 2); break;
+                case PrefetchHint::T2:  __builtin_prefetch(ptr, 0, 1); break;
+                case PrefetchHint::NTA: __builtin_prefetch(ptr, 0, 0); break;
+                }
 #elif defined(MOSAIC_HAS_NEON) && defined(__ARM_FEATURE_UNALIGNED)
                 __pld(ptr);
 #else
