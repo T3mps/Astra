@@ -65,15 +65,20 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           sudo xcode-select -s "/Applications/Xcode_${{ matrix.leg.xcode }}.app"
-          echo "CC=$(xcrun -f clang)" >> "$GITHUB_ENV"
-          echo "CXX=$(xcrun -f clang++)" >> "$GITHUB_ENV"
+          # The /usr/bin shims follow xcode-select and add the SDK sysroot;
+          # the raw toolchain binaries (xcrun -f) do not.
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
           xcodebuild -version
           clang++ --version
 
       - name: Build
+        id: build-posix
         if: runner.os != 'Windows'
         run: bash scripts/build.sh ${{ matrix.config }}
       - name: Build
+        id: build-windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/build.ps1 ${{ matrix.config }}
@@ -86,14 +91,14 @@ jobs:
         if: runner.os != 'Windows'
         run: bash scripts/run-tests.sh ${{ matrix.config }} --rng-seed "$SEED_FIXED"
       - name: Test (seed ${{ env.SEED_RUN }})
-        if: runner.os != 'Windows' && !cancelled()
+        if: runner.os != 'Windows' && !cancelled() && steps.build-posix.outcome == 'success'
         run: bash scripts/run-tests.sh ${{ matrix.config }} --rng-seed "$SEED_RUN"
       - name: Test (seed ${{ env.SEED_FIXED }})
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/run-tests.ps1 ${{ matrix.config }} --rng-seed $env:SEED_FIXED
       - name: Test (seed ${{ env.SEED_RUN }})
-        if: runner.os == 'Windows' && !cancelled()
+        if: runner.os == 'Windows' && !cancelled() && steps.build-windows.outcome == 'success'
         shell: pwsh
         run: ./scripts/run-tests.ps1 ${{ matrix.config }} --rng-seed $env:SEED_RUN
 
@@ -149,12 +154,13 @@ jobs:
           clang++-19 --version
 
       - name: Build
+        id: build
         run: bash scripts/build.sh ${{ matrix.lane.config }} ${{ matrix.lane.premake }}
 
       - name: Test (seed ${{ env.SEED_FIXED }})
         run: bash scripts/run-tests.sh ${{ matrix.lane.config }} --rng-seed "$SEED_FIXED"
       - name: Test (seed ${{ env.SEED_RUN }})
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: bash scripts/run-tests.sh ${{ matrix.lane.config }} --rng-seed "$SEED_RUN"
 
       - name: Upload test results
