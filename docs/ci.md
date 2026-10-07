@@ -17,7 +17,7 @@ and sanitizer lanes. A newer push to the same ref cancels the older run
 
 | Leg | Runner image | Compiler | Configs |
 |---|---|---|---|
-| `windows-msvc` | `windows-2025` | MSVC from the newest Visual Studio on the image (VS 2022 17.14 today), C++20 | Debug, Release |
+| `windows-msvc` | `windows-2025` | MSVC from the newest Visual Studio on the image (VS 2026 18.10, v180 toolset, at the time of writing), C++20 | Debug, Release |
 | `linux-gcc-14` | `ubuntu-24.04` | GCC 14 (`g++-14`), libstdc++ 14 | Debug, Release |
 | `linux-clang-19` | `ubuntu-24.04` | Clang 19 (`clang++-19`) on libstdc++ 14 | Debug, Release |
 | `macos-apple-clang` | `macos-15` (arm64) | Apple Clang from Xcode 16.4, libc++ | Debug, Release |
@@ -33,7 +33,10 @@ of both runs is uploaded as `test-results-<leg>-<config>`.
 - **Images** are pinned by name (`windows-2025`, `ubuntu-24.04`, `macos-15`),
   never `*-latest`, so an image-label move cannot change what is tested.
 - **Windows:** `scripts/build.ps1` asks `vswhere` for the newest Visual Studio
-  with MSBuild and generates for it (`vs2022` for 17.x, `vs2026` for 18.x).
+  with MSBuild and generates for it (`vs2022` / `Astra.sln` for 17.x,
+  `vs2026` / `Astra.slnx` for 18.x). The image carries both VS 2022 and
+  VS 2026, so this leg now builds with VS 2026; before this change it used
+  whatever `setup-msbuild` found on `windows-latest`.
 - **Linux:** `g++-14` or `clang-19` + `libstdc++-14-dev` from the Ubuntu 24.04
   archive; the leg exports `CC` / `CXX`.
 - **macOS:** `sudo xcode-select -s /Applications/Xcode_16.4.app`, then
