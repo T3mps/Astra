@@ -307,7 +307,7 @@ TEST(ComponentModule, MetaErasedWhenSlotPopsToEmpty)
 
 namespace Astra_Test_ModAlign
 {
-    struct alignas(128) OverAligned { float v[4]; };   // > CACHE_LINE_SIZE (64)
+    struct alignas(2 * Astra::CACHE_LINE_SIZE) OverAligned { float v[4]; };   // > CACHE_LINE_SIZE on every target
 }
 
 TEST(ComponentModule, OverAlignedTypeIsRefusedOnModulePath)
@@ -330,7 +330,7 @@ namespace Astra_Test_ModAlign
     // BOTH reflected AND over-aligned -- the combination the scoped re-review
     // caught. Consumes NO ComponentID (the hoisted guard refuses before the
     // mint), so it costs nothing against the 192 test ceiling.
-    struct alignas(128) ReflectedOverAligned { int z = 0; };
+    struct alignas(2 * Astra::CACHE_LINE_SIZE) ReflectedOverAligned { int z = 0; };
     ASTRA_REFLECT_TYPE(ReflectedOverAligned)
         ASTRA_REFLECT_FIELD(ReflectedOverAligned, z)
     ASTRA_REFLECT_TYPE_END()

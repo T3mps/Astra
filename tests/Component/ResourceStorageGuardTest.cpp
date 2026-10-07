@@ -18,7 +18,7 @@ TEST(ResourceStorageGuard, SetAndGetRoundTripsOnNormalPath)
     EXPECT_EQ(r->v, 42);
 }
 
-namespace { struct alignas(128) OverAlignedRes { float v[4]; }; }  // > CACHE_LINE_SIZE (64)
+namespace { struct alignas(2 * Astra::CACHE_LINE_SIZE) OverAlignedRes { float v[4]; }; }  // > CACHE_LINE_SIZE on every target
 
 // Regression guard for the over-aligned-resource descriptor fix: since
 // ComponentRegistry::RegisterComponent<T>() refuses an over-aligned component
@@ -28,7 +28,7 @@ namespace { struct alignas(128) OverAlignedRes { float v[4]; }; }  // > CACHE_LI
 // failure (return nullptr, resource stays absent) in ALL configs, rather than
 // relying on an ASTRA_ASSERT that Release/Dist compile out - which would have
 // fallen through to allocate storage and mark the slot valid with a null
-// descriptor, leaking the (heap, since 128 > SBO) allocation on teardown
+// descriptor, leaking the (heap, since 2x cache line > SBO) allocation on teardown
 // (Clear/Remove both gate destruction+free on slot.descriptor).
 TEST(ResourceStorageGuard, SetResourceOnOverAlignedTypeReturnsNullNotSet)
 {
