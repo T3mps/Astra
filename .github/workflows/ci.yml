@@ -1,4 +1,10 @@
 name: CI
+
+# One workflow, one matrix: OS x configuration (Debug, Release) on pinned
+# runner images and pinned compilers, built and tested through the same two
+# entry points on every OS (scripts/build.{sh,ps1}, scripts/run-tests.{sh,ps1}),
+# each test run twice with two shuffle seeds. docs/ci.md is the reference.
+
 on:
   push:
     branches: ["**"]
@@ -7,137 +13,154 @@ on:
 permissions:
   contents: read
 
-env:
-  PREMAKE_VERSION: 5.0.0-beta6
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  windows-msvc:
-    runs-on: windows-latest
+  build-test:
+    name: ${{ matrix.leg.name }} (${{ matrix.config }})
+    runs-on: ${{ matrix.leg.os }}
     strategy:
       fail-fast: false
       matrix:
-        config: [Debug, Release, Dist]
+        config: [Debug, Release]
+        leg:
+          - name: windows-msvc
+            os: windows-2025
+          - name: linux-gcc-14
+            os: ubuntu-24.04
+            cc: gcc-14
+            cxx: g++-14
+            packages: g++-14
+          - name: linux-clang-19
+            os: ubuntu-24.04
+            cc: clang-19
+            cxx: clang++-19
+            packages: clang-19 libstdc++-14-dev
+          - name: macos-apple-clang
+            os: macos-15
+            xcode: "16.4"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Download premake
-        shell: pwsh
-        run: |
-          Invoke-WebRequest "https://github.com/premake/premake-core/releases/download/v${env:PREMAKE_VERSION}/premake-${env:PREMAKE_VERSION}-windows.zip" -OutFile premake.zip
-          Expand-Archive premake.zip -DestinationPath .
-      - name: Generate
-        run: .\premake5.exe vs2022
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
-      - name: Build (${{ matrix.config }})
-        run: msbuild Astra.sln /p:Configuration=${{ matrix.config }} /m /v:minimal
-      - name: Test
-        run: .\bin\${{ matrix.config }}-windows-x86_64\AstraTest\AstraTest.exe --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
 
-  # Pinned compilers, not the runner default: GCC 14 and Clang 19 (on
-  # libstdc++ 14) x Debug / Release. Each lane builds the test suite and the
-  # alternate entity-width compile checks, compiles every public header on
-  # its own, and runs AstraTest.
-  linux:
-    name: linux (${{ matrix.toolchain.name }}, ${{ matrix.config.name }})
+      # Fixed seed 1 reproduces exactly run to run; the second seed moves with
+      # the run number so test-order coupling keeps being probed.
+      - name: Seeds
+        shell: bash
+        run: |
+          echo "SEED_FIXED=1" >> "$GITHUB_ENV"
+          echo "SEED_RUN=$(( ${{ github.run_number }} % 98999 + 1000 ))" >> "$GITHUB_ENV"
+
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.leg.packages }}
+          echo "CC=${{ matrix.leg.cc }}" >> "$GITHUB_ENV"
+          echo "CXX=${{ matrix.leg.cxx }}" >> "$GITHUB_ENV"
+          ${{ matrix.leg.cxx }} --version
+
+      - name: Select Xcode (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${{ matrix.leg.xcode }}.app"
+          echo "CC=$(xcrun -f clang)" >> "$GITHUB_ENV"
+          echo "CXX=$(xcrun -f clang++)" >> "$GITHUB_ENV"
+          xcodebuild -version
+          clang++ --version
+
+      - name: Build
+        if: runner.os != 'Windows'
+        run: bash scripts/build.sh ${{ matrix.config }}
+      - name: Build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build.ps1 ${{ matrix.config }}
+
+      - name: Headers compile standalone
+        if: runner.os != 'Windows'
+        run: bash ci/check-headers.sh "$CXX" ${{ matrix.config == 'Debug' && 'debug' || 'release' }}
+
+      - name: Test (seed ${{ env.SEED_FIXED }})
+        if: runner.os != 'Windows'
+        run: bash scripts/run-tests.sh ${{ matrix.config }} --rng-seed "$SEED_FIXED"
+      - name: Test (seed ${{ env.SEED_RUN }})
+        if: runner.os != 'Windows' && !cancelled()
+        run: bash scripts/run-tests.sh ${{ matrix.config }} --rng-seed "$SEED_RUN"
+      - name: Test (seed ${{ env.SEED_FIXED }})
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/run-tests.ps1 ${{ matrix.config }} --rng-seed $env:SEED_FIXED
+      - name: Test (seed ${{ env.SEED_RUN }})
+        if: runner.os == 'Windows' && !cancelled()
+        shell: pwsh
+        run: ./scripts/run-tests.ps1 ${{ matrix.config }} --rng-seed $env:SEED_RUN
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-results-${{ matrix.leg.name }}-${{ matrix.config }}
+          path: test-results/
+          if-no-files-found: warn
+
+  # Extra lanes, all on ubuntu-24.04 with the pinned Clang 19. Each goes
+  # through the same build/test scripts, with a premake option selecting the
+  # lane. RTTI-off is the only lane that exercises TypeIdentity's RTTI-off
+  # path; the sanitizer lanes catch what MSVC masks (ci/README.md).
+  extra:
+    name: ${{ matrix.lane.name }} (${{ matrix.lane.config }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        toolchain:
-          - name: gcc-14
-            cc: gcc-14
-            cxx: g++-14
-            packages: g++-14
-          - name: clang-19
-            cc: clang-19
-            cxx: clang++-19
-            packages: clang-19 libstdc++-14-dev
-        config:
-          - name: Debug
-            make: debug
-          - name: Release
-            make: release
+        lane:
+          - name: linux-no-rtti
+            config: Release
+            premake: --no-rtti
+          - name: linux-no-rtti
+            config: Debug
+            premake: --no-rtti
+          - name: sanitize-asan-ubsan
+            config: Debug
+            premake: --sanitize=address
+          - name: sanitize-tsan
+            config: Debug
+            premake: --sanitize=thread
+    env:
+      CC: clang-19
+      CXX: clang++-19
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=1:abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1:abort_on_error=1
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1:suppressions=${{ github.workspace }}/ci/tsan-suppressions.txt
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Seeds
+        run: |
+          echo "SEED_FIXED=1" >> "$GITHUB_ENV"
+          echo "SEED_RUN=$(( ${{ github.run_number }} % 98999 + 1000 ))" >> "$GITHUB_ENV"
+
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.toolchain.packages }}
-          ${{ matrix.toolchain.cxx }} --version
-      - name: Download premake
-        run: |
-          curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
-      - name: Generate
-        run: ./premake5 gmake2
-      - name: Build (${{ matrix.config.name }})
-        run: make config=${{ matrix.config.make }} AstraTest AstraCompile16 AstraCompile64 -j"$(nproc)" CC=${{ matrix.toolchain.cc }} CXX=${{ matrix.toolchain.cxx }}
-      - name: Headers compile standalone
-        run: bash ci/check-headers.sh ${{ matrix.toolchain.cxx }} ${{ matrix.config.make }}
-      - name: Test
-        run: ./bin/${{ matrix.config.name }}-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
+          sudo apt-get install -y clang-19 libclang-rt-19-dev libstdc++-14-dev
+          clang++-19 --version
 
-  # Proves every Astra header and test builds and passes with RTTI off: Astra is
-  # RTTI-free by design (TypeIdentity's type_info discriminator is guarded), and
-  # this is the only lane that exercises the RTTI-off identity path.
-  linux-no-rtti:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install clang
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang
-      - name: Download premake
-        run: |
-          curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
-      - name: Generate (RTTI off)
-        run: ./premake5 gmake2 --no-rtti
-      - name: Build (Release, AstraTest)
-        run: make config=release AstraTest -j"$(nproc)" CC=clang CXX=clang++
-      - name: Test (RTTI off, Release)
-        run: ./bin/Release-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
-      - name: Build (Debug, AstraTest)
-        run: make config=debug AstraTest -j"$(nproc)" CC=clang CXX=clang++
-      - name: Test (RTTI off, Debug)
-        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
+      - name: Build
+        run: bash scripts/build.sh ${{ matrix.lane.config }} ${{ matrix.lane.premake }}
 
-  sanitize-asan-ubsan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install clang
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang
-      - name: Download premake
-        run: |
-          curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
-      - name: Generate (ASan+UBSan)
-        run: ./premake5 gmake2 --sanitize=address
-      - name: Build (Debug, AstraTest)
-        run: make config=debug AstraTest -j"$(nproc)" CC=clang CXX=clang++
-      - name: Test (ASan+UBSan)
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1:abort_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1:abort_on_error=1
-        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
+      - name: Test (seed ${{ env.SEED_FIXED }})
+        run: bash scripts/run-tests.sh ${{ matrix.lane.config }} --rng-seed "$SEED_FIXED"
+      - name: Test (seed ${{ env.SEED_RUN }})
+        if: ${{ !cancelled() }}
+        run: bash scripts/run-tests.sh ${{ matrix.lane.config }} --rng-seed "$SEED_RUN"
 
-  sanitize-tsan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install clang
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang
-      - name: Download premake
-        run: |
-          curl -L "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar xz
-      - name: Generate (TSan)
-        run: ./premake5 gmake2 --sanitize=thread
-      - name: Build (Debug, AstraTest)
-        run: make config=debug AstraTest -j"$(nproc)" CC=clang CXX=clang++
-      - name: Test (TSan)
-        env:
-          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1:suppressions=ci/tsan-suppressions.txt
-        run: ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1 --gtest_shuffle --gtest_random_seed=${{ github.run_number }}
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-results-${{ matrix.lane.name }}-${{ matrix.lane.config }}
+          path: test-results/
+          if-no-files-found: warn
