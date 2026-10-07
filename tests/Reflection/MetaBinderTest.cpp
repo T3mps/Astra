@@ -476,8 +476,9 @@ TEST(MetaBinder, RetainedContentNeverViewsTheDepartedModulesName)
     // After A departs and its image is gone, the registry's own reads of the
     // retained entry -- GetByName, and the identity check of a later rescue
     // baseline -- must not touch A's memory.
-    auto imageA = std::make_unique<char[]>(32);
-    std::strcpy(imageA.get(), "Astra_Test_Binder::Probe");
+    constexpr char kName[] = "Astra_Test_Binder::Probe";
+    auto imageA = std::make_unique<char[]>(sizeof(kName));
+    std::memcpy(imageA.get(), kName, sizeof(kName));
 
     Astra::MetaRegistry reg;
     Astra::TypeMeta one = BuildOne();
