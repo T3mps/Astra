@@ -188,6 +188,11 @@ namespace Astra
                 }
             }
         #else
+            // Explicit huge-page mappings are a Linux facility (MAP_HUGETLB).
+            // Darwin has none on Apple silicon and IsHugePagesAvailable() is
+            // false there, so the whole attempt compiles out and the regular
+            // aligned path below serves every request.
+            #ifdef MAP_HUGETLB
             int prot = PROT_READ | PROT_WRITE;
             int flags_mmap = MAP_PRIVATE | MAP_ANONYMOUS;
             
@@ -241,6 +246,9 @@ namespace Astra
                 }
                 #endif
             }
+            #else
+            (void)tryHugePages;
+            #endif // MAP_HUGETLB
             
             // Fall back to regular allocation with alignment
             void* ptr = nullptr;
