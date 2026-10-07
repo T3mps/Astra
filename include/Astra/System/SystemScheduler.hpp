@@ -60,10 +60,25 @@ namespace Astra
         template<typename T>
         struct SystemKeyAnchor { inline static char value = 0; };
 
+        // A plain index loop, not std::string_view::find: libstdc++'s find
+        // null-tests the char_traits::find result, and GCC's -fsanitize=null /
+        // nonnull-attribute instrumentation makes that test non-constant, so
+        // the `if constexpr` below failed to compile under GCC UBSan.
+        ASTRA_NODISCARD constexpr bool NameContains(std::string_view s, std::string_view needle) noexcept
+        {
+            for (size_t i = 0; i + needle.size() <= s.size(); ++i)
+            {
+                size_t j = 0;
+                while (j < needle.size() && s[i + j] == needle[j]) ++j;
+                if (j == needle.size()) return true;
+            }
+            return false;
+        }
+
         template<typename T>
         ASTRA_NODISCARD inline uint64_t SystemKey() noexcept
         {
-            if constexpr (TypeID<T>::Name().find("lambda") != std::string_view::npos)
+            if constexpr (NameContains(TypeID<T>::Name(), "lambda"))
                 return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&SystemKeyAnchor<typename TypeID<T>::Type>::value));
             else
                 return TypeID<T>::Hash();
