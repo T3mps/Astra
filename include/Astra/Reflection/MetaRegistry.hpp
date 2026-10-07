@@ -190,15 +190,14 @@ namespace Astra
                 }
                 else
                 {
-                    TypeMeta& existing = *it->second.meta;
-                    if (!SameIdentity(existing, fresh))
+                    if (!SameIdentity(*it->second.meta, fresh))
                     {
                         mismatch = true;
                     }
                     else
                     {
-                        existing = std::move(fresh);   // move-assign: unique_ptr target address unchanged
-                        result = &existing;
+                        AssignContentLocked(it->second, std::move(fresh));   // unique_ptr target address unchanged
+                        result = it->second.meta.get();
                     }
                 }
             }
@@ -252,7 +251,7 @@ namespace Astra
                             if (NonEmptyAndAllNullBuild(e))
                             {
                                 e.binders.push_back(MakeBinder(who, build));
-                                *e.meta = std::move(fresh);
+                                AssignContentLocked(e, std::move(fresh));
                             }
                             else
                             {
@@ -328,7 +327,7 @@ namespace Astra
                                 e.binders.push_back(MakeBinder(who, build));
                                 if (fresh)
                                 {
-                                    *e.meta = std::move(*fresh);
+                                    AssignContentLocked(e, std::move(*fresh));
                                     r = { BindOutcome::Bound, e.meta.get() };
                                 }
                                 else
@@ -351,7 +350,7 @@ namespace Astra
                             }
                             if (fresh && idx == e.binders.size() - 1)
                             {
-                                *e.meta = std::move(*fresh);
+                                AssignContentLocked(e, std::move(*fresh));
                             }
                             r = { BindOutcome::Bound, e.meta.get() };
                         }
@@ -495,7 +494,7 @@ namespace Astra
                     // refused loudly (after the unlock) rather than swallowed.
                     if (SameIdentity(*it->second.meta, fresh))
                     {
-                        *it->second.meta = std::move(fresh);
+                        AssignContentLocked(it->second, std::move(fresh));
                     }
                     else
                     {
@@ -535,7 +534,7 @@ namespace Astra
                     }
                     else
                     {
-                        *it->second.meta = std::move(fresh);
+                        AssignContentLocked(it->second, std::move(fresh));
                         swapped = true;
                     }
                 }
@@ -772,6 +771,14 @@ namespace Astra
         {
             std::unique_ptr<TypeMeta>  meta;      // address-stable for the entry's life
             SmallVector<MetaBinder, 2> binders;   // back() == top == whose closures `meta` carries
+            // Registry-owned copy of the type name; meta->typeName always views
+            // it. The incoming name views the binding module's image (a
+            // TypeID<T>::Name() slice), and content can outlive that module --
+            // the Retained-unrebuildable state of spec 2026-09-09 §3.6 -- while
+            // SameIdentity, CollisionMessage and GetByName keep reading it: the
+            // same use-after-unload class as the former type_info* discriminator
+            // (TypeContext.hpp). Heap-held because FlatMap moves its Entry values.
+            std::unique_ptr<std::string> name;
         };
 
         // All helpers below require m_mutex to be held (unique for mutators).
@@ -782,7 +789,29 @@ namespace Astra
                          "MetaRegistry::InstallEntryLocked on a present hash -- would dangle every cached TypeMeta*");
             Entry& e = m_types[hash];
             e.meta = std::make_unique<TypeMeta>(std::move(fresh));
+            InternNameLocked(e);
             return e;
+        }
+
+        // Every content install goes through here (never `*e.meta = ...`), so
+        // meta->typeName never views memory the registry does not own.
+        static void AssignContentLocked(Entry& e, TypeMeta&& fresh)
+        {
+            *e.meta = std::move(fresh);
+            InternNameLocked(e);
+        }
+
+        static void InternNameLocked(Entry& e)
+        {
+            if (!e.name)
+            {
+                e.name = std::make_unique<std::string>(e.meta->typeName);
+            }
+            else if (*e.name != e.meta->typeName)
+            {
+                e.name->assign(e.meta->typeName);
+            }
+            e.meta->typeName = *e.name;
         }
 
         void EraseEntryLocked(typename FlatMap<uint64_t, Entry>::iterator it)

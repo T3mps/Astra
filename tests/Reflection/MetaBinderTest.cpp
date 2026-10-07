@@ -2,6 +2,9 @@
 #include <Astra/Reflection/MetaRegistry.hpp>
 #include <Astra/Core/ModuleIdentity.hpp>
 
+#include <cstring>
+#include <memory>
+
 // Spec 2026-09-09 §3.2/§3.3: the binder stack. Every test uses a LOCAL
 // MetaRegistry (not Instance()) and a synthetic hash, so nothing here touches
 // the shared default-context registry or consumes a ComponentID. "Content"
@@ -464,4 +467,35 @@ TEST(MetaBinder, BindUpgradesNullBuildBinderThunk)
     EXPECT_EQ(reg.Get(kHash)->fields.size(), 2u);     // rebuilt from D's thunk
     EXPECT_EQ(reg.TopBinder(kHash), &imageD);
     EXPECT_EQ(reg.BinderCount(kHash), 1u);
+}
+
+TEST(MetaBinder, RetainedContentNeverViewsTheDepartedModulesName)
+{
+    // §3.6 degraded state, seen from the departed module's side: A's name
+    // bytes live in A's image (a heap buffer here, so ASan sees the unmap).
+    // After A departs and its image is gone, the registry's own reads of the
+    // retained entry -- GetByName, and the identity check of a later rescue
+    // baseline -- must not touch A's memory.
+    auto imageA = std::make_unique<char[]>(32);
+    std::strcpy(imageA.get(), "Astra_Test_Binder::Probe");
+
+    Astra::MetaRegistry reg;
+    Astra::TypeMeta one = BuildOne();
+    one.typeName = imageA.get();
+    ASSERT_EQ(reg.Bind(kHash, Who(&s_imageA), &BuildOne, &one).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &s_imageA));
+    ASSERT_EQ(reg.Bind(kHash, Who(&s_imageB), nullptr, nullptr).outcome, Astra::BindOutcome::Bound);
+    EXPECT_TRUE(reg.Acquire(kHash, &s_imageB));
+
+    EXPECT_EQ(reg.Release(kHash, &s_imageA), Astra::ReleaseOutcome::Retained);
+    const Astra::TypeMeta* address = reg.Get(kHash);
+    imageA.reset();   // A unmapped
+
+    EXPECT_EQ(reg.GetByName("Astra_Test_Binder::Probe"), address);
+    EXPECT_EQ(address->typeName, "Astra_Test_Binder::Probe");
+
+    const Astra::BindResult rescue = reg.InstallBaseline(kHash, Who(&s_imageC), &BuildTwo, BuildTwo());
+    EXPECT_EQ(rescue.outcome, Astra::BindOutcome::Bound);
+    EXPECT_EQ(reg.Get(kHash), address);
+    EXPECT_EQ(address->fields.size(), 2u);
 }
