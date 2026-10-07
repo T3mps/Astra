@@ -28,12 +28,12 @@
 //       integer-literal suffixes ("5UL" -> "5"); MSVC already prints all of
 //       these as plain integers
 //
-// The canonical form is identical on MSVC, GCC and Clang for: fundamental
-// types; classes, structs, unions and enums at any namespace depth (anonymous
-// namespaces included); class templates over those, nested to any depth;
-// pointers, references, arrays, const/volatile, function and member pointers;
-// and integral, bool and char non-type template arguments in the range
-// 0..INT64_MAX (char: 0..127).
+// The canonical form is identical on MSVC, GCC, Clang and Apple Clang (libc++)
+// for: fundamental types; classes, structs, unions and enums at any namespace
+// depth (anonymous namespaces included); class templates over those, nested
+// to any depth; pointers, references, arrays, const/volatile, function and
+// member pointers; and integral, bool and char non-type template arguments in
+// the range 0..INT64_MAX (char: 0..127).
 //
 // It is NOT identical, because the compilers print different CONTENT rather
 // than different formatting, for:
