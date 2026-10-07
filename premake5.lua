@@ -13,8 +13,21 @@ newoption {
     description = "Build AstraTest with RTTI disabled (-fno-rtti / /GR-); used by the CI RTTI-off lane"
 }
 
+-- macOS builds natively for the machine it is generated on: ARM64 on Apple
+-- silicon (and when generating for macOS from another host), x86_64 on an
+-- Intel Mac. Every other system keeps the x64 workspace architecture.
+local function astraMacArchitecture()
+    if os.host() == "macosx" and os.outputof("uname -m") == "x86_64" then
+        return "x86_64"
+    end
+    return "ARM64"
+end
+
 workspace "Astra"
     architecture "x64"
+    filter "system:macosx"
+        architecture (astraMacArchitecture())
+    filter {}
     configurations { "Debug", "Release", "Dist" }
     startproject "AstraBenchmark"
     location "."  -- Solution file stays in root
@@ -155,6 +168,8 @@ workspace "Astra"
                     "-mavx"                 -- Enable AVX paths in Core/Simd.hpp (parity with /arch:AVX on MSVC)
                 }
 
+            -- Same warning set as Linux. -mavx only where it exists: Apple
+            -- silicon takes Mosaic's NEON paths (always on for arm64).
             filter "system:macosx"
                 buildoptions {
                     "-Wall",
@@ -164,9 +179,11 @@ workspace "Astra"
                     "-Wno-missing-field-initializers",
                     "-Wno-unknown-warning-option",
                     "-Wno-maybe-uninitialized",
-                    "-fdiagnostics-color=always",
-                    "-mavx"                 -- Enable AVX paths in Core/Simd.hpp (parity with /arch:AVX on MSVC)
+                    "-fdiagnostics-color=always"
                 }
+
+            filter { "system:macosx", "architecture:x86_64" }
+                buildoptions { "-mavx" }    -- Enable AVX paths in Core/Simd.hpp (parity with /arch:AVX on MSVC)
             
             filter "configurations:Debug"
                 runtime "Debug"
@@ -290,21 +307,28 @@ workspace "Astra"
                 }
                 
             filter "system:macosx"
-                -- NOTE: -march=native below is intentionally non-portable; benchmarks are
-                -- local-machine-only and are not built in CI cross-compiler jobs.
+                -- NOTE: native CPU tuning below is intentionally non-portable; benchmarks
+                -- are local-machine-only and are not built in CI. Apple Clang has no
+                -- -fopenmp (no bundled OpenMP runtime), so it is not passed here.
                 buildoptions {
                     "-Wall",
                     "-Wextra",
                     "-Wpedantic",
                     "-fdiagnostics-color=always",
-                    "-march=native",        -- Use native CPU features
-                    "-msse2",               -- Enable SSE2
-                    "-msse4.2",             -- Enable SSE4.2
                     "-ffast-math",          -- Fast floating point
                     "-funroll-loops",       -- Unroll loops
-                    "-ftree-vectorize",     -- Auto-vectorization
-                    "-fopenmp"              -- Enable OpenMP SIMD support
+                    "-ftree-vectorize"      -- Auto-vectorization
                 }
+
+            filter { "system:macosx", "architecture:x86_64" }
+                buildoptions {
+                    "-march=native",        -- Use native CPU features
+                    "-msse2",               -- Enable SSE2
+                    "-msse4.2"              -- Enable SSE4.2
+                }
+
+            filter { "system:macosx", "architecture:ARM64" }
+                buildoptions { "-mcpu=native" }  -- Use native CPU features
             
             filter "configurations:Debug"
                 runtime "Debug"
