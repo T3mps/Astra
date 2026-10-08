@@ -35,6 +35,18 @@
         #define MOSAIC_PLATFORM_MACOS 1
     #endif
     #define MOSAIC_PLATFORM_APPLE 1
+#elif defined(__EMSCRIPTEN__)
+    // Emscripten / wasm32. MUST sit before the __linux__ and __unix__ arms:
+    // emscripten's clang predefines __unix__ for its POSIX emulation layer, so
+    // without this arm the block would either mislabel the target
+    // MOSAIC_PLATFORM_UNIX or (if the predefine is absent) trip the #error
+    // below. Nothing keys off _LINUX/_UNIX today -- only MOSAIC_PLATFORM_WINDOWS
+    // has consumers (Assert.hpp:61, :133) -- so naming wasm explicitly costs
+    // nothing and documents the port. The sibling ARCHITECTURE block already
+    // handles __wasm__ (Platform.hpp:90-99) and leaves MOSAIC_HAS_AVX2 /
+    // MOSAIC_HAS_NEON undefined, so Wide.hpp selects Wide_Scalar.inl.
+    #define MOSAIC_PLATFORM_EMSCRIPTEN 1
+    #define MOSAIC_PLATFORM_WASM 1
 #elif defined(__linux__)
     #define MOSAIC_PLATFORM_LINUX 1
     #if defined(__ANDROID__)

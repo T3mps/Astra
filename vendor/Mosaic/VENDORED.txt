@@ -1,0 +1,4 @@
+﻿Mosaic vendored from D:\dev\starworks\Mosaic
+commit : 53078eef856e24d93d816c379b3f7e30d4678e58
+scope  : include/ + src/ + LICENSE
+synced : 2026-10-08 12:52:02
