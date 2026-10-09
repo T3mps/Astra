@@ -9,6 +9,16 @@
 using namespace Astra;
 using namespace Astra::Compression;
 
+// Sanitizer instrumentation slows LZ4 compression below the throughput floor
+// (Release ASan measures ~7 MB/s), so the floor only applies uninstrumented.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    #define ASTRA_TEST_SANITIZED 1
+#elif defined(__has_feature)
+    #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+        #define ASTRA_TEST_SANITIZED 1
+    #endif
+#endif
+
 class CompressionTest : public ::testing::Test
 {
 protected:
@@ -400,8 +410,8 @@ TEST_F(CompressionTest, PerformanceBenchmark)
     
     // smallz4 uses optimal parsing which is slower but achieves better compression
     // Adjusted expectations for optimal parsing mode:
-#ifdef NDEBUG
-    // Throughput thresholds are meaningless in unoptimized builds
+#if defined(NDEBUG) && !defined(ASTRA_TEST_SANITIZED)
+    // Throughput thresholds are meaningless in unoptimized or sanitized builds
     // (Debug LZ4 measures ~2 MB/s); only enforce them in optimized configs.
     EXPECT_GT(compressMBps, 10.0f);    // Expect > 10 MB/s compression (optimal is slower)
     EXPECT_GT(decompressMBps, 100.0f); // Expect > 100 MB/s decompression (still fast)
