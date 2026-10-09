@@ -31,25 +31,25 @@ namespace Astra
         // Type identification
         // ====================================================================
 
-        uint64_t typeHash;              // XXHash64 of type name
+        uint64_t typeHash = 0;          // XXHash64 of type name
         std::string_view typeName;      // Type name as it appears in code
-        size_t size;                    // sizeof(T)
-        size_t alignment;               // alignof(T)
+        size_t size = 0;                // sizeof(T)
+        size_t alignment = 0;           // alignof(T)
 
         // ====================================================================
         // Type classification
         // ====================================================================
 
-        bool isClass;                   // Is this a class/struct?
-        bool isEnum;                    // Is this an enum?
-        bool isTrivial;                 // Is trivially copyable?
-        bool isPolymorphic;             // Has virtual functions?
-        bool isAbstract;                // Is abstract class?
-        bool isDefaultConstructible;    // Can default construct?
-        bool isCopyConstructible;       // Can copy construct?
-        bool isMoveConstructible;       // Can move construct?
-        bool isCopyAssignable;          // Can copy assign?
-        bool isMoveAssignable;          // Can move assign?
+        bool isClass = false;           // Is this a class/struct?
+        bool isEnum = false;            // Is this an enum?
+        bool isTrivial = false;         // Is trivially copyable?
+        bool isPolymorphic = false;     // Has virtual functions?
+        bool isAbstract = false;        // Is abstract class?
+        bool isDefaultConstructible = false; // Can default construct?
+        bool isCopyConstructible = false; // Can copy construct?
+        bool isMoveConstructible = false; // Can move construct?
+        bool isCopyAssignable = false;  // Can copy assign?
+        bool isMoveAssignable = false;  // Can move assign?
 
         // ====================================================================
         // Lifecycle functions

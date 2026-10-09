@@ -55,6 +55,24 @@ namespace
         EXPECT_EQ(other.Meta().Get(999u), nullptr);
     }
 
+    // Register(hash, name) builds its TypeMeta with no builder: every
+    // identity field must read as a defined zero (GCC UBSan caught the
+    // move of indeterminate bools here before TypeMeta's members had
+    // initializers).
+    TEST(TypeContext, RawRegisterLeavesIdentityFieldsZeroed)
+    {
+        Astra::TypeContext ctx;
+        const Astra::TypeMeta& meta = ctx.Meta().Register(998u, "RawFake");
+        EXPECT_EQ(meta.typeHash, 998u);
+        EXPECT_EQ(meta.size, 0u);
+        EXPECT_EQ(meta.alignment, 0u);
+        EXPECT_FALSE(meta.isClass);
+        EXPECT_FALSE(meta.isTrivial);
+        EXPECT_FALSE(meta.isMoveAssignable);
+        // A same-name re-register returns the existing entry.
+        EXPECT_EQ(&ctx.Meta().Register(998u, "RawFake"), &meta);
+    }
+
     TEST(TypeContext, PendingRegistrationsDrainIntoInstalledContext)
     {
         // Flush any static-registrar enqueues from OTHER translation units into
