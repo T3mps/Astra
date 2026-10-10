@@ -8,6 +8,7 @@
 #include "../Core/Base.hpp"
 #include "../Core/TypeID.hpp"
 #include "ContainerTraits.hpp"
+#include "MetaRegistry.hpp"
 #include "TypeMeta.hpp"
 
 namespace Astra

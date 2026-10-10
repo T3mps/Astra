@@ -3,6 +3,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <optional>
 #include <mutex>
 #include <shared_mutex>

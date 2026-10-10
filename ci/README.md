@@ -1,4 +1,11 @@
-# CI — Sanitizer Lane
+# CI
+
+## Lanes
+
+The matrix, toolchains, build/test entry points and pinning are documented in
+[`docs/ci.md`](../docs/ci.md). This file covers the sanitizer lanes in depth.
+
+## Sanitizer Lane
 
 Astra's primary CI builds under MSVC (Windows) and gcc/clang (Linux). MSVC masks a
 whole class of dynamic faults — memory corruption, undefined behavior, data races.
@@ -21,15 +28,15 @@ option):
 - Linux or macOS (the sanitizers here are a clang/gcc capability; the Windows/MSVC
   path is intentionally untouched by `--sanitize`).
 - `clang` / `clang++`.
-- `premake5` (5.0.0-beta6) and `make`.
+- `make`; `scripts/build.sh` fetches the pinned premake (`scripts/premake.lock`).
 
 ## The `--sanitize` premake option
 
 `premake5.lua` defines an option-gated capability:
 
 ```
-premake5 gmake2 --sanitize=address   # AddressSanitizer + UndefinedBehaviorSanitizer
-premake5 gmake2 --sanitize=thread    # ThreadSanitizer
+premake5 gmake --sanitize=address    # AddressSanitizer + UndefinedBehaviorSanitizer
+premake5 gmake --sanitize=thread     # ThreadSanitizer
 ```
 
 Applied to the `AstraTest` project only, via option-gated filters. **With no
@@ -52,20 +59,18 @@ hiding faults.
 ### ASan + UBSan
 
 ```bash
-premake5 gmake2 --sanitize=address
-make config=debug AstraTest -j"$(nproc)" CC=clang CXX=clang++
+CC=clang-19 CXX=clang++-19 scripts/build.sh Debug --sanitize=address
 ASAN_OPTIONS=halt_on_error=1:detect_leaks=1:abort_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:abort_on_error=1 \
-  ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+  scripts/run-tests.sh Debug --rng-seed 1
 ```
 
 ### ThreadSanitizer
 
 ```bash
-premake5 gmake2 --sanitize=thread
-make config=debug AstraTest -j"$(nproc)" CC=clang CXX=clang++
-TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=ci/tsan-suppressions.txt \
-  ./bin/Debug-linux-x86_64/AstraTest/AstraTest --gtest_brief=1
+CC=clang-19 CXX=clang++-19 scripts/build.sh Debug --sanitize=thread
+TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=$PWD/ci/tsan-suppressions.txt \
+  scripts/run-tests.sh Debug --rng-seed 1
 ```
 
 > The two `--sanitize` modes produce incompatible binaries — regenerate + rebuild

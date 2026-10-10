@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string_view>
 #include <type_traits>
@@ -8,6 +9,7 @@
 #include "../Core/Platform.hpp"
 #include "Base.hpp"
 #include "TypeContext.hpp"
+#include "TypeNameCanonical.hpp"
 
 #if defined(__cpp_rtti) || defined(_CPPRTTI)
 #include <typeinfo>
@@ -153,24 +155,55 @@ namespace Astra
             }
         }
 
-        // Cross-platform compile-time type name extraction
+        // Index of the first ';' in s that is not nested inside <>, (), [], {}
+        // or a character literal; s.size() when there is none.
+        constexpr size_t FindTopLevelSemicolon(std::string_view s) noexcept
+        {
+            int depth = 0;
+            for (size_t i = 0; i < s.size(); ++i)
+            {
+                const char c = s[i];
+                if (c == '\'')
+                {
+                    // Skip a character literal (a char NTTP may print as '<' or '\'').
+                    for (++i; i < s.size() && s[i] != '\''; ++i)
+                    {
+                        if (s[i] == '\\')
+                            ++i;
+                    }
+                    continue;
+                }
+                if (c == '<' || c == '(' || c == '[' || c == '{')
+                    ++depth;
+                else if (c == '>' || c == ')' || c == ']' || c == '}')
+                    --depth;
+                else if (c == ';' && depth == 0)
+                    return i;
+            }
+            return s.size();
+        }
+
+        // The compiler's own spelling of T, sliced out of the pretty-function
+        // string. Differs between compilers; see TypeNameCanonical.hpp.
         template<typename T>
-        constexpr std::string_view TypeNameInternal() noexcept
+        constexpr std::string_view RawTypeName() noexcept
         {
             #if defined(ASTRA_COMPILER_MSVC)
-                // MSVC: __FUNCSIG__ gives "auto __cdecl TypeName<class MyClass>(void)"
+                // MSVC: __FUNCSIG__ gives "class std::basic_string_view<...> __cdecl
+                // Astra::Detail::RawTypeName<struct MyClass>(void) noexcept"
                 constexpr std::string_view funcName = __FUNCSIG__;
-                constexpr std::string_view prefix = "TypeNameInternal<";
+                constexpr std::string_view prefix = "RawTypeName<";
                 constexpr std::string_view suffix = ">(void)";
             #elif defined(ASTRA_COMPILER_CLANG)
-                // Clang: __PRETTY_FUNCTION__ gives "std::string_view TypeName() [T = MyClass]"
+                // Clang: __PRETTY_FUNCTION__ gives "std::string_view Astra::Detail::RawTypeName() [T = MyClass]"
                 constexpr std::string_view funcName = __PRETTY_FUNCTION__;
-                constexpr std::string_view prefix = "TypeNameInternal() [T = ";
+                constexpr std::string_view prefix = "RawTypeName() [T = ";
                 constexpr std::string_view suffix = "]";
             #elif defined(ASTRA_COMPILER_GCC)
-                // GCC: __PRETTY_FUNCTION__ gives "constexpr std::string_view TypeName() [with T = MyClass]"
+                // GCC: __PRETTY_FUNCTION__ gives "constexpr std::string_view
+                // Astra::Detail::RawTypeName() [with T = MyClass; std::string_view = ...]"
                 constexpr std::string_view funcName = __PRETTY_FUNCTION__;
-                constexpr std::string_view prefix = "TypeNameInternal() [with T = ";
+                constexpr std::string_view prefix = "RawTypeName() [with T = ";
                 constexpr std::string_view suffix = "]";
             #else
                 #error "Unsupported compiler for compile-time type name extraction"
@@ -187,21 +220,53 @@ namespace Astra
             if (end == std::string_view::npos || end <= start)
                 return "Unknown";
 
-            // Extract the type name
-            std::string_view typeName = funcName.substr(start, end - start);
-
-            // Clean up common prefixes (optional)
-            // Remove "class ", "struct ", "enum " prefixes on MSVC
-            #if defined(ASTRA_COMPILER_MSVC)
-                if (typeName.starts_with("class "))
-                    typeName.remove_prefix(6);
-                else if (typeName.starts_with("struct "))
-                    typeName.remove_prefix(7);
-                else if (typeName.starts_with("enum "))
-                    typeName.remove_prefix(5);
+            #if defined(ASTRA_COMPILER_GCC)
+                // GCC lists the function's other template-dependent bindings after
+                // T, ';'-separated: "[with T = Foo; std::string_view =
+                // std::basic_string_view<char>]". Without this cut every GCC name
+                // (and so every TypeHash) carries that tail, and name-keyed lookups
+                // (MetaRegistry::GetByName, Registry::GetComponentByName) never match.
+                end = start + FindTopLevelSemicolon(funcName.substr(start, end - start));
             #endif
 
-            return typeName;
+            return funcName.substr(start, end - start);
+        }
+
+        template<typename T>
+        constexpr auto MakeCanonicalTypeNameScratch() noexcept
+        {
+            constexpr std::string_view raw = RawTypeName<T>();
+            CanonicalTypeNameBuffer<CanonicalTypeNameCapacity(raw.size())> buffer{};
+            buffer.size = CanonicalizeTypeName(raw, buffer.chars.data(), buffer.chars.size());
+            return buffer;
+        }
+
+        template<typename T>
+        inline constexpr auto kCanonicalTypeNameScratch = MakeCanonicalTypeNameScratch<T>();
+
+        // Exact-size, NUL-terminated storage for the canonical name.
+        template<typename T>
+        constexpr auto MakeCanonicalTypeName() noexcept
+        {
+            constexpr size_t size = kCanonicalTypeNameScratch<T>.size;
+            static_assert(size <= kCanonicalTypeNameScratch<T>.chars.size(),
+                "Astra: canonical type name exceeds its scratch capacity");
+            std::array<char, size + 1> chars{};
+            for (size_t i = 0; i < size; ++i)
+                chars[i] = kCanonicalTypeNameScratch<T>.chars[i];
+            return chars;
+        }
+
+        template<typename T>
+        inline constexpr auto kCanonicalTypeName = MakeCanonicalTypeName<T>();
+
+        // Compile-time type name in Astra's canonical, compiler-independent
+        // spelling (TypeNameCanonical.hpp). This is what TypeID<T>::Name()
+        // returns and what TypeID<T>::Hash() hashes.
+        template<typename T>
+        constexpr std::string_view TypeNameInternal() noexcept
+        {
+            return std::string_view(kCanonicalTypeName<T>.data(), kCanonicalTypeName<T>.size() - 1);
         }
 
         template<typename T>
@@ -251,13 +316,18 @@ namespace Astra
             return Detail::TypeIDStorage<Type>::Value();
         }
 
-        // Compile-time type name (stable across platforms and compilations)
+        // Compile-time type name in Astra's canonical spelling: the same string on
+        // MSVC, GCC and Clang, across recompiles, for every type outside the
+        // exceptions listed in TypeNameCanonical.hpp (standard-library templates
+        // with defaulted arguments, enumerator template arguments, data-model
+        // dependent aliases such as std::int64_t, lambdas).
         ASTRA_NODISCARD static constexpr std::string_view Name() noexcept
         {
             return Detail::TypeNameInternal<Type>();
         }
 
-        // Compile-time hash of type name (stable across platforms and compilations)
+        // Compile-time hash of Name(): the serialization identity binary archives
+        // persist, so it is stable exactly where Name() is (see above).
         // Uses XXHash64 for excellent distribution and virtually zero collision risk
         ASTRA_NODISCARD static constexpr uint64_t Hash() noexcept
         {

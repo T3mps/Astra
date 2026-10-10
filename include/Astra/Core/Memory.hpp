@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,6 +15,8 @@
     #include <sys/mman.h>
     #include <unistd.h>
     #include <fcntl.h>
+    #include <cstdio>
+    #include <cstdlib>
     #include <cstring>
     #ifdef ASTRA_PLATFORM_LINUX
         // memfd.h may not be available on all Linux systems (e.g., WSL)
@@ -31,7 +34,15 @@
 namespace Astra
 {
     // Cache line size constants for proper alignment
-#ifdef __cpp_lib_hardware_interference_size
+#if defined(ASTRA_PLATFORM_APPLE) && defined(ASTRA_ARCH_ARM64)
+    // Apple silicon has 128-byte cache lines. Pinned here rather than taken
+    // from libc++'s hardware_destructive_interference_size, which reports
+    // clang's generic AArch64 figure (256) on newer SDKs and is absent on older
+    // ones -- chunk layout and the over-alignment refusal must not change with
+    // the Xcode version.
+    inline constexpr std::size_t DESTRUCTIVE_INTERFERENCE = 128;
+    inline constexpr std::size_t CONSTRUCTIVE_INTERFERENCE = 64;
+#elif defined(__cpp_lib_hardware_interference_size)
     // gcc warns that this value can vary with -mtune; it is only used for
     // intra-build alignment, never serialized, so the variance is acceptable.
     #if defined(__GNUC__) && !defined(__clang__)
@@ -177,6 +188,11 @@ namespace Astra
                 }
             }
         #else
+            // Explicit huge-page mappings are a Linux facility (MAP_HUGETLB).
+            // Darwin has none on Apple silicon and IsHugePagesAvailable() is
+            // false there, so the whole attempt compiles out and the regular
+            // aligned path below serves every request.
+            #ifdef MAP_HUGETLB
             int prot = PROT_READ | PROT_WRITE;
             int flags_mmap = MAP_PRIVATE | MAP_ANONYMOUS;
             
@@ -230,6 +246,9 @@ namespace Astra
                 }
                 #endif
             }
+            #else
+            (void)tryHugePages;
+            #endif // MAP_HUGETLB
             
             // Fall back to regular allocation with alignment
             void* ptr = nullptr;
