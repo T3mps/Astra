@@ -136,6 +136,19 @@ TEST(TypeNameCanonical, StandardLibraryInlineNamespacesAreDropped)
     EXPECT_EQ(Canonical("Game::__1::Thing"), "Game::__1::Thing");
 }
 
+// Apple Clang prints __PRETTY_FUNCTION__ like upstream Clang, over libc++ instead
+// of libstdc++: standard-library names may carry libc++'s versioned inline
+// namespace (std::__1::). Both spellings land on the shared canonical form.
+TEST(TypeNameCanonical, AppleClangLibcxxSpellingsCanonicalize)
+{
+    EXPECT_EQ(Canonical("std::__1::array<int, 3>"), "std::array<int,3>");
+    EXPECT_EQ(Canonical("std::array<int, 3>"), "std::array<int,3>");
+    EXPECT_EQ(Canonical("std::__1::pair<int, float>"), "std::pair<int,float>");
+    EXPECT_EQ(Canonical("Tmpl<std::__1::pair<int, float> >"), "Tmpl<std::pair<int,float>>");
+    EXPECT_EQ(Canonical("Pair<std::__1::array<int, 3>, std::__1::pair<int, float>>"),
+              "Pair<std::array<int,3>,std::pair<int,float>>");
+}
+
 TEST(TypeNameCanonical, IntegerLiteralSuffixesAreDropped)
 {
     EXPECT_EQ(Canonical("N<5U>"), "N<5>");
@@ -256,16 +269,23 @@ TEST(TypeNameCanonical, LiveNamesAreCompileTimeConstants)
     SUCCEED();
 }
 
-// std::int64_t is a different fundamental type per data model, not a spelling
-// difference: long on LP64 (Linux, macOS), long long on LLP64 (Windows).
-TEST(TypeNameCanonical, Int64AliasFollowsTheDataModel)
+// std::int64_t is a different fundamental type per platform ABI, not a
+// spelling difference: long on LP64 Linux, but long long on LLP64 Windows AND
+// on Darwin, whose <stdint.h> declares it long long even though long is also
+// 64 bits there.
+TEST(TypeNameCanonical, Int64AliasFollowsThePlatformAbi)
 {
+#if defined(__APPLE__) || defined(_WIN32)
+    constexpr std::string_view expected = "long long";
+#else
     constexpr std::string_view expected = sizeof(long) == 8 ? "long" : "long long";
+#endif
     EXPECT_EQ(Astra::TypeID<std::int64_t>::Name(), expected);
 }
 
 // Golden hashes: the serialization identity an archive written by one compiler
-// carries into a process built by another. Equal on MSVC, GCC and Clang.
+// carries into a process built by another. Equal on MSVC, GCC, Clang and
+// Apple Clang.
 TEST(TypeNameCanonical, GoldenHashesMatchAcrossCompilers)
 {
     using namespace CanonProbe;
@@ -275,6 +295,81 @@ TEST(TypeNameCanonical, GoldenHashesMatchAcrossCompilers)
     EXPECT_EQ(Astra::TypeID<Tmpl<const unsigned long long*>>::Hash(), 0x105C888008BF79A6ULL);
     EXPECT_EQ(Astra::TypeID<BoolN<true>>::Hash(), 0x2589163FA309882CULL);
     EXPECT_EQ(Astra::TypeID<Astra::Test::Position>::Hash(), 0xD1BCE3829ECD62BFULL);
+}
+
+// THE PIN: canonical name AND its hash, literal, for every portable shape --
+// fundamentals, namespaced and anonymous-namespace classes, enums, nested
+// templates, integral/bool/char template arguments, cv/ref/array/function and
+// member-function pointers, and the std types whose names agree across
+// libstdc++, libc++ and MSVC's STL. Every CI toolchain (MSVC, GCC 14, Clang 19,
+// Apple Clang) must produce exactly these values: an archive written on one
+// platform is read by its type hashes on another (Arcane ships Windows, Linux
+// and macOS builds against the same data). A failure here means a cross-platform
+// identity break -- fix the canonicalizer, never the table.
+namespace
+{
+    struct PinnedIdentity
+    {
+        std::string_view name;
+        std::uint64_t hash;
+        std::string_view liveName;
+        std::uint64_t liveHash;
+    };
+
+    template<typename T>
+    constexpr PinnedIdentity Pin(std::string_view name, std::uint64_t hash) noexcept
+    {
+        return { name, hash, Astra::TypeID<T>::Name(), Astra::TypeID<T>::Hash() };
+    }
+
+    const char* ToolchainName() noexcept
+    {
+#if defined(_MSC_VER) && !defined(__clang__)
+        return "MSVC";
+#elif defined(__apple_build_version__)
+        return "Apple Clang";
+#elif defined(__clang__)
+        return "Clang";
+#elif defined(__GNUC__)
+        return "GCC";
+#else
+        return "unknown";
+#endif
+    }
+}
+
+TEST(TypeNameCanonical, NamesAndHashesArePinnedOnEveryToolchain)
+{
+    using namespace CanonProbe;
+    const PinnedIdentity pins[] = {
+        Pin<int>("int", 0x60F24396F77057C3ULL),
+        Pin<unsigned long long>("unsigned long long", 0x2009B33FB5EA5E61ULL),
+        Pin<Position>("CanonProbe::Position", 0x928324569DE07252ULL),
+        Pin<Color>("CanonProbe::Color", 0xC3FAD440F50FC7FAULL),
+        Pin<CanonHidden>("(anonymous namespace)::CanonHidden", 0x6E76F93AAEE00983ULL),
+        Pin<Tmpl<CanonHidden>>("CanonProbe::Tmpl<(anonymous namespace)::CanonHidden>", 0x183BC801FAAC7799ULL),
+        Pin<Pair<int, float>>("CanonProbe::Pair<int,float>", 0x2A0BC05789A16277ULL),
+        Pin<IntN<-3>>("CanonProbe::IntN<-3>", 0xD43CADB5D84E3F48ULL),
+        Pin<BoolN<true>>("CanonProbe::BoolN<1>", 0x2589163FA309882CULL),
+        Pin<CharN<'a'>>("CanonProbe::CharN<97>", 0xE48D826AEB67B3DFULL),
+        Pin<Tmpl<int* const>>("CanonProbe::Tmpl<int*const>", 0x3F7C5DD641F40488ULL),
+        Pin<Tmpl<const Position&>>("CanonProbe::Tmpl<const CanonProbe::Position&>", 0xD054E092B55B416BULL),
+        Pin<Tmpl<int[4]>>("CanonProbe::Tmpl<int[4]>", 0x0499B52A8803DD36ULL),
+        Pin<Tmpl<void (*)(int)>>("CanonProbe::Tmpl<void(*)(int)>", 0xF1C63D793CB357C1ULL),
+        Pin<Tmpl<void (Klass::*)(int) const>>("CanonProbe::Tmpl<void(CanonProbe::Klass::*)(int)const>",
+                                              0x5C71BEFFCDCF7BB5ULL),
+        Pin<std::array<int, 3>>("std::array<int,3>", 0xCB04EE78D83FE909ULL),
+        Pin<std::pair<int, float>>("std::pair<int,float>", 0x3B1695DDD566A283ULL),
+    };
+
+    SCOPED_TRACE(ToolchainName());
+    for (const PinnedIdentity& pin : pins)
+    {
+        EXPECT_EQ(pin.liveName, pin.name);
+        EXPECT_EQ(pin.liveHash, pin.hash) << pin.name;
+        // The table itself is self-consistent: the literal is the name's hash.
+        EXPECT_EQ(Astra::Detail::XXHash::XXHash64(pin.name), pin.hash) << pin.name;
+    }
 }
 
 // Name-keyed lookups take the canonical spelling a user would write.

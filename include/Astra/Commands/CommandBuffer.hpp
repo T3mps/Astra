@@ -1779,7 +1779,7 @@ namespace Astra
         explicit ParallelCommandBuffer(Registry* registry) :
             m_registry(registry),
             // Every instance gets a process-lifetime-unique id (never reused,
-            // 64-bit monotonic counter) -- see t_cache/ThreadCache below for
+            // 64-bit monotonic counter) -- see ThreadLocalCache()/ThreadCache below for
             // why this exists: it is NOT the same thing as m_registry and
             // must not be conflated with it.
             m_instanceId(s_nextInstanceId.fetch_add(1, std::memory_order_relaxed))
@@ -1811,14 +1811,15 @@ namespace Astra
             // pointer AND m_instanceId (see ThreadCache below) -- pointer
             // equality alone is not sufficient: if a ParallelCommandBuffer is
             // destroyed and a later instance happens to be allocated at the
-            // same address, `t_cache.context == this` can spuriously match a
+            // same address, `cache.context == this` can spuriously match a
             // STALE cache entry left behind by the destroyed instance,
             // returning a dangling CommandBuffer& (use-after-free). The
             // per-instance id can never repeat for the process lifetime, so
             // this cannot false-positive.
-            if (t_cache.context == this && t_cache.contextInstanceId == m_instanceId && t_cache.buffer != nullptr)
+            ThreadCache& cache = ThreadLocalCache();
+            if (cache.context == this && cache.contextInstanceId == m_instanceId && cache.buffer != nullptr)
             {
-                return *t_cache.buffer;
+                return *cache.buffer;
             }
 
             // Slow path: create new buffer for this thread
@@ -2094,10 +2095,11 @@ namespace Astra
             lock.unlock();
 
             // Update thread-local cache
-            t_cache.context = const_cast<ParallelCommandBuffer*>(this);
-            t_cache.contextInstanceId = m_instanceId;
-            t_cache.buffer = buffer;
-            t_cache.index = index;
+            ThreadCache& cache = ThreadLocalCache();
+            cache.context = const_cast<ParallelCommandBuffer*>(this);
+            cache.contextInstanceId = m_instanceId;
+            cache.buffer = buffer;
+            cache.index = index;
 
             return *buffer;
         }
@@ -2141,10 +2143,17 @@ namespace Astra
             size_t index = std::numeric_limits<size_t>::max();
         };
 
-        static thread_local ThreadCache t_cache;
+        // A function-local thread_local, not a static data member: Apple
+        // Clang emits the Darwin thread-local wrapper routine of an inline
+        // static thread_local member as a strong symbol in every translation
+        // unit that touches it, and ld64 rejects the duplicates. ThreadCache
+        // is constant-initialized and trivially destructible, so this costs
+        // no initialization guard.
+        static ThreadCache& ThreadLocalCache() noexcept
+        {
+            static thread_local ThreadCache cache;
+            return cache;
+        }
     };
-
-    // Thread-local storage definition
-    inline thread_local ParallelCommandBuffer::ThreadCache ParallelCommandBuffer::t_cache;
 
 } // namespace Astra

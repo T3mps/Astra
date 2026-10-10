@@ -1,0 +1,7 @@
+# The one premake pin. scripts/build.sh and scripts/build.ps1 download the
+# release named here and refuse it unless its SHA-256 matches. Bump the
+# version and all three hashes together.
+version 5.0.0-beta8
+linux   63edd3e7461eebdd45b500a3c7e8ad4e7a67d68f230010f9a97cbb71b4ec59c8
+macosx  fa73a46f093fa6f17494a3d063421aa6cae3ea825a61c62dd59fc2f07a256d03
+windows e64ce2ed8778e0098f63674cca61fe33941b5f0c8d9a4afd651152bdea3758ab

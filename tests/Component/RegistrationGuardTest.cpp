@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <Astra/Astra.hpp>
 
-namespace { struct alignas(128) OverAligned { float v[4]; }; }  // > CACHE_LINE_SIZE (64)
+namespace { struct alignas(2 * Astra::CACHE_LINE_SIZE) OverAligned { float v[4]; }; }  // > CACHE_LINE_SIZE on every target
 
 // The forceable arm of the over-alignment guard: ComponentRegistry must refuse
 // (not silently accept) a component whose alignof() exceeds CACHE_LINE_SIZE,
